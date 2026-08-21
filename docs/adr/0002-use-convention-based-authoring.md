@@ -1,0 +1,32 @@
+# ADR 0002: Use convention-based authoring
+
+- Status: accepted
+- Re-records: prototype ADR 0003 (alee792/hctl)
+- Extended by: [ADR 0008](0008-run-schedules-as-fresh-dispatch-tasks.md),
+  [ADR 0009](0009-import-vendored-agent-plugin-skills.md),
+  and [ADR 0015](0015-use-the-official-github-server-as-native-unmanaged-mcp.md)
+
+## Decision
+
+Make the authored directory layout the project API. Derive the agent name from
+the directory, load descriptive `instructions.md`, and discover optional
+authored paths such as Agent Skills directories at `skills/NAME/SKILL.md`,
+`tools/`, and immediate `subagents/` without a registry or required
+configuration file. Copy supported regular skill resources into each harness's
+project skill location. Keep harness-specific skill metadata beside `SKILL.md`
+only when the target has an honest native representation. When applying
+recognized vendor metadata to a different harness, copy it unchanged and warn
+that it may have no effect rather than translating or stripping it.
+
+## Context
+
+Authors may be nontechnical but can work with directories and common AI
+concepts such as instructions, skills, and tools. Repeating the filesystem
+inventory in configuration adds an internal concept and creates drift. Eve's
+filesystem-forward conventions provide the clearer precedent.
+
+## Consequence
+
+New authored concepts should use an obvious conventional directory before
+adding configuration. Configuration is reserved for settings the layout cannot
+express. Harness-specific filenames remain generated setup details.

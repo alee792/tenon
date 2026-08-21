@@ -1,0 +1,98 @@
+# Vision
+
+tenon makes an agent something you can read. An agent is a folder of
+plain-language files — instructions you review like a document, skills you
+compose by dropping in a directory — validated, versioned, and shared like any
+other source. `tenon apply` compiles that folder into a generated integration
+for the capable native harness you already trust, Claude Code or Codex,
+through thin vendor adapters and without replacing their model loops or
+interfaces.
+
+The author we serve understands files, directories, and common AI concepts —
+instructions, skills, tools — and should never need to learn manifests,
+registration, or harness configuration. Today that person's agent lives as
+vendor-specific configuration scattered through a workspace: hard to read,
+hard to review, and bound to one harness. tenon exists so the agent itself is
+the document — one legible folder that outlives any single vendor's format.
+
+The author is not always a person, and neither consumer outranks the other.
+An improvement loop — an agent or an optimizer revising an agent's own
+files — needs exactly what the human author needs: a legible diff,
+validation before anything runs, and a reproducible runtime. An optional
+agent manifest pins what the folder alone cannot express — harness version,
+model, tenon version, installed-package identities — so observations made
+outside tenon can be joined back to the exact configuration that produced
+them. Tenon is that loop's substrate, never the loop: it proves a revision is
+well-formed, not that it is an improvement, and it collects no transcripts,
+evaluations, or scores.
+
+Natural-language authorship is dependable because the toolchain is strict:
+as much plain language as possible, as little schema as necessary, and
+everything validated before it touches a workspace.
+
+There is one author and one capability ladder, not an author/developer split.
+An author starts by writing instructions and composing existing Agent Skills.
+Further up the ladder, a TypeScript, Python, or Go source file under `tools/`
+declares one schema-validated function; tenon-owned language hosts expose those
+functions to the selected harness through one managed MCP server, and nobody
+writes protocol code. The author may write that file directly or ask their
+harness to draft it. Either way the trust boundary stays with the author:
+validation proves the contract, not the behavior. An authored tool is the
+author's code — no different from any other code they adopt — and accepting
+one into `tools/` is a deliberate, reviewable act. Tenon can supply skills and
+managed tools that help review; it does not sandbox authored behavior or claim
+to make it safe.
+
+Operating an agent is a distinct role on the same artifact: credentials,
+integration packages, schedules, channels, and staged filesystems for
+deployment, each behind its own explicit guardrails. The operator journey is
+where portability is proven — the same folder that runs interactively applies
+unchanged to a headless dispatcher, a schedule clock, or a pinned harness
+image, with existing OCI build systems owning image construction, publication,
+and deployment.
+
+We bet that agent definitions converge on open, file-based formats such as
+Agent Skills and Agent Plugins, and tenon is the toolchain for that world:
+discovery, validation, composition, apply-and-drift discipline, and vendor
+adapters kept thin. Acquired components are reviewed, explicit, and
+inspectable. Tenon is not a marketplace, an automatic updater, a model runtime,
+or another chat UI.
+
+Each harness already reads its own native formats, so this product must
+answer why a folder needs a compiler. The answer is the crossing: one
+portable source of truth applied to any supported harness, proven valid
+before it touches a workspace, and kept honest afterward by drift detection.
+A harness vendor optimizes its own format; nobody else owns the crossing
+between them. The bet fails — and we would rather learn it early — if
+authors accept a per-vendor source of truth, if the open formats collapse
+back into vendor-owned ones, or if self-improving systems settle on closed,
+lab-internal configuration instead of open files.
+
+The measure of the vision is the first five minutes, the last mile, and the
+next revision: a new author goes from an empty directory to a working agent
+inside their harness in five minutes; the same folder later runs headless,
+scheduled, or staged without edits; and a revision applies, runs, and
+attributes to its exact configuration without human hands.
+
+## Boundary
+
+The selected native harness owns intelligence: model calls, context
+management, planning, native tools, approvals, interactive UX, and unmanaged
+MCP runtime behavior. Tenon owns the portable agent-project contract,
+dependency validation, generated harness integration, and tools routed through
+its managed boundary.
+
+Interactive authors work directly in Claude Code or Codex after tenon prepares
+the generated harness integration. Headless operators may place the turn
+dispatcher between an input source and a local harness process. The turn
+dispatcher does not become another chat UI or model loop. The conversational
+channel runtime — long-lived surfaces such as Discord managing several
+independent conversation lifecycles over that dispatcher — is a coherent
+second product built on this core, not part of it; it remains deterministic
+runtime coordination rather than an agent orchestrator.
+
+Acquiring or configuring a third-party component does not make it managed.
+Harness-native tools and MCP servers remain valid but unmanaged unless they
+deliberately cross a tenon-owned managed boundary. Tenon never claims that it
+can enforce instructions, inspect every native effect, or make model behavior
+safe from outside the harness.

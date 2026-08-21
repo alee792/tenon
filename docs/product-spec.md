@@ -1,0 +1,565 @@
+# Product specification
+
+- Status: the product contract. The `hctl` prototype (alee792/hctl) is the
+  frozen, read-only reference implementation.
+- Scope: the core product. The conversational channel runtime is a second
+  product, specified in the prototype repository.
+- Product: Tenon; the binary is `tenon`.
+- Initial harnesses: Claude Code and Codex CLI.
+
+## User and job
+
+Two consumers author the same artifact, and both receive balanced
+consideration: a person, and an improvement loop revising an agent's
+files. A decision may favor one when the tradeoff is evaluated and
+recorded — never by default. The human author understands basic files and
+directories and common AI concepts such as instructions, skills, and
+tools, and should not need to understand registration, manifests, or
+harness configuration. The improvement loop needs validation before
+anything runs, a reproducible pinned closure, and attribution of every run
+to its exact configuration; the agent manifest and machine-consumable
+validation serve it directly. There is one capability ladder, not an
+author/developer split: the author starts with instructions and composed
+skills, and may climb to typed tool functions — written directly or
+drafted by their harness. Validation proves a tool's contract, not its
+behavior; adopting one remains the author's deliberate, reviewable act,
+like any other code.
+
+Operating is a distinct role on the same artifact: credentials, integration
+packages, schedules, and staged filesystems carry their own explicit
+guardrails. The author defines one filesystem-authored agent project, applies
+it to a chosen workspace, and proves it interactively in Claude Code or
+Codex; the operator runs the same setup headlessly, which is where
+portability is proven.
+
+## Product principles
+
+1. The agent project is legible, versionable, portable source and is not
+   coupled to the repository that stores it.
+2. Common behavior is portable; harness-specific differences are explicit.
+3. Compilation and validation happen before harness files are written or a
+   turn dispatcher starts.
+4. Generated native files are disposable and visibly tool-owned.
+5. Native harness tools remain available and explicitly unmanaged.
+6. Policy applies only at managed-tool and durable-state boundaries.
+7. Interactive users remain in the native harness interface.
+8. Unsupported harness behavior is reported without rewriting valid authored
+   source or pretending that tenon enforces it.
+9. Conventional files register behavior without a second inventory.
+10. Author-facing language stays concrete; runtime terminology remains
+    internal.
+
+## What this specification binds
+
+This specification binds authored formats and functional responsibilities,
+not interface shape. Authored project formats are exact — the folder is
+the portable convention, and its filenames and schemas are the contract.
+The tool's own surface is specified by responsibility: validate before
+mutation, compile to native integration, pin and verify the runtime
+closure, attribute every run to its exact configuration, dispatch turns,
+and stage filesystems. The command names, flags, file encodings, and
+output framing shown below are the reference rendering of those
+responsibilities: a conforming implementation may expose them as a CLI, a
+library, or a protocol server, provided every responsibility and
+acceptance item holds and every machine-facing output stays stable and
+parseable. The reference rendering is deliberately file-and-process
+shaped because files, processes, and exit codes are the one interface a
+person, a harness, and an improvement loop already share.
+
+## The authored project
+
+Authoring is filesystem-forward and convention-driven. A project is a
+directory; the directory name supplies the agent name, normalized to
+lowercase hyphenated words. The full component set:
+
+```text
+my-agent/
+  instructions.md          # optional; see the root rule below
+  skills/                  # Agent Skills directories
+  plugins/                 # complete publisher-authored Agent Plugin packages
+  tools/                   # one typed function per TS/Python file or Go dir
+  subagents/               # one instructions.md per immediate subagent
+  connections/             # one <name>.md per standalone MCP connection
+  schedules/               # nested Markdown cron tasks
+  harnesses/               # literal harness-specific native files
+  channels/                # second product; specified separately
+```
+
+**Instructions.** An agent root is proven one of two ways: by a present
+`instructions.md`, or by a supplied agent manifest whose expected source
+fingerprint matches the directory. A directory with neither proof is not
+an agent project. When present, `instructions.md` starts
+with YAML frontmatter carrying one plain `description` (and an optional
+Boolean `friction-notes` opting into the friction inbox below), followed
+by a non-empty Markdown body; generated always-on instructions contain the
+body, not the frontmatter. When absent, the agent generates no always-on
+instructions — an empty system prompt is a legitimate candidate for an
+improvement loop to try — and the directory name still supplies the agent
+name. This is a recorded tradeoff under the balance rule: the file remains
+the human journey's front door, while its requiredness no longer
+forecloses part of the loop's search space.
+
+**Skills.** Each immediate directory under `skills/` is one skill following
+the open [Agent Skills specification](https://agentskills.io/specification):
+a `SKILL.md` whose frontmatter `name` matches the directory, plus arbitrary
+regular-file resources. Adding or removing a directory updates the compiled
+project without registration. Resources copy byte-for-byte with executable
+intent preserved. Portable fields validate to the standard's rules;
+recognized vendor fields are preserved unchanged with a warning when the
+selected harness does not document honoring them — tenon never translates,
+strips, or enforces them. The dated per-field behavior matrix is
+[skill compatibility](workbench/skill-compatibility.md).
+
+**Plugins.** An [Agent Plugin v1](https://agent-plugins.org/specification) is
+one complete publisher-authored package. A consumer vendors the reviewed
+directory intact beneath `plugins/<storage-name>/`; review, pinning, and
+provenance belong to the author's version control. Tenon records no dependency
+lock and performs no network acquisition. Each plugin requires a bounded
+`plugin.json` targeting the canonical v1.0.0 schema, validated locally
+without fetching. Skills import only from the plugin's fixed `skills/`
+location; root skills load first and the first skill name wins, with later
+collisions skipped and warned, never renamed. Invalid components are skipped
+independently with authored-path diagnostics.
+
+An accepted plugin may carry a bounded `mcp.json` (canonical v1.0.0 MCP
+schema; `stdio` and `streamable-http` supported, SSE warned and skipped).
+Accepted servers are emitted as native project MCP configuration — the
+harness owns startup, approval, transport, authentication, and runtime
+behavior; tenon does not proxy, supervise, or audit plugin MCP calls. `managed`
+is reserved; exact name collisions are skipped with a warning. Plugin-relative
+commands stay inside the real plugin tree; tenon expands exactly
+`${PLUGIN_ROOT}` and `${PLUGIN_DATA}` once and provides an owner-only
+persistent data directory per agent and plugin. Remote URLs are absolute
+HTTPS (loopback excepted), without user info or fragments; headers are
+literal package-visible values and must not contain secrets.
+
+**Tools.** Visible `tools/*.ts` and `tools/*.py` files and `tools/NAME/tool.go`
+directories each declare one tool; filenames supply tool names, with
+underscores exposed as hyphens. TypeScript exports a default object with
+`description`, strict Zod `inputSchema` and `outputSchema`, and `execute`;
+Python exports `description`, Pydantic `Input`/`Output`, and `execute`; Go
+exports `Description`, `Input`, `Output`, and `Execute`. Dependencies use the
+native lockfiles (`deno.json`/`deno.lock`, `pyproject.toml`/`uv.lock`,
+`go.mod`/`go.sum`); there is no authored manifest, registry, or duplicated
+tool inventory.
+
+**Subagents.** Each immediate directory under `subagents/` contains only an
+`instructions.md` with the same description-and-body contract plus optional
+`effort: low|medium|high`, emitted to each harness's native effort field and
+omitted when absent. One level, native inheritance of the parent's generated
+instructions, skills, managed tools, and permissions. Child skills, tools,
+dependencies, and nested subagents are rejected, not ignored. Subagent and
+tool names may not collide.
+
+**Connections.** Each `connections/<name>.md` authors one standalone native
+MCP connection; the filename supplies the connection and native server name
+(`managed` reserved). Closed YAML frontmatter declares `type: mcp` plus
+exactly one target form: an installed stdio target (`package` +
+`capability`, resolved offline through the integration store, whose stable
+server name must equal the filename) or a credential-free remote target
+(`transport: streamable-http` + absolute HTTPS `url`, validated without
+contact). No headers, tokens, OAuth, timeouts, or tool filters in v1.
+Optional trimmed Markdown after the frontmatter (at most 1,024 characters) is
+model-facing usage context rendered once into generated instructions, with
+one boundary statement that the native harness owns MCP startup, trust,
+approval, authentication, discovery, calls, and effects. Name collisions with
+`managed`, another connection, or a plugin server fail before mutation.
+
+Authors need not hand-edit native configuration:
+
+```text
+tenon connection add AGENT NAME --package PACKAGE --capability CAPABILITY [--context TEXT]
+tenon connection add AGENT NAME --url HTTPS_URL [--context TEXT]
+tenon connection status AGENT [NAME]
+tenon connection remove AGENT NAME
+```
+
+Commands take the exact positional agent root, never search ancestors or
+choose a harness, and finish by directing the author to run `tenon apply` for
+each intended workspace. There is no update command; the Markdown is ordinary
+versioned source.
+
+The GitHub connection is the canonical installed target: the official
+`github/github-mcp-server` executable, installed as an integration package,
+emitted into native Claude and Codex configuration with server name `github`
+and rejection on collision. Authentication is deliberately unmanaged: the
+operator injects `GITHUB_PERSONAL_ACCESS_TOKEN` into the harness launch
+environment, the official server reads it directly, and tenon never writes it
+into source, generated files, state, staging, logs, or evidence. **The
+harness, model-accessible execution tools, and processes inheriting that
+environment may read or transmit the PAT; tenon does not claim otherwise, and
+a read-only workspace does not constrain GitHub effects.** Fine-grained
+scope, short expiration, native-harness trust, and operator judgment are the
+security boundary. The operator journey, lifecycle, and troubleshooting live
+in [the native GitHub MCP journey](github-native-mcp.md).
+
+**Schedules.** Nested Markdown files under `schedules/`; the relative path
+without `.md` is the schedule name. Strict frontmatter carries exactly one
+`cron` string (standard five-field, bounded printable ASCII); the non-empty
+body is the task prompt. Apply validates and fingerprints schedules but
+starts no clock. See headless operation below for execution.
+
+**Harness-specific files.** `harnesses/claude/.claude/` and
+`harnesses/codex/.codex/` carry intentionally nonportable native project
+files, copied byte-for-byte to only the selected harness at the same
+workspace-relative paths. Tenon does not parse, merge, or validate their
+semantics. Tenon-owned destinations remain reserved (Claude `.claude/skills/`
+and `.claude/agents/`; Codex `.codex/config.toml` and `.codex/agents/`),
+including case-folded aliases. Authors must not place credentials in these
+files; tenon does not claim reliable secret detection.
+
+**Bounds.** Authored source is bounded by implementation-owned safety
+ceilings rather than ordinary-use quotas; exceeding a ceiling fails before
+workspace mutation:
+
+| Surface | Count ceiling | File and aggregate ceilings |
+| --- | ---: | --- |
+| Root instructions | One optional file (the root needs instructions or a manifest) | 128 KiB |
+| Root and imported skills | 256 aggregate | 1,024 files per skill; 8,192 files and 64 MiB across the set; `SKILL.md` 128 KiB; other resources 16 MiB each |
+| Authored tools | 128 | 1,024 source and dependency files; 1 MiB each and 64 MiB aggregate |
+| Immediate subagents | 128 | 128 KiB each and 16 MiB aggregate |
+| Schedules | 256 | 128 KiB per source, including a 32 KiB prompt; 16 MiB aggregate |
+| Vendored plugins | 128 directory entries | `plugin.json` and `mcp.json` 128 KiB each; 1,024 entries per plugin `skills/` location |
+| Accepted plugin MCP servers | 128 aggregate | Generated native MCP configuration at most 8 MiB |
+| Selected harness-specific files | 1,024 | 1 MiB each and 8 MiB aggregate |
+| Standalone MCP connections | 128 | 8 KiB per source; context at most 1,024 characters |
+| Agent manifest | One optional file, supplied at application | 32 KiB |
+
+Everywhere: authored entries are bounded regular files and real directories
+with valid UTF-8 relative paths; symlinks are never followed and are rejected
+even where a native harness supports them, so portable source cannot escape
+the agent project.
+
+## Apply and handoff
+
+```sh
+tenon apply AGENT --workspace WORKSPACE --harness <claude|codex>
+```
+
+Apply validates the authored project, the target harness, tool definitions,
+and locked dependencies, then materializes owned native files in the selected
+workspace so the user starts the harness normally. `--workspace` defaults to
+the agent directory; the agent source and the workspace are independent.
+Claude receives `CLAUDE.md`, `.mcp.json`, `.claude/skills/`, and
+`.claude/agents/`; Codex receives `AGENTS.md`, `.codex/config.toml`,
+`.agents/skills/`, and `.codex/agents/`. Generated files are visibly
+tool-owned and disposable. Apply refuses to overwrite hand-authored native
+files or any tenon-owned file modified since the previous apply, and
+reapplying identical source is deterministic. All authored inputs join one
+source fingerprint recorded with the apply, so stale or edited generated
+setup fails closed. Codex project trust remains the user's native decision;
+apply never edits global harness configuration or trusts a project on the
+user's behalf.
+
+`tenon validate AGENT --harness <claude|codex>` runs the same validation as
+apply without writing anything: it loads and bounds the project, checks
+tool contracts and, when a manifest is present, the pinned closure, and
+exits nonzero on failure. Diagnostics are bounded prose by default, with a
+machine-readable mode (one JSON diagnostic per line in the reference
+rendering) carrying a stable identifier, the authored path, and the exact
+rule violated; apply's own failures carry the same identifiers. Prose
+stays primary for people; the stable identifiers exist because a drafting
+harness or an improvement loop correcting its own files cannot reliably
+parse prose. The binding requirements are parity with apply, stability of
+the identifiers, and machine readability — not the flag or the framing.
+
+## Agent manifest
+
+An optional bounded agent manifest (`manifest.json` in the reference
+rendering) pins the runtime closure that the directory alone cannot
+express. It belongs to application, not to the definition: the same source
+directory applies under different manifests — one commit crossed with many
+pin sets — without the definition changing. The manifest is therefore
+supplied to validate, apply, and run rather than stored inside the agent
+source, and it lives wherever its operator or loop versions it. Its
+responsibility, not its encoding or location, is the contract: it
+identifies and pins; it never lists. The directory remains the sole
+registry of the agent's components, and a supplied manifest whose expected
+fingerprint matches the directory also proves the agent root, so a
+generated candidate need not carry instructions it does not want.
+
+Its closed schema records a schema version, the agent name, the expected
+source fingerprint, the tenon version, and — per selected harness — the
+harness executable version, a model identifier, integration package
+identities (package id plus manifest SHA-256), and authored-tool runtime
+versions (Deno, uv, Go) where the project uses them.
+
+`tenon manifest write AGENT --harness ...` records the currently resolved
+closure to a caller-chosen path; the result is an ordinary versioned file
+and may be edited directly. When a manifest is supplied, validate, apply,
+and every tenon-owned process open verify the resolved closure against it
+and fail closed naming the exact drifted pin; when none is supplied,
+behavior is unchanged. The model pin is
+emitted through the selected harness's documented configuration and
+recorded in provenance; the harness owns model selection, and tenon does not
+claim to verify which model actually served a turn.
+
+Every apply record and dispatch lifecycle event carries the source
+fingerprint and, when present, the manifest identity, so observation made
+outside tenon — transcripts, evaluations, selection among revisions — can be
+joined to the exact configuration that produced it. Tenon retains none of
+that observation: no transcripts, no evaluations, no scores. An improvement
+loop revising the agent's files is an author like any other: its revision
+is validated for form before anything runs, and its merit is judged outside
+tenon. The friction inbox remains a supplementary human-facing channel, not
+the loop's signal path.
+
+The applied agent is not told how it was set up. Tenon never renders the
+manifest, its pins, model identity, or provenance into generated
+instructions or any other model-facing content: setup metadata exists for
+the operator and the loop, not for the running agent. Whether a harness's
+native tools can read files an operator leaves on disk remains native
+behavior, and tenon does not claim to blind a harness to its environment.
+
+A pin is an axis of variation, not an editable surface: a loop may try a
+different model or harness version by changing a pin, while the components
+it can edit remain the authored files. Lineage and population management
+belong to version control: a candidate is a source revision crossed with a
+supplied manifest, each versioned wherever its owner keeps it, and tenon
+neither records lineage nor selects among candidates. How variants are
+isolated — worktrees, containers, or sandboxes — is the operator's
+infrastructure choice; tenon requires only that each variant is a directory
+that applies deterministically.
+
+## Managed tool boundary
+
+One stdio MCP server exposes the bounded built-in `echo` tool, the optional
+`record-friction` built-in, and the authored tools to both harnesses. Inputs
+and outputs are schema-validated; audit output carries a safe request
+identifier, tool name, and lifecycle outcome — never arguments or output. One
+long-lived host per authored language serves calls; authors never write
+protocol code. The boundary is additive: it does not disable, authorize,
+observe, or retry harness-native tools.
+
+Codex treats the generated managed server as required and delegates its tool
+approval to tenon, so an authorized managed call does not draw a second
+harness prompt; every other generated MCP entry — plugin, connection, or
+installed — keeps native per-call prompt approval. This exemption applies
+only to the managed server and does not affect native or unrelated MCP
+tools.
+
+`record-friction` is advertised only when root instructions opt in with
+`friction-notes: true`. It accepts one bounded UTF-8 note and stores it in a
+private, owner-only, per-agent local inbox outside both agent source and
+workspace, write-only to models, never automatically read, transmitted, or
+applied. It is not telemetry, memory, or evidence. At most 256 records are
+retained per agent, and the store never overwrites or silently evicts.
+
+Secret-bearing managed operations do not exist yet. Before one ships, the
+secretless operation broker boundary applies
+([ADR 0006](adr/0006-use-a-local-secretless-operation-broker.md)): opaque
+references resolve only at authorized managed invocations, values never reach
+tool hosts, harnesses, models, generated files, or audit, and no backend or
+broker code is scaffolded until a concrete operation is selected.
+
+## Integration packages
+
+Machine-installed third-party integrations use a metadata-first package
+contract distinct from vendored `plugins/`. A bounded schema-version-1
+manifest carries identity, provenance, a tenon compatibility range, exact
+platform artifacts (size and SHA-256 pinned), the expected executable
+identity, and closed versioned capability declarations. Tenon validates
+metadata without opening artifacts, fetching URLs, or executing package code.
+
+`tenon integration install SOURCE --trust operator` is the only trust and
+installation journey: a local directory or archive containing
+`integration.json`, or artifacts fetched only from exact pinned HTTPS URLs
+without redirects. There is no registry, package script, dependency
+resolver, or signature claim. Installed state lives in one owner-only,
+content-addressed, offline-verified store shared across agents and
+workspaces; `inspect`, `verify`, `list`, `enable`, `disable`, `update`, and
+`remove` operate on that store, and verification is re-run before every use.
+Portable agent source can never choose an install source, install or enable a
+package, grant trust, or carry a credential; apply gains no network path.
+
+Recognized capabilities are closed schemas. The core implements `native-mcp`
+v1: a stable native server name, executable, bounded literal launch data,
+required ambient environment names without values, and supported harness
+targets — consumed by installed connections. `channel-adapter` v1 belongs to
+the channel product, specified in the prototype repository: the core does
+not implement its recognition and it is not acceptance-gating; it is
+reintroduced only if the channel product is ported onto this core. The native harness owns
+process lifecycle, credentials, approvals, calls, and effects for everything
+a package launches. Required ambient names are diagnostic metadata, not a
+credential channel; resolved values never enter generated files, package
+state, staging, or evidence.
+
+## Headless operation
+
+```sh
+printf '%s\n' '{"input_id":"x-1","text":"..."}' \
+  | tenon run AGENT --workspace WS --harness <claude|codex> --input jsonl
+```
+
+The turn dispatcher accepts bounded JSONL input, each line carrying a
+caller-owned `input_id` and `text`. Input is durably accepted and queued
+while a turn is active, processed one FIFO turn per conversation, and mapped
+to a resumable native session; ordered JSONL events are emitted. A repeated
+input ID deduplicates within its conversation. After restart, active work
+without a proven terminal result is uncertain and never silently retried.
+Dispatch state is one owner-only file per workspace.
+
+Schedules execute two ways, both requiring current generated setup:
+
+```sh
+tenon schedule trigger AGENT NAME --workspace WS --harness codex \
+  --input-id OCCURRENCE_ID --turn-timeout 90s --timeout 2m
+tenon schedule run AGENT --workspace WS --harness codex
+```
+
+`trigger` dispatches one occurrence under a caller-owned stable ID: each
+accepted occurrence opens a fresh native task session, duplicates return the
+retained outcome without opening a harness, and the bounded turn deadline
+aborts a stalled process while durably recording the occurrence as uncertain
+with its reason. `run` is an explicit foreground UTC clock: standard cron
+evaluated in UTC, first occurrence strictly after startup, no downtime or
+clock-jump backfill, no overlap for one schedule, a local lock excluding a
+second clock for the same workspace/agent/harness, and graceful drain on
+signals. Lifecycle output is bounded and never contains model text. No
+daemon, missed-run replay, or hosted delivery runtime.
+
+## Staged agent filesystems
+
+`tenon stage AGENT --harness <claude|codex> --output DIR` prepares one
+complete runnable filesystem tree at canonical paths for an existing OCI
+builder:
+
+```dockerfile
+FROM <tenon harness image> AS build
+COPY . /agent
+RUN tenon stage /agent --harness codex --output /out/agent
+
+FROM DOCUMENTED_COMPATIBLE_BASE
+COPY --from=build /out/agent/opt/ /opt/
+COPY --from=build --chown=65532:65532 /out/agent/workspace/ /workspace/
+COPY --from=build --chown=65532:65532 /out/agent/home/tenon/ /home/tenon/
+USER 65532:65532
+ENTRYPOINT ["/opt/tenon/bin/agent-entrypoint"]
+```
+
+The staged tree carries tenon, the selected harness, immutable agent source,
+the generated integration and apply record, an entrypoint, an artifact
+manifest, and only the execution closure the agent's tools actually need —
+no build toolchains, caches, credentials, login state, trust decisions, or
+conversation state. Staging is deterministic for identical pinned inputs,
+verifies that preparation did not mutate authored source, and publishes with
+one rename only after the manifest is complete. The entrypoint verifies
+runtime identity, generated integration, and source fingerprint before a
+turn. Tenon does not construct OCI layers, contact registries, publish, sign,
+deploy, or operate images, and publishing a harness image requires current
+permission to redistribute that harness.
+
+## Installation and distribution
+
+The first supported platform is `darwin-arm64`. The exact `vX.Y.Z` tag names
+`tenon_X.Y.Z_darwin_arm64.tar.gz` (one executable at the archive root) and its
+`SHA256SUMS` manifest; the user verifies, extracts to a stable `PATH`
+location, and runs `tenon apply`. Generated MCP configuration records the
+resolved absolute executable path, so moving the binary requires reapplying.
+`go install` is not a supported end-user journey, and there is no `tenon
+package` command: agent source and lockfiles are inputs to `apply`, while
+generated hosts and dependency environments remain disposable
+workspace-local caches.
+
+## Deferred bets
+
+Recorded once here; none is scaffolded until its trigger arrives:
+
+- **Proposals** — inert, workspace-local, human-reviewed improvement
+  records; a future capture tool must remain additive, never apply a diff,
+  and never claim reliable secret detection. The prototype's ADR 0008
+  records the full convention. Reviewed when an author or improvement loop
+  needs a mutation record richer than a branch; falsified — and deleted —
+  if version-control review proves sufficient.
+- **Secretless operation broker** — the boundary for the first secret-bearing
+  managed operation ([ADR 0006](adr/0006-use-a-local-secretless-operation-broker.md)).
+  Reviewed when that operation is selected; falsified if native harnesses
+  ship an equivalent credential boundary first.
+- **Post-run summaries** — must reference native logs rather than duplicate
+  transcripts. Reviewed when a harness exposes stable runtime IDs;
+  falsified if native logs remain sufficient on their own.
+
+## Failure and safety behavior
+
+- Missing, stale, ambiguous, or edited generated harness integrations fail
+  closed.
+- Input, output, queue, process lifetime, state size, and protocol lines are
+  bounded.
+- Durable state is owner-readable only and written atomically.
+- Process failure is distinct from a completed or failed model turn.
+- An uncertain external effect is never described as exactly-once or retried
+  without a target idempotency contract.
+- Tenon-owned diagnostics never expose credentials, private prompts, or raw
+  process output; native harness and external-server diagnostics remain
+  outside that claim.
+- Tenon never claims to enforce instructions, inspect native effects, sandbox
+  authored code, or make model behavior safe from outside the harness.
+
+## Acceptance
+
+Every stated behavior in this specification binds; the list below is the
+proof skeleton, not the whole contract. The core is complete when
+credential-free tests (fake harness processes; no live model calls) prove:
+
+1. One authored project compiles deterministically for both harnesses, and
+   apply produces native, discoverable files while refusing conflicts and
+   modified-file overwrites; a directory proven by neither instructions
+   nor a supplied matching manifest is refused as not an agent project,
+   and an instructions-free project generates an empty always-on surface
+   rather than failing.
+2. Both generated integrations expose the same managed MCP tool surface, and
+   a mixed TypeScript/Python/Go project is prepared once per apply with one
+   host process per language.
+3. Agent source applies outside its own directory: generated files and
+   execution use the workspace while discovery stays rooted in source.
+4. Subagents generate natively with inheritance and exact effort mapping,
+   and child skills, tools, dependencies, and nested subagents are rejected
+   rather than ignored; skills and their resources round-trip byte-for-byte
+   with executable intent, vendor metadata preserved and warned;
+   harness-specific files round-trip only to their selected harness with
+   full ownership protection.
+5. Plugin skills and plugin MCP declarations import with deterministic
+   collision handling and isolated component failure.
+6. Connections generate exact native configuration for installed and remote
+   targets without contacting anything; a name collision with `managed`,
+   another connection, or a plugin server fails before mutation; and a
+   conspicuous fake ambient value never appears in generated files, state,
+   staging, or evidence.
+7. Headless dispatch durably queues FIFO input, deduplicates input IDs,
+   resumes sessions, and marks unproven restart work uncertain.
+8. Schedules validate and fingerprint identically for both harnesses;
+   triggers deduplicate stable occurrence IDs, open fresh sessions, honor
+   turn deadlines with retained uncertainty, and the UTC clock admits only
+   current non-overlapping occurrences and drains on shutdown.
+9. Staging produces a deterministic, credential-free, minimal runnable tree
+   whose entrypoint verifies identity and fingerprint before a turn;
+   preparation never mutates authored source, and publication is one rename
+   only after the manifest is complete.
+10. Managed audit output remains content-free.
+11. A supplied agent manifest is verified before apply and before every
+    tenon-owned process open: a drifted harness version, package identity,
+    or source fingerprint fails closed naming the exact pin; writing the
+    manifest for an unchanged closure is byte-identical; an unsupplied
+    manifest changes nothing; and no pin, fingerprint, or provenance value
+    appears in model-facing generated content.
+12. Validate reports the same failures as apply without mutating anything,
+    and its structured diagnostics carry stable identifiers and authored
+    paths that match apply's own failures.
+
+## Explicit non-goals
+
+- A model loop, context manager, or cross-harness chat UI
+- A marketplace, automatic updater, network acquisition, or dependency lock
+  for vendored components
+- Claude Agent SDK or hosted OpenAI agent runtimes
+- Background or distributed schedule clocks, workflows, independently
+  configured nested subagents, or deployment orchestration
+- Building OCI manifests or layers, publishing or signing images, or hosted
+  image operation
+- Governance claims over native harness tools
+- Evaluations, scoring, transcript retention, or selection among agent
+  revisions — tenon is an improvement loop's substrate, never the loop
+- Hosted secret managers and model-visible secret-bearing managed operations
+- GitHub OAuth or GitHub App enrollment, a managed MCP proxy, credential
+  brokering, or per-call tenon authorization
+- Automatic or unreviewed promotion of agent-authored improvements
