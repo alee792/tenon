@@ -23,6 +23,9 @@ type GeneratedFile struct {
 	// Path is relative to the workspace root.
 	Path    string
 	Content []byte
+	// Executable files are written mode 0755 instead of 0644. The intent is
+	// part of the owned state: a mode-only change is a source change.
+	Executable bool
 }
 
 // Driver is the seam between the portable project and one native harness.
@@ -36,15 +39,22 @@ type Driver interface {
 }
 
 // Record is the durable apply record: schema version, identity, the source
-// fingerprint, and the hash of every owned generated file. It deliberately
+// fingerprint, and the owned state of every generated file. It deliberately
 // carries no timestamps so identical applies are byte-identical.
 type Record struct {
-	Schema      int               `json:"schema"`
-	Agent       string            `json:"agent"`
-	Source      string            `json:"source"`
-	Harness     string            `json:"harness"`
-	Fingerprint string            `json:"fingerprint"`
-	Files       map[string]string `json:"files"`
+	Schema      int                  `json:"schema"`
+	Agent       string               `json:"agent"`
+	Source      string               `json:"source"`
+	Harness     string               `json:"harness"`
+	Fingerprint string               `json:"fingerprint"`
+	Files       map[string]OwnedFile `json:"files"`
+}
+
+// OwnedFile is the recorded state of one owned generated file: content hash
+// and executable intent.
+type OwnedFile struct {
+	Hash       string `json:"hash"`
+	Executable bool   `json:"executable"`
 }
 
 // RecordPath is the owner-only apply record location for one workspace and
@@ -116,17 +126,24 @@ func Apply(p *agentproject.Project, workspace string, driver Driver) (*Result, *
 		Source:      p.Root,
 		Harness:     driver.Harness(),
 		Fingerprint: p.Fingerprint,
-		Files:       map[string]string{},
+		Files:       map[string]OwnedFile{},
 	}
 	for _, f := range files {
-		record.Files[f.Path] = hashBytes(f.Content)
+		desired := OwnedFile{Hash: hashBytes(f.Content), Executable: f.Executable}
+		record.Files[f.Path] = desired
 		full := filepath.Join(ws, f.Path)
 		current, err := os.ReadFile(full)
-		if err == nil && hashBytes(current) == record.Files[f.Path] {
-			result.Written = append(result.Written, f.Path)
-			continue // identical reapply leaves the file untouched
+		if err == nil && hashBytes(current) == desired.Hash {
+			if info, err := os.Stat(full); err == nil && executable(info.Mode()) == desired.Executable {
+				result.Written = append(result.Written, f.Path)
+				continue // identical reapply leaves the file untouched
+			}
 		}
-		if err := writeAtomic(full, f.Content, 0o644); err != nil {
+		mode := os.FileMode(0o644)
+		if f.Executable {
+			mode = 0o755
+		}
+		if err := writeAtomic(full, f.Content, mode); err != nil {
 			return nil, diags, fmt.Errorf("writing %s: %w", f.Path, err)
 		}
 		result.Written = append(result.Written, f.Path)
@@ -136,6 +153,7 @@ func Apply(p *agentproject.Project, workspace string, driver Driver) (*Result, *
 			return nil, diags, fmt.Errorf("removing stale generated %s: %w", path, err)
 		}
 		result.Removed = append(result.Removed, path)
+		removeEmptyParents(ws, path)
 	}
 
 	recordBytes, err := json.MarshalIndent(record, "", "  ")
@@ -154,8 +172,8 @@ func Apply(p *agentproject.Project, workspace string, driver Driver) (*Result, *
 
 // checkOwnership reports a conflict diagnostic when the workspace file at
 // path cannot be safely replaced or removed: it exists without a record
-// (hand-authored) or its bytes differ from the recorded owned hash
-// (modified since the previous apply).
+// (hand-authored) or its bytes or executable bit differ from the recorded
+// owned state (modified since the previous apply).
 func checkOwnership(ws, path string, previous *Record, diags *diagnostics.List) bool {
 	full := filepath.Join(ws, path)
 	info, err := os.Lstat(full)
@@ -167,11 +185,12 @@ func checkOwnership(ws, path string, previous *Record, diags *diagnostics.List) 
 			"the existing workspace entry is not a regular file and tenon never replaces it")
 		return true
 	}
-	recorded := ""
+	var recorded OwnedFile
+	var owned bool
 	if previous != nil {
-		recorded = previous.Files[path]
+		recorded, owned = previous.Files[path]
 	}
-	if recorded == "" {
+	if !owned {
 		diags.Errorf("apply.conflict.unowned", path,
 			"a hand-authored native file already exists and tenon refuses to overwrite it; move it aside or choose another workspace")
 		return true
@@ -181,12 +200,28 @@ func checkOwnership(ws, path string, previous *Record, diags *diagnostics.List) 
 		diags.Errorf("apply.conflict.unowned", path, "the existing workspace file could not be read: %v", err)
 		return true
 	}
-	if hashBytes(current) != recorded {
+	if hashBytes(current) != recorded.Hash || executable(info.Mode()) != recorded.Executable {
 		diags.Errorf("apply.conflict.modified", path,
 			"the tenon-owned file was modified since the previous apply; tenon fails closed rather than discard the edit")
 		return true
 	}
 	return false
+}
+
+func executable(mode os.FileMode) bool {
+	return mode.Perm()&0o111 != 0
+}
+
+// removeEmptyParents removes directories left empty by a stale removal,
+// walking the workspace-relative parent chain upward. os.Remove refuses a
+// non-empty directory, so the first failure is the stop condition; the
+// workspace root ("." relative) and .tenon are never candidates.
+func removeEmptyParents(ws, path string) {
+	for dir := filepath.Dir(path); dir != "." && dir != ".tenon" && dir != string(filepath.Separator); dir = filepath.Dir(dir) {
+		if os.Remove(filepath.Join(ws, dir)) != nil {
+			return
+		}
+	}
 }
 
 func readRecord(path string) (*Record, error) {

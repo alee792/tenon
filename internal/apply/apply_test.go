@@ -1,8 +1,10 @@
 package apply
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/alee792/tenon/internal/agentproject"
@@ -59,6 +61,118 @@ func TestApplyWritesFilesAndOwnerOnlyRecord(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("apply record mode = %v, want owner-only 0600", info.Mode().Perm())
+	}
+	record := readTestRecord(t, ws)
+	owned, ok := record.Files["CLAUDE.md"]
+	if !ok || !strings.HasPrefix(owned.Hash, "sha256:") || owned.Executable {
+		t.Fatalf("recorded owned state = %+v, %v", owned, ok)
+	}
+}
+
+func readTestRecord(t *testing.T, ws string) *Record {
+	t.Helper()
+	raw, err := os.ReadFile(RecordPath(ws, "fake"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var r Record
+	if err := json.Unmarshal(raw, &r); err != nil {
+		t.Fatal(err)
+	}
+	return &r
+}
+
+func TestApplyWritesExecutableFileWithModeAndRecord(t *testing.T) {
+	ws := t.TempDir()
+	driver := fakeDriver{files: []GeneratedFile{
+		{Path: "tools/run.sh", Content: []byte("#!/bin/sh\n"), Executable: true},
+	}}
+
+	if _, diags, err := Apply(project(t), ws, driver); err != nil || diags.HasErrors() {
+		t.Fatalf("apply failed: %v %v", err, diags.All())
+	}
+	info, err := os.Stat(filepath.Join(ws, "tools/run.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o755 {
+		t.Fatalf("executable file mode = %v, want 0755", info.Mode().Perm())
+	}
+	owned, ok := readTestRecord(t, ws).Files["tools/run.sh"]
+	if !ok || !owned.Executable {
+		t.Fatalf("recorded owned state = %+v, %v, want executable intent", owned, ok)
+	}
+}
+
+func TestApplyRefusesModeOnlyModifiedOwnedFile(t *testing.T) {
+	ws := t.TempDir()
+	driver := fakeDriver{files: []GeneratedFile{{Path: "CLAUDE.md", Content: []byte("generated\n")}}}
+	if _, diags, err := Apply(project(t), ws, driver); err != nil || diags.HasErrors() {
+		t.Fatalf("first apply failed: %v %v", err, diags.All())
+	}
+	if err := os.Chmod(filepath.Join(ws, "CLAUDE.md"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	result, diags, err := Apply(project(t), ws, driver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result != nil {
+		t.Fatal("expected refusal")
+	}
+	requireErrorID(t, diags, "apply.conflict.modified")
+}
+
+func TestApplyExecutableIntentChangeUpdatesMode(t *testing.T) {
+	ws := t.TempDir()
+	p := project(t)
+	content := []byte("#!/bin/sh\n")
+	first := fakeDriver{files: []GeneratedFile{{Path: "tools/run.sh", Content: content}}}
+	if _, diags, err := Apply(p, ws, first); err != nil || diags.HasErrors() {
+		t.Fatalf("first apply failed: %v %v", err, diags.All())
+	}
+
+	second := fakeDriver{files: []GeneratedFile{{Path: "tools/run.sh", Content: content, Executable: true}}}
+	if _, diags, err := Apply(p, ws, second); err != nil || diags.HasErrors() {
+		t.Fatalf("intent-only reapply failed: %v %v", err, diags.All())
+	}
+	info, err := os.Stat(filepath.Join(ws, "tools/run.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o755 {
+		t.Fatalf("file mode = %v, want 0755 after intent change", info.Mode().Perm())
+	}
+	owned := readTestRecord(t, ws).Files["tools/run.sh"]
+	if !owned.Executable {
+		t.Fatalf("recorded owned state = %+v, want executable intent", owned)
+	}
+}
+
+func TestApplyStaleRemovalPrunesEmptyDirectories(t *testing.T) {
+	ws := t.TempDir()
+	p := project(t)
+	first := fakeDriver{files: []GeneratedFile{
+		{Path: ".claude/agents/deep/helper.md", Content: []byte("helper\n")},
+		{Path: ".claude/keep.md", Content: []byte("keep\n")},
+	}}
+	if _, diags, err := Apply(p, ws, first); err != nil || diags.HasErrors() {
+		t.Fatalf("first apply failed: %v %v", err, diags.All())
+	}
+
+	second := fakeDriver{files: []GeneratedFile{{Path: ".claude/keep.md", Content: []byte("keep\n")}}}
+	if _, diags, err := Apply(p, ws, second); err != nil || diags.HasErrors() {
+		t.Fatalf("second apply failed: %v %v", err, diags.All())
+	}
+	if _, err := os.Lstat(filepath.Join(ws, ".claude/agents")); !os.IsNotExist(err) {
+		t.Fatal("emptied ancestor directories must be removed")
+	}
+	if _, err := os.Lstat(filepath.Join(ws, ".claude/keep.md")); err != nil {
+		t.Fatalf("non-empty ancestor must survive: %v", err)
+	}
+	if _, err := os.Lstat(ws); err != nil {
+		t.Fatalf("workspace root must survive: %v", err)
 	}
 }
 
