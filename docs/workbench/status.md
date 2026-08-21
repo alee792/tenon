@@ -4,8 +4,16 @@
 
 ## Implemented
 
-Nothing. The repository carries the founding documents, the maintainer
-agent, and check tooling; no product behavior exists yet.
+The first apply slice, credential-free tested: `tenon validate` and
+`tenon apply` load an instructions-only project (strict closed frontmatter,
+bounds, symlink rejection, name normalization, source fingerprint), render
+the always-on surface for Claude (`CLAUDE.md`) and Codex (`AGENTS.md`) with
+visible tool ownership, refuse hand-authored and modified-owned files before
+any mutation, remove stale owned files, keep an owner-only atomic apply
+record per workspace and harness, and report failures as prose or JSONL
+diagnostics with stable identifiers, authored paths, and validate/apply
+parity. Recognized component directories that are not yet compiled fail
+validation rather than being silently dropped.
 
 ## Gaps
 
