@@ -14,198 +14,104 @@
 ## Plain-English summary
 
 Third-party integrations that are not portable authored source are exact,
-operator-installed packages containing external executables. Tenon validates a
-small manifest without executing the package, then gives each recognized
+operator-installed packages containing external executables. Tenon validates
+a small manifest without executing the package, then gives each recognized
 capability to its own narrow consumer. The first capability is a native stdio
-MCP server. Its process belongs to Claude Code or Codex after tenon writes
-native configuration; it does not become a tenon-managed tool.
+MCP server: its process belongs to Claude Code or Codex after tenon writes
+native configuration, and it never becomes a tenon-managed tool.
 
 ## Decision
 
-Define one metadata-first package envelope with schema version 1. A package
-has an exact semantic version, stable id, human-readable name and description,
-license, source and revision provenance, and a half-open tenon compatibility
-range (`minimum <= version < before`). The SHA-256 of the exact bounded
-manifest bytes is its immutable manifest identity. Reformatting or changing
-any field therefore creates a different identity even when the package id and
-version are unchanged.
+**One metadata envelope, exactly pinned.** A package is described by one
+bounded schema-versioned manifest carrying identity (exact semantic version,
+stable id, name, description, license), source and revision provenance, a
+half-open tenon compatibility range, and one or more platform artifacts. Each
+artifact is pinned by exact platform, format, size, and SHA-256, along with
+the expected executable's path, size, and SHA-256 after preparation; artifact
+sources are a closed union of a package-relative payload or one exact HTTPS
+URL without credentials, query, fragment, or redirects. The SHA-256 of the
+exact manifest bytes is the package's immutable identity: any change,
+including reformatting, is a different identity. Capability selection always
+derives from those retained exact bytes, never from a caller-mutable copy.
 
-The manifest declares one or more platform artifacts. Each artifact has a
-stable id, an exact supported OS and architecture, a bounded `binary`,
-`tar.gz`, or `zip` format, size and lowercase SHA-256, and the expected
-package-relative executable path, size, and SHA-256 after preparation. Its
-source is a closed union:
+**Validation never executes.** Metadata validation reads no artifact: it
+resolves no symlink, fetches no URL, inspects no archive, loads no library,
+and starts no process. Installation and content verification are a separate
+phase, and an unknown capability type or version rejects the manifest with a
+typed error rather than invoking package code to discover behavior.
 
-- `package` names one normalized package-relative payload; or
-- `https` names one HTTPS URL without embedded credentials, query, or
-  fragment.
+**Closed capabilities, narrow consumers.** Capabilities are closed, tagged,
+integer-versioned schemas; schema 1 recognizes `native-mcp` version 1. A
+`native-mcp` declaration binds one stable native server name (collision
+policy: reject), the exact artifact closure and executable identity, bounded
+literal launch data (arguments, package-relative working directory,
+non-secret environment defaults), required ambient environment-variable
+*names* with prose descriptions — never values, references, or
+placeholder-bearing defaults — and per-harness targets with declared startup
+policy and `native-project` trust ownership. Later capability schemas share
+the envelope without leaking fields into one another or growing a generic
+runtime interface.
 
-Both forms remain pinned by size and checksum. Metadata validation reads no
-artifact. It does not resolve a symlink, fetch a URL, inspect an archive, load
-a library, or start a process. Installation and content verification remain a
-separate phase from metadata validation and are defined below.
+**Operator-only trust.** Installation state is operator-owned, separate from
+the manifest, and bound back to it: package identity, exact manifest hash,
+explicit `operator` trust, enablement, verified artifact and executable
+identities, and declared capability ids. Portable agent source may request a
+known capability but can never choose a source or version, install or enable
+a package, grant trust, or carry a credential; apply gains no network path. A
+different manifest under an installed id requires an explicit update with a
+fresh operator trust decision — ordinary install never drifts.
 
-Decoded package values retain their validated manifest privately and return
-defensive metadata copies. Capability selection therefore always derives from
-the exact bytes named by the retained manifest SHA-256; mutating a caller's
-copy cannot create selection evidence with a stale identity.
+**Immutable, offline-verifiable storage.** One owner-only per-OS-user store,
+shared across agents and workspaces, holds exact manifests, raw artifacts,
+and prepared executable trees content-addressed so that distinct
+transformations never alias and a valid entry is never replaced. Install
+validates compatibility, platform, containment, and every pinned identity
+before atomically recording installation state, and interrupted work leaves
+only inert bytes no valid state selects. Inspection reports non-secret
+metadata without opening a process; verification rehashes everything offline
+and re-runs before every use; disable blocks future resolution, enable
+verifies first, and removal retires the record while retaining shared
+immutable content.
 
-Capabilities are closed, tagged schemas with a stable capability id, type, and
-integer version. Schema 1 recognizes `native-mcp` version 1. An unknown type
-or version rejects the manifest with a typed unsupported-capability error; it
-never invokes package code to discover behavior. Later capability schemas
-share the envelope without adding fields to another capability or introducing
-one generic runtime interface.
+**Selection evidence, not runtime behavior.** Offline lookup verifies
+enablement, compatibility, and identity, then hands the consumer exact
+prepared paths and immutable selection evidence. The native-MCP consumer may
+derive a credential-free launch descriptor from it, but the store and
+installer never infer MCP, credential, policy, or process behavior, never
+resolve ambient values, and never start what they install. Once configured,
+the native harness owns process lifecycle, authentication, approvals,
+discovery, calls, effects, and errors; tenon does not proxy, supervise,
+filter, retry, observe, or audit that traffic, and resolved ambient values
+must never enter package state, generated files, staged filesystems, or
+retained evidence — while remaining visible, as documented, to the harness
+and whatever inherits its environment.
 
-Package installation state is operator-owned and separate from the manifest.
-Its closed schema version 1 records the package id and version, exact manifest
-SHA-256, explicit `operator` trust, package-level enabled flag, verified
-artifact and executable SHA-256 identities, and the exact id/type/version of
-every declared capability. Validation binds all fields back to the immutable
-manifest. It contains no executable path, credential material, or runtime
-value. The installer persists that state and implements its commands; it does
-not invent the state contract. Portable source may request a known package
-capability, but it cannot choose a source or installed version, install or
-enable a package, grant machine trust, or carry a credential.
-
-### Native MCP capability version 1
-
-A `native-mcp` declaration contains:
-
-- one stable native server name with collision policy fixed to `reject`;
-- the exact artifact ids forming its selective runtime and staging closure;
-- one package-relative executable that must match every referenced artifact's
-  executable identity;
-- bounded literal arguments, package-relative working directory, and
-  non-secret environment defaults;
-- required ambient environment-variable names with safe descriptions, never
-  values or references; and
-- one or both native harness targets, each with `optional` or `required`
-  startup and `native-project` trust ownership.
-
-Literal arguments and environment defaults cannot contain environment
-placeholders. A required ambient name cannot also have a default. The
-manifest's capability/artifact references plus exact manifest, artifact, and
-executable hashes provide the content-free evidence needed by apply and
-staging to select one installed executable. The contract does not resolve or
-retain an ambient value.
-
-`native-project` means the selected native harness owns its project trust and
-approval journey. Installing an exact package is the operator's authorization
-for the selected external executable to run with its documented process
-authority, but a package manifest cannot silently modify user, administrator,
-or enterprise trust. Capability-specific delivery decisions define the exact
-native configuration and unattended journey.
-
-Once configured, Claude Code or Codex owns native MCP process startup,
-lifecycle, authentication, approvals, discovery, calls, effects, cancellation,
-results, and errors. Tenon does not proxy, supervise, authorize, filter,
-confirm, retry, observe, or audit that traffic. Required ambient names are
-diagnostic metadata, not a credential channel; resolved values must not enter
-package state, generated files, staged filesystems, or retained evidence.
-
-The resolved ambient value is nevertheless available to the native
-harness-launched server and may also be visible to the harness,
-model-accessible shell or execution tools, and other inherited native
-processes. `native-mcp` does not claim to hide it. Required-environment
-descriptions use a closed 1-512 character prose alphabet: ASCII letters,
-spaces, commas, periods, semicolons, parentheses, apostrophes, and hyphens,
-beginning with a letter. Variable markers, underscores, URI/reference
-punctuation, equals signs, and token-like machine syntax are therefore
-invalid. No text grammar can reliably recognize an arbitrary secret disguised
-as prose; package authors remain prohibited from placing values or references
-there.
-
-### Dependency direction
-
-Core package lookup and capability consumers depend on these validated data
-contracts. A consumer asks for one versioned capability and receives exact
-immutable selection evidence. Vendor packages depend inward on the manifest
-schema or their later capability protocol and run as separate executables.
-They cannot contribute in-process interfaces, import themselves into tenon,
-register an in-process lifecycle, or make core switch on a vendor name.
-
-The common envelope owns only identity, provenance, compatibility, artifacts,
-capability tags, enablement, and selective closure. MCP configuration,
-credentials, providers, and other runtime behavior remain separate capability
-domains.
-
-### Installation, cache, and offline selection
-
-The installer accepts one explicit operator-trusted local package directory,
-zip archive, or tar.gz archive. Its root contains the exact
-`integration.json`. Package artifacts are either safe relative payloads under
-that source or the exact manifest-pinned HTTPS URLs already defined above.
-Redirects are not followed. A different manifest under an installed package id
-requires an explicit `update` naming that id and another `operator` trust
-decision; ordinary install never causes version or manifest drift.
-
-One owner-only OS-user store is shared across agents and workspaces. It keeps
-exact manifests and raw platform artifacts by SHA-256 and prepares binary,
-zip, and tar.gz artifacts into immutable content-addressed regular-file trees.
-Every prepared tree carries a bounded receipt of its paths, sizes, hashes, and
-normalized modes. Its content key includes the raw artifact size and SHA-256,
-format, and expected executable path, size, and SHA-256, so distinct
-transformations of the same raw bytes never alias and a valid immutable entry
-is never replaced. Install validates the current tenon compatibility interval,
-host platform, source ownership, archive containment, raw identity, prepared
-executable identity, and every closed capability before atomically replacing
-the small installation-state record under a store lock. It never executes a
-package. Cache bytes published before an interruption are inert until an exact
-valid installation state selects them.
-
-Inspection and verification are separate: inspect can report the immutable
-non-secret manifest and installed identities without opening a process, while
-offline verify rehashes the raw artifact and every prepared file. Disable
-prevents future resolution. Enable first verifies. Remove deletes only the
-exact installation record and deliberately retains shared content-addressed
-bytes. A separate non-secret consumption receipt may bind agent identity and
-selected capability ids to the exact current manifest for diagnostics; it
-contains no workspace, executable, or environment value and grants no trust.
-Broad cache garbage collection remains deferred.
-
-The offline lookup verifies enabled state, compatibility, artifact closure,
-and executable identity, then returns defensive package metadata plus exact
-prepared paths. A capability consumer supplies the artifact ids from its own
-closed schema. Generic selective staging copies only those verified ids to the
-canonical package/manifest/artifact prefix. The installer does not infer MCP,
-credential, policy, confirmation, or process behavior from them. The
-native-MCP consumer may derive a credential-free, harness-targeted launch
-descriptor containing the exact executable, literal arguments and defaults,
-working directory, ambient variable names, startup, and trust metadata. It
-does not resolve ambient values, start the process, select authored source, or
-write Claude or Codex configuration; native configuration generation is the
-connection and apply journey's responsibility.
+**Dependency direction.** Consumers depend inward on these validated data
+contracts. Vendor packages run as separate executables and depend inward on
+the manifest schema or a later capability protocol; they cannot import
+themselves into tenon, register an in-process lifecycle, or make core switch
+on a vendor name.
 
 ## Context
 
-Vendored Agent Plugins under authored `plugins/` are portable project source.
-Their skills and native MCP declarations remain useful, but their download,
-installation, and update model is deliberately outside
+Vendored Agent Plugins under authored `plugins/` are portable project source;
+their installation and update model is deliberately outside
 [ADR 0009](0009-import-vendored-agent-plugin-skills.md) and ADR 0010.
 Machine-installed integration executables need different trust, provenance,
-reuse, and staging ownership and must not be confused with that
-authored-source model.
-
-The official GitHub MCP server illustrates the dependency problem. Importing a
-vendor implementation into tenon's root module couples releases and grows the
-trusted in-process dependency graph. A universal plugin runtime would replace
-that coupling with an unbounded dynamic authority surface. A metadata envelope
-plus narrow process contracts preserves ordinary binary performance and lets
-operators add exact integrations without rebuilding tenon.
+reuse, and staging ownership. The official GitHub MCP server illustrates the
+dependency problem: importing a vendor implementation couples releases and
+grows the trusted in-process graph, while a universal plugin runtime would
+trade that coupling for an unbounded dynamic authority surface. A metadata
+envelope plus narrow process contracts lets operators add exact integrations
+without rebuilding tenon.
 
 ## Consequences
 
 - A credentialless native-MCP fixture and the official `github-mcp-server`
-  executable metadata install, validate, and select through the same
-  vendor-neutral envelope without sharing a capability runtime.
-- An unknown capability type or version is rejected without reading or
-  executing its artifact.
+  metadata install, validate, and select through the same vendor-neutral
+  envelope without sharing a capability runtime.
 - Root tenon dependencies remain independent of package SDKs.
-- Local and pinned-HTTPS installation, shared immutable cache, offline lookup,
-  enablement, and selective staging use the same common envelope without
-  learning MCP runtime semantics.
-- Vendored Agent Plugins and their native MCP generation remain unchanged.
-- Registry search, git/npm/Go installers, package scripts, automatic updates,
-  signatures, remote HTTP MCP, credentials and OAuth, arbitrary hooks, and
-  in-process plugins remain deferred.
+- Registry search, package scripts, automatic updates, signature claims,
+  remote HTTP MCP capabilities, credentials and OAuth, arbitrary hooks, and
+  in-process plugins remain deferred; broad cache garbage collection is
+  deferred with them.

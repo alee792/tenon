@@ -19,10 +19,11 @@ subagent's `instructions.md` frontmatter may contain optional string `effort`
 beside required string `description`. Accept exactly `low`, `medium`, or
 `high`.
 
-Emit the value as `effort` in Claude's generated agent frontmatter and
-`model_reasoning_effort` in Codex's generated custom-agent TOML. Omit the
-native field when source effort is absent, preserving description-only output.
-Keep root instructions description-only.
+Emit the value through each selected harness's documented native effort
+field (currently `effort` in Claude's generated agent frontmatter and
+`model_reasoning_effort` in Codex's generated custom-agent TOML). Omit the
+native field when source effort is absent, preserving description-only
+output. Keep root instructions description-only.
 
 ## Consequence
 

@@ -8,66 +8,64 @@
 ## Plain-English summary
 
 An agent author can add a Markdown schedule whose path is its name, whose
-frontmatter contains one cron string, and whose body is the task prompt. Apply
-validates and fingerprints that source without starting a clock. An operator
-can dispatch one occurrence through the durable turn dispatcher, but every
-accepted occurrence starts a fresh native-harness session so recurring work
-does not silently inherit old model context. The supplied input ID makes
-retries deduplicatable. Automatic clocks, deployment registration, output
-delivery, and per-turn deadline policy are separate from validation and
-fingerprinting;
+frontmatter contains one cron string, and whose body is the task prompt.
+Apply validates and fingerprints that source without starting a clock. An
+operator can dispatch one occurrence explicitly, and every accepted
+occurrence starts a fresh native-harness session so recurring work does not
+silently inherit old model context. A caller-owned stable occurrence ID makes
+retries deduplicatable. Automatic clocks, deployment registration, and output
+delivery are separate concerns;
 [ADR 0011](0011-run-schedules-from-a-foreground-utc-clock.md) supplies the
-foreground UTC clock through a shared task runtime.
+foreground UTC clock.
 
 ## Decision
 
-Root-agent schedules use Eve's Markdown convention at
-`schedules/NESTED/NAME.md`. The relative path without `.md` is the schedule
-name. Frontmatter contains exactly one string field named `cron`; it must be a
-bounded, standard five-field printable-ASCII expression. The non-empty Markdown
-body is the prompt; matching Eve, only one optional blank line after the
-closing frontmatter delimiter is removed. Apply discovers a bounded number of
-schedules, validates their real paths and bounded contents, and includes their
-original bytes in the source fingerprint. It starts no harness process, clock,
-or external registration.
+**Authored format (exact).** Root-agent schedules use Eve's Markdown
+convention at `schedules/NESTED/NAME.md`. The relative path without `.md` is
+the schedule name. Frontmatter contains exactly one string field named
+`cron`; it must be a bounded, standard five-field printable-ASCII expression.
+The non-empty Markdown body is the prompt; matching Eve, only one optional
+blank line after the closing frontmatter delimiter is removed.
 
-`tenon schedule trigger AGENT NAME --input-id ID` submits one prompt through
-the typed dispatch seam. A stable dispatcher conversation derived from the
-schedule name retains bounded outcome history for deduplication, but task mode
-opens the native harness without a resume ID for every accepted input. It
-clears the stored native session ID after a terminal result. A crash can still
-retain the active session ID long enough for dispatcher recovery to classify
-the occurrence as uncertain; it is never silently retried.
+**Validation without execution.** Apply discovers a bounded number of
+schedules, validates their real paths and bounded contents, parses each
+`cron` value, and includes their original bytes in the source fingerprint. It
+starts no harness process, clock, or external registration.
 
-The command reports only the schedule name, input ID, lifecycle status,
-duplicate flag, and available native runtime IDs. It discards model text.
-Completed duplicates return the prior status without opening a harness. Any
-non-completed terminal status produces a nonzero command result after its
-status line is written.
+**One-occurrence dispatch.** Triggering a schedule occurrence carries these
+responsibilities, however the surface is rendered (reference rendering:
+`tenon schedule trigger AGENT NAME --input-id ID`):
 
-The `cron` value is parsed as a standard expression at validation; only the
-foreground clock of ADR 0011 evaluates it in UTC with its overlap behavior.
-Trigger accepts an operator-selected task-turn deadline independent of the
-command's bounded whole-process timeout. Expiry aborts that task process and
-completes the durable occurrence as uncertain, with a separate bounded
-`deadline_exceeded` reason. The stable input ID therefore returns that
-classified result instead of replaying it, while a later occurrence still
-opens a fresh session.
+- Every occurrence is submitted under a caller-owned stable ID, and
+  acceptance is durable: a repeated ID returns the retained outcome without
+  opening a harness.
+- Every accepted occurrence opens a fresh native session — never a resumed
+  one — so task isolation is structural, not advisory.
+- An operator-selected turn deadline bounds the occurrence independently of
+  any whole-process bound. Expiry aborts the task process and durably records
+  the occurrence as uncertain with a distinct, stable reason, so the stable
+  ID returns that classified result rather than replaying the work.
+- A crash between acceptance and a proven terminal result leaves the
+  occurrence uncertain; it is never silently retried. A later occurrence
+  still opens a fresh session.
+- Lifecycle reporting is bounded — schedule name, occurrence ID, lifecycle
+  status, duplicate flag, and available native runtime IDs — and never
+  contains model text. Any non-completed terminal status yields a nonzero
+  result after the status is reported.
+
+**Bounded memory.** Deduplication rests on bounded retained recent outcomes
+per schedule, not an unbounded execution ledger.
 
 ## Context
 
 Eve treats a Markdown schedule as task mode: the file carries one five-field
-cron value and a prompt, each occurrence gets its own session, and model output
-is discarded. Tenon does not own a hosted runtime, so the first useful slice is
-portable source plus explicit one-shot dispatch. Reusing the durable turn
-dispatcher preserves its input validation, acceptance, deduplication, terminal
-outcomes, and uncertain restart recovery without inventing a second scheduler
-state store.
-
-One durable conversation per occurrence would also create unbounded
-conversation records. A stable conversation per schedule plus fresh native
-sessions keeps deduplication bounded by the dispatcher's recent-outcome limit
-while preserving task isolation.
+cron value and a prompt, each occurrence gets its own session, and model
+output is discarded. Tenon does not own a hosted runtime, so the first useful
+slice is portable source plus explicit one-shot dispatch. Reusing the durable
+turn dispatcher's existing acceptance, deduplication, terminal-outcome, and
+uncertain-restart responsibilities avoids inventing a second scheduler state
+store, and retaining bounded outcomes per schedule rather than a record per
+occurrence keeps deduplication from becoming an unbounded ledger.
 
 ## Consequences
 
@@ -81,12 +79,9 @@ while preserving task isolation.
   management.
 - TypeScript schedule handlers and Eve's hosted authenticated runtime remain
   unsupported.
-- The dispatcher keeps only bounded recent outcomes, so deduplication is not
-  an unbounded execution ledger.
 
 ## Sources
 
 - [Eve schedules](https://github.com/vercel/eve/blob/84c3dfc1ff91e075444eee7c6d8e2ef55b2aaebe/docs/schedules.mdx)
-- [Robfig standard cron parser](https://pkg.go.dev/github.com/robfig/cron/v3#ParseStandard)
 - [Product specification](../product-spec.md)
 - [ADR 0001](0001-use-native-harnesses.md)

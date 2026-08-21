@@ -10,26 +10,26 @@
 
 ## Plain-English summary
 
-An author can add a standalone MCP server by creating one readable Markdown
-file under `connections/` or by using `tenon connection add`. Frontmatter
+An author adds a standalone MCP server by creating one readable Markdown file
+under `connections/`, directly or through a connection command. Frontmatter
 either selects an exact operator-installed stdio capability or names one
-credential-free HTTPS Streamable HTTP endpoint. The optional body gives the
-agent extra usage context. Tenon validates and compiles either form into
-native Claude Code or Codex project configuration; it does not add a provider
+credential-free HTTPS Streamable HTTP endpoint; the optional body gives the
+agent usage context. Tenon validates and compiles either form into native
+Claude Code or Codex project configuration; it does not add a provider
 adapter or become the MCP runtime.
 
 ## Decision
 
-Discover up to 128 immediate, real, regular UTF-8 files named
-`connections/<name>.md`. Symlinks, directories, nested entries, other
-extensions, and over-limit inventories reject the project before workspace
-mutation. Each file is at most 8 KiB. The filename supplies the connection and
-native server name. A name contains 1-64 characters, starts with a lowercase
-ASCII letter, and otherwise contains lowercase ASCII letters, digits,
-underscores, or hyphens. `managed` is reserved for tenon.
-
-Every file starts with one closed YAML frontmatter mapping whose plain string
-field `type` is exactly `mcp`. It then selects exactly one target.
+**Authored format (exact).** Each connection is one immediate, real, regular
+UTF-8 file `connections/<name>.md`, bounded per
+[ADR 0013](0013-bound-authored-projects-with-aggregate-budgets.md) (at most
+128 connections of at most 8 KiB each). Symlinks, directories, nested
+entries, and other extensions reject the project before workspace mutation.
+The filename supplies the connection and native server name: 1-64 characters,
+a lowercase ASCII letter first, then lowercase letters, digits, underscores,
+or hyphens; `managed` is reserved for tenon. Every file starts with one
+closed YAML frontmatter mapping whose plain string field `type` is exactly
+`mcp`, then selects exactly one target.
 
 An installed target has exactly these fields:
 
@@ -43,13 +43,12 @@ capability: github
 Use the discovered GitHub tools for repository, issue, and pull-request work.
 ```
 
-`package` and `capability` use ADR 0014's validated identifiers and select one
-installed, enabled, trusted, compatible `native-mcp` version-1 capability.
-That capability already fixes stdio transport, executable, arguments, working
-directory, literal non-secret environment defaults, ambient environment names,
-startup, trust ownership, and supported harnesses. Authored source does not
-repeat or override those values. The capability's stable `server_name` must
-equal the filename-derived connection name.
+`package` and `capability` use ADR 0014's validated identifiers and select
+one installed, enabled, trusted, compatible `native-mcp` version-1
+capability, which already fixes transport, executable, launch data, ambient
+environment names, startup, trust ownership, and supported harnesses;
+authored source never repeats or overrides those values. The capability's
+stable server name must equal the filename-derived connection name.
 
 A remote target has exactly these fields:
 
@@ -63,69 +62,55 @@ url: https://example.com/mcp
 Use this connection for the public reference catalog.
 ```
 
-The URL is an absolute HTTPS URL with a nonempty host and no user information,
-query, or fragment. Tenon retains it exactly after validation. The first slice
-has no headers, bearer-token or environment references, OAuth settings,
-timeouts, tool filters, approval settings, provider names, frozen tool
-catalogs, or other transport parameters. Tenon does not contact the endpoint,
-resolve DNS, inspect TLS, follow a redirect, discover authentication, or prove
-server compatibility during add, status, apply, or stage. An endpoint that
-requires authentication is not a supported tenon journey in this slice, even
-if a native harness can separately authenticate it.
+The URL is an absolute HTTPS URL with a nonempty host and no user
+information, query, or fragment, retained exactly after validation. The first
+slice has no headers, credential or environment references, OAuth, timeouts,
+tool filters, approval settings, provider names, or frozen tool catalogs; an
+endpoint that requires authentication is not a supported journey even if a
+harness could separately authenticate it.
 
-All frontmatter fields are required for their selected form, unknown or
-duplicate fields fail, and installed and remote fields cannot be mixed. YAML
-aliases, tags, merge keys, non-string keys or values, and multiple documents
-fail. The optional Markdown body is trimmed. Empty or whitespace-only content
-means no additional context; nonempty content contains at most 1,024 Unicode
-characters. Exact source bytes, including frontmatter and body, participate in
-the project fingerprint.
+All fields are required for their selected form; unknown, duplicate, or mixed
+fields fail, as do YAML aliases, tags, merge keys, non-string keys or values,
+and multiple documents. The optional trimmed body holds at most 1,024 Unicode
+characters of model-facing context. Exact source bytes join the project
+fingerprint.
 
-When at least one connection exists, generated instructions contain one
-bounded `Native MCP connections` section. Connections appear in lexical name
-order. Each name appears once and its nonempty body appears once, without the
-frontmatter. The section states once that Claude Code or Codex owns native MCP
-startup, trust, approval, authentication, discovery, calls, and effects. The
-body is trusted project guidance; it is not sent to the upstream server and
-does not replace tool descriptions, schemas, or server-returned instructions.
+**Validation without contact.** Tenon never contacts the endpoint, resolves
+DNS, inspects TLS, follows a redirect, discovers authentication, or proves
+server compatibility during authoring, validation, apply, or staging.
+Installed targets resolve offline through ADR 0014's store.
 
-### Native generation and staging
+**Generated instructions.** When at least one connection exists, generated
+instructions contain one bounded connections section: names in lexical order,
+each nonempty body rendered once without frontmatter, and one statement that
+the native harness owns MCP startup, trust, approval, authentication,
+discovery, calls, and effects. The body is trusted project guidance for the
+agent; it is not sent upstream and does not replace tool descriptions or
+server-returned instructions.
 
-Installed targets reuse ADR 0014's offline resolver and generic launch
-descriptor. Claude receives the project stdio mapping, using `/usr/bin/env -C`
-for the verified working directory. Codex receives the exact command,
-arguments, working directory, environment defaults and ambient names, with the
-package-declared optional or required startup and prompt approval.
+**Native generation and staging.** Installed targets are emitted from
+ADR 0014's verified launch descriptor; remote targets are emitted as the
+harness's native HTTP server entry with the exact URL and no auth or header
+fields. Connections are startup-optional with the harness's native approval;
+per-harness encodings (Claude project `.mcp.json`, Codex
+`.codex/config.toml`) are reference renderings. Selective staging carries the
+installed capability closure only for installed targets; remote targets
+contribute configuration and source only, and agents without connections
+stage no server or package closure. Tenon-owned headless process opens
+re-resolve installed targets through the current-state guard; remote runtime
+health remains native-harness state.
 
-Remote targets reuse the safe native HTTP renderer. Claude's project
-`.mcp.json` receives `type: "http"` and the exact URL. Codex's project
-`.codex/config.toml` receives the exact `url`, `enabled = true`,
-`required = false`, and prompt approval. Neither target receives an auth or
-header field. Remote connections are startup-optional. Apply and stage never
-open the URL.
+**Collisions fail closed.** `managed`, another standalone connection, or a
+plugin MCP server can never own the same generated server name, and an
+installed capability whose server name differs from its connection filename
+is a target mismatch; both fail before workspace mutation, never renamed,
+shadowed, or skipped. Names a harness's native project surface reserves are
+rejected for that harness. Tenon cannot preflight harness-owned
+higher-precedence configuration; native precedence and diagnostics govern
+there.
 
-Selective staging copies the exact installed capability closure only for an
-installed target. A remote target contributes native configuration and
-authored source but no integration package bytes. Agents without a connection
-generate and stage no corresponding server or package closure. Tenon-owned
-headless process opens re-resolve installed targets through the same generic
-current-state guard; remote runtime health remains native-harness state.
-
-`managed`, another standalone connection, or a Plugin MCP server cannot own
-the same generated server name. A standalone connection collision is a project
-error before mutation; tenon does not rename, shadow, or skip it. A selected
-installed capability whose server name differs from its connection filename is
-a target mismatch and also fails before mutation. Warning-and-first-wins
-behavior among independently optional Plugin MCP declarations remains
-unchanged. Claude application also rejects the lowercase names `workspace`,
-`claude-in-chrome`, and `computer-use`, which its native project surface
-reserves. Tenon cannot reliably preflight user, administrator, enterprise, or
-future harness-owned configuration; native precedence and diagnostics still
-govern those sources.
-
-### Author commands
-
-The authoring journey is:
+**Authoring assistance.** Authors need not hand-edit native configuration.
+The reference rendering is:
 
 ```text
 tenon connection add AGENT NAME --package PACKAGE --capability CAPABILITY [--context TEXT]
@@ -134,79 +119,51 @@ tenon connection status AGENT [NAME]
 tenon connection remove AGENT NAME
 ```
 
-Every command requires the exact positional agent root. A caller already in
-that root uses `.` explicitly. An `instructions.md`, or a supplied manifest
-whose expected fingerprint matches the directory, proves the selected
-directory is an agent project (see the product specification's Instructions
-section). Commands never search ancestors, infer a parent `agents/`
-directory, or select a workspace or harness.
+The binding responsibilities: every command takes the exact positional agent
+root, proven per the product specification's Instructions section, and never
+searches ancestors or selects a workspace or harness. Add validates
+everything it can offline — including exact installed resolution and the
+filename/server-name match — then creates the file atomically, never
+overwriting; it neither applies a workspace nor changes package state. Status
+reports the declared target and its offline resolution health without
+executing a package or contacting an endpoint, and any malformed or
+unresolved connection yields a nonzero result with bounded authored-path
+diagnostics. Remove deletes exactly the named real connection file and
+nothing else, without requiring the target to be healthy. After add or
+remove, the author is directed to run the ordinary explicit apply for each
+intended workspace. There is no update command: the file is ordinary
+versioned source, edited directly. Plugin-bundled MCP remains solely in the
+publisher's `mcp.json`; connection commands never synthesize or modify plugin
+files.
 
-`add` validates the root, name, selected union, optional context, directory,
-and collision before atomically creating `connections/NAME.md`. It never
-overwrites an existing path. Package add also performs the same offline exact
-resolution used by apply, verifies that the capability server name matches
-`NAME`, and writes nothing when the package is missing, disabled,
-incompatible, corrupt, or unsupported on the current platform. Remote add
-validates the URL without contacting it. Neither form applies a workspace or
-installs, enables, trusts, updates, or removes an integration package.
-
-`status` with no name inspects every connection in lexical order; with a name
-it inspects only that exact source. It reports the declared target and bounded
-context presence. Installed status performs offline exact resolution and
-reports package/capability health plus supported harness targets without
-executing the package. Remote status reports `configured` and
-`runtime=unchecked`; it makes no network request. Any malformed selected
-source or unresolved installed target yields a nonzero status while retaining
-bounded authored-path diagnostics.
-
-`remove` requires the exact root and name and deletes only that real regular
-connection file. It does not require the selected package or remote endpoint
-to be healthy, remove package state, remove an empty `connections/` directory,
-or reapply a workspace. A missing or unsafe target fails without mutation.
-After add or remove, output tells the author to run the ordinary explicit
-`tenon apply AGENT --harness ...` command for each intended workspace.
-
-There is no standalone connection update command: the Markdown file is
-ordinary versioned agent source and may be edited directly. Plugin-bundled MCP
-remains solely in the publisher-authored Plugin `mcp.json`; connection
-commands never synthesize or modify Plugin files.
-
-### Diagnostics
-
-All malformed schema, bad name, package-resolution, harness-target, reserved
-name, generated collision, and staging errors name the connection's authored
-path and fail before workspace mutation. Diagnostics never contain body text,
-credential values, environment values, remote response bodies, or resolved
-redirect targets. A connection file without the required frontmatter fails
-before mutation with its authored path and a diagnostic naming the required
-`type: mcp` declaration and one supported target.
+**Diagnostics.** Malformed schema, bad name, package-resolution,
+harness-target, reserved-name, collision, and staging errors name the
+connection's authored path and fail before workspace mutation. Diagnostics
+never contain body text, credential or environment values, remote response
+bodies, or resolved redirect targets. A file without the required frontmatter
+fails naming the required `type: mcp` declaration and one supported target.
 
 ## Evidence contract
 
-Implementation acceptance uses two credential-free, provider-neutral fixtures:
-
-1. an installed fake stdio capability configured through package and
-   capability fields for both Claude and Codex; and
-2. an HTTPS Streamable HTTP declaration configured through the same connection
-   inventory for both harnesses, without opening the endpoint.
-
-Tests prove exact parsing, bounds, union rejection, source fingerprinting,
-lexical instruction rendering, prose-once behavior, collision failure, package
-resolution, harness-target failure, remote native mapping, selective staging,
-remote closure omission, current-state guards, and add/status/remove
-atomicity. Live PAT acceptance remains separately authorized and is not
+Acceptance uses two credential-free, provider-neutral fixtures — an installed
+fake stdio capability and a remote HTTPS declaration — proving for both
+harnesses: exact parsing and bounds, union rejection, fingerprinting, lexical
+instruction rendering with prose-once behavior, collision and target-mismatch
+failure, offline resolution, native mapping, selective staging and remote
+closure omission, current-state guards, and atomic authoring-command
+behavior. Live PAT acceptance remains separately authorized and is not
 required by this decision.
 
 ## Consequences
 
-- Standards-compatible standalone MCP servers do not require one tenon adapter
-  or provider switch each.
-- Non-developers can author supported connections without editing Claude or
-  Codex native configuration.
+- Standards-compatible standalone MCP servers do not require one tenon
+  adapter or provider switch each.
+- Non-developers can author supported connections without editing native
+  harness configuration.
 - Installed process metadata remains operator/package-owned, while portable
   source selects only an exact package capability.
 - Public remote endpoints are useful without opening a credential or OAuth
-  design. Header-bearing, authenticated, and tenon-managed HTTP remain
+  design; header-bearing, authenticated, and tenon-managed HTTP remain
   deferred.
 - Native harnesses continue to own runtime MCP behavior and may expose tools
   with effects beyond tenon's managed workspace boundary.

@@ -39,23 +39,24 @@ Non-loopback endpoints require HTTPS. Headers must have valid HTTP names and
 values, may not collide case-insensitively, are copied literally, and
 therefore must not contain secrets.
 
-Plugin directories and server names are considered in lexical order. The first
-exact server name wins and names are never rewritten. Accepted server values,
-plugin-relative command content, and executable intent join the source
-fingerprint. Claude receives project `.mcp.json` entries and uses its native
-project-server approval. Because Claude's project MCP format has no working
-directory field, its stdio entry uses the system `/usr/bin/env -C` exec
-adapter to preserve the portable working directory before immediately
-replacing itself with the declared command. Codex receives project
-`.codex/config.toml` entries; plugin servers are optional and use prompt
-approval. Tenon's own `managed` server retains its required and approved
-policy.
+Plugin directories and server names are considered in lexical order. The
+first exact server name wins and names are never rewritten. Accepted server
+values, plugin-relative command content, and executable intent join the
+source fingerprint. Accepted servers are emitted into the selected harness's
+native project MCP configuration; plugin servers are optional to start and
+keep the harness's native per-server approval, while tenon's own `managed`
+server retains its required-and-approved policy. The declared portable
+working directory is preserved exactly for every stdio server even where a
+harness's project format lacks a working-directory field — the reference
+rendering wraps such commands in a system exec adapter that sets the
+directory before replacing itself with the declared command.
 
-Claude performs a second environment-expansion pass over project MCP values.
-When unsupported placeholder-like text would survive portable expansion, tenon
-skips that server for Claude with a warning rather than risk substituting an
-ambient secret or changing a value that the portable specification treats as
-literal. Codex preserves that text unchanged.
+A harness that performs its own environment-expansion pass over project MCP
+values must never receive text that could substitute an ambient secret or
+change a value the portable specification treats as literal: when
+placeholder-like text would survive portable expansion, tenon skips that
+server for that harness with a warning. A harness without such expansion
+receives the text unchanged.
 
 ## Consequences
 

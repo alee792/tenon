@@ -5,45 +5,48 @@
 
 ## Plain-English summary
 
-An operator can run `tenon schedule run AGENT` as one foreground process. It
-evaluates the agent's already-applied five-field schedules in UTC and submits
-current occurrences through one shared, bounded task runtime. It installs no
-daemon and does not replay missed work.
+An operator can run one foreground process that evaluates an agent's
+already-applied five-field schedules in UTC and dispatches current
+occurrences. It installs no daemon and does not replay missed work.
 
 ## Decision
 
-The runner loads and compiles source, verifies the selected harness and
-current generated setup, and acquires a lock for the canonical workspace,
-agent identity, and harness once. It does not auto-apply or hot reload.
+The foreground schedule runner (reference rendering:
+`tenon schedule run AGENT`) carries these responsibilities:
 
-One task-runtime coordinator owns the durable dispatch store and active-turn
-capacity for every schedule. Different schedule conversations may execute
-concurrently up to `--max-active-turns`. Capacity-queued and active
-occurrences both count as in flight; a later due minute for that schedule is
-skipped. Every occurrence retains ADR 0008's fresh native session and per-turn
-deadline.
-
-The clock evaluates UTC only. Its first candidate is strictly after startup.
-On each wake it admits at most the matching occurrence in the current UTC
-minute, never an older stored candidate. A process-local scheduled-minute
-watermark prevents duplicate admission after repeated or backward clock
-movement. Occurrence IDs hash the complete exact schedule name and canonical
-scheduled UTC minute with SHA-256.
-
-SIGINT and SIGTERM stop admission before shutdown. Already admitted work,
-including capacity waiters, completes or reaches its turn deadline before the
-runtime store and lock close. Durable-state, coordinator, or diagnostic-output
-failure also stops admission; an individual terminal occurrence does not stop
-unrelated schedules. Startup classifies queued or active task state retained
-from an interrupted prior runtime as uncertain and never executes it.
+- **Current setup only.** It loads and compiles source, verifies the selected
+  harness and current generated setup, and holds exclusive local ownership of
+  the workspace/agent/harness combination for its lifetime, so two clocks
+  cannot run the same schedules. It does not auto-apply or hot reload.
+- **UTC, current occurrences only.** Evaluation is UTC only. The first
+  candidate is strictly after startup, and only an occurrence due in the
+  current UTC minute is ever admitted. Downtime, sleep, forward jumps, and
+  repeated or backward clock movement never admit an older candidate, a
+  duplicate, or a catch-up burst.
+- **No overlap per schedule.** An occurrence that is queued or active counts
+  as in flight, and a later due minute for that schedule is skipped while it
+  remains so. Distinct schedules may run concurrently up to an
+  operator-selected capacity.
+- **Stable occurrence identity.** Each occurrence's ID is derived
+  deterministically from the exact schedule name and its scheduled UTC
+  minute, so the same due minute deduplicates through the ordinary dispatch
+  contract of [ADR 0008](0008-run-schedules-as-fresh-dispatch-tasks.md),
+  which also supplies the fresh native session and turn deadline.
+- **Graceful drain.** Termination signals stop admission first; already
+  admitted work completes or reaches its turn deadline before durable state
+  and ownership are released. A durable-state or diagnostic-output failure
+  also stops admission, while one schedule's terminal failure does not stop
+  unrelated schedules. Queued or active state retained from an interrupted
+  prior runtime is classified uncertain at startup and never executed.
 
 ## Consequences
 
 - Tenon provides a foreground clock, not daemon supervision or hosted
   scheduling.
-- Sleep, downtime, and forward jumps do not create catch-up bursts.
+- Sleep, downtime, and clock movement never create catch-up bursts or
+  duplicate admissions.
 - Model output and prompts never enter lifecycle diagnostics.
-- The lock is local; distributed scheduling remains unsupported.
+- Ownership is local; distributed scheduling remains unsupported.
 
 ## Related decisions
 
