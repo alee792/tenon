@@ -10,11 +10,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/alee792/tenon/internal/diagnostics"
+	"github.com/alee792/tenon/internal/frontmatter"
 )
 
 // MaxInstructionsBytes bounds the root instructions file (ADR 0013).
@@ -98,7 +99,9 @@ func Load(dir string) (*Project, *diagnostics.List, error) {
 			"a directory is an agent project only when instructions.md is present or a supplied agent manifest matches it; neither proof was found")
 	}
 
-	p.Fingerprint = fingerprint(map[string][]byte{"instructions.md": instructionsBytes})
+	p.Fingerprint = fingerprint([]sourceInput{
+		{Path: "instructions.md", Content: instructionsBytes, Executable: false},
+	})
 	if diags.HasErrors() {
 		return nil, diags, nil
 	}
@@ -145,66 +148,56 @@ func loadInstructions(root string, diags *diagnostics.List) (*Instructions, []by
 // parseInstructions enforces the closed frontmatter contract: one plain
 // description, an optional Boolean friction-notes, and a non-empty body.
 func parseInstructions(content, path string, diags *diagnostics.List) (*Instructions, bool) {
-	body, fields, ok := splitFrontmatter(content)
-	if !ok {
+	raw, bodyStart, err := frontmatter.Split([]byte(content))
+	if err != nil {
 		diags.Errorf("instructions.frontmatter.missing", path,
 			"instructions.md must start with YAML frontmatter delimited by --- lines")
 		return nil, false
 	}
+	doc, err := frontmatter.Parse(raw)
+	if err != nil {
+		diags.Errorf("instructions.frontmatter.invalid", path, "%s", err)
+		return nil, false
+	}
 
 	out := &Instructions{}
-	seen := map[string]bool{}
 	valid := true
-	for _, f := range fields {
-		key, value, found := strings.Cut(f, ":")
-		if !found {
-			diags.Errorf("instructions.frontmatter.invalid", path,
-				"frontmatter lines must be plain 'key: value' mappings; found %q", diagnostics.Bound(f, 80))
-			valid = false
-			continue
-		}
-		key = strings.TrimSpace(key)
-		value = strings.TrimSpace(value)
-		if seen[key] {
-			diags.Errorf("instructions.frontmatter.invalid", path,
-				"frontmatter field %q is duplicated", key)
-			valid = false
-			continue
-		}
-		seen[key] = true
-		switch key {
-		case "description":
-			if v, ok := plainScalar(value); ok && v != "" {
-				out.Description = v
-			} else {
-				diags.Errorf("instructions.description.invalid", path,
-					"description must be one plain non-empty string")
-				valid = false
-			}
-		case "friction-notes":
-			switch value {
-			case "true":
-				out.FrictionNotes = true
-			case "false":
-				out.FrictionNotes = false
-			default:
-				diags.Errorf("instructions.friction-notes.invalid", path,
-					"friction-notes must be the Boolean true or false; found %q", diagnostics.Bound(value, 80))
-				valid = false
-			}
-		default:
+	for _, key := range doc.Keys() {
+		if key != "description" && key != "friction-notes" {
 			diags.Errorf("instructions.frontmatter.unknown-field", path,
 				"frontmatter permits only description and friction-notes; found %q", key)
 			valid = false
 		}
 	}
-	if !seen["description"] && valid {
+	if doc.Has("description") {
+		if v, err := doc.String("description"); err == nil && v != "" {
+			out.Description = v
+		} else {
+			diags.Errorf("instructions.description.invalid", path,
+				"description must be one plain non-empty string")
+			valid = false
+		}
+	} else if valid {
 		diags.Errorf("instructions.description.missing", path,
 			"frontmatter must carry one plain description")
 		valid = false
 	}
+	if doc.Has("friction-notes") {
+		if v, err := doc.Bool("friction-notes"); err == nil {
+			out.FrictionNotes = v
+		} else {
+			diags.Errorf("instructions.friction-notes.invalid", path,
+				"friction-notes must be the Boolean true or false")
+			valid = false
+		}
+	}
 
-	body = strings.TrimPrefix(body, "\n")
+	body := content[bodyStart:]
+	if after, ok := strings.CutPrefix(body, "\r\n"); ok {
+		body = after
+	} else {
+		body = strings.TrimPrefix(body, "\n")
+	}
 	if strings.TrimSpace(body) == "" {
 		diags.Errorf("instructions.body.empty", path,
 			"instructions.md must have a non-empty Markdown body after the frontmatter")
@@ -212,48 +205,6 @@ func parseInstructions(content, path string, diags *diagnostics.List) (*Instruct
 	}
 	out.Body = body
 	return out, valid
-}
-
-// splitFrontmatter cuts "---\n<fields>\n---\n<body>" into its parts. Field
-// lines are returned raw; blank lines and comment-free simplicity are the
-// contract — this is deliberately a closed subset, not a YAML engine.
-func splitFrontmatter(content string) (body string, fields []string, ok bool) {
-	rest, found := strings.CutPrefix(content, "---\n")
-	if !found {
-		return "", nil, false
-	}
-	head, body, found := strings.Cut(rest, "\n---\n")
-	if !found {
-		if trimmed, endFound := strings.CutSuffix(rest, "\n---"); endFound {
-			head, body = trimmed, ""
-		} else {
-			return "", nil, false
-		}
-	}
-	for _, line := range strings.Split(head, "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		fields = append(fields, line)
-	}
-	return body, fields, true
-}
-
-// plainScalar accepts an unquoted or double-quoted plain string and rejects
-// YAML indicators that would need a real YAML engine to interpret.
-func plainScalar(value string) (string, bool) {
-	if v, ok := strings.CutPrefix(value, `"`); ok {
-		v, ok = strings.CutSuffix(v, `"`)
-		return v, ok && !strings.Contains(v, `"`)
-	}
-	if value == "" {
-		return "", true
-	}
-	switch value[0] {
-	case '&', '*', '!', '|', '>', '[', '{', '\'', '#', '%', '@', '`':
-		return "", false
-	}
-	return value, true
 }
 
 // normalizeName lowercases the directory name and collapses every run of
@@ -280,19 +231,31 @@ func normalizeName(base string) (string, bool) {
 	return name, true
 }
 
-// fingerprint hashes every authored input into one stable identity. Inputs
-// map authored relative paths to exact bytes; absent inputs use nil.
-func fingerprint(inputs map[string][]byte) string {
-	paths := make([]string, 0, len(inputs))
-	for p := range inputs {
-		paths = append(paths, p)
-	}
-	sort.Strings(paths)
+// sourceInput is one authored input joining the fingerprint: its authored
+// relative path, exact bytes (nil when absent), and whether the authored
+// file carries the executable bit.
+type sourceInput struct {
+	Path       string
+	Content    []byte
+	Executable bool
+}
+
+// fingerprint hashes every authored input into one stable identity, sorted
+// by path and covering each input's path, content length, content hash, and
+// executable intent ("x" or "-").
+func fingerprint(inputs []sourceInput) string {
+	inputs = slices.Clone(inputs)
+	slices.SortFunc(inputs, func(a, b sourceInput) int {
+		return strings.Compare(a.Path, b.Path)
+	})
 	h := sha256.New()
-	for _, p := range paths {
-		content := inputs[p]
-		contentHash := sha256.Sum256(content)
-		fmt.Fprintf(h, "%s\n%d\n%x\n", p, len(content), contentHash)
+	for _, in := range inputs {
+		mode := "-"
+		if in.Executable {
+			mode = "x"
+		}
+		contentHash := sha256.Sum256(in.Content)
+		fmt.Fprintf(h, "%s\n%d\n%x\n%s\n", in.Path, len(in.Content), contentHash, mode)
 	}
 	return fmt.Sprintf("sha256:%x", h.Sum(nil))
 }

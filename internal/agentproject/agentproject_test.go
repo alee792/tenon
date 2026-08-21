@@ -124,7 +124,7 @@ func TestLoadRejectsFrontmatterViolations(t *testing.T) {
 		"duplicate field": {"---\ndescription: a\ndescription: b\n---\n\nbody\n",
 			"instructions.frontmatter.invalid"},
 		"yaml machinery": {"---\ndescription: &anchor d\n---\n\nbody\n",
-			"instructions.description.invalid"},
+			"instructions.frontmatter.invalid"},
 		"empty body": {"---\ndescription: d\n---\n\n  \n", "instructions.body.empty"},
 	}
 	for name, tc := range cases {
@@ -217,5 +217,14 @@ func TestFingerprintTracksContent(t *testing.T) {
 	pB, _, _ := Load(rootB)
 	if pB.Fingerprint == pA1.Fingerprint {
 		t.Fatal("changed source must change the fingerprint")
+	}
+}
+
+func TestFingerprintTracksExecutableBit(t *testing.T) {
+	content := []byte("#!/bin/sh\necho run\n")
+	plain := fingerprint([]sourceInput{{Path: "skills/run.sh", Content: content, Executable: false}})
+	executable := fingerprint([]sourceInput{{Path: "skills/run.sh", Content: content, Executable: true}})
+	if plain == executable {
+		t.Fatal("flipping only the executable bit must change the fingerprint")
 	}
 }
