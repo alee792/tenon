@@ -1,9 +1,12 @@
 // Package frontmatter splits and validates authored YAML frontmatter under
-// the closed contract of ADR 0020: one document whose root is a mapping,
-// string keys at every depth, no aliases, no anchors, no duplicate keys, and
-// values read only through typed accessors. The package validates authored
-// bytes and never re-serializes them, so generation always copies exactly
-// what was authored. It is the only package that imports the YAML engine.
+// one closed contract: one document whose root is a mapping, string keys at
+// every depth, no aliases, no anchors, no duplicate keys, and values read
+// only through typed accessors. The package validates authored bytes and
+// never re-serializes them, so generation always copies exactly what was
+// authored. It is the only package that may import the YAML engine: a real
+// engine is required because recognized vendor fields carry arbitrary YAML
+// that must parse without being interpreted, and this wrapper is where the
+// strictness lives, not the engine.
 package frontmatter
 
 import (

@@ -28,7 +28,10 @@ sessions, and explicitly managed tools. Never overwrite hand-authored harness
 files or claim governance over native harness effects.
 
 Keep packages organized by concrete responsibility; no generic core, common,
-util, or services layers. Prefer the standard library. Validate and bound
+util, or services layers. Prefer the standard library. Dependencies are rare
+and justified inline in go.mod — what the module is for and why the standard
+library cannot cover it — not by ADR; do not re-litigate a dependency whose
+justification stands. Validate and bound
 filesystem, process, protocol, and model-visible inputs before any workspace
 mutation. Diagnostics are a stable surface: validation failures carry stable
 identifiers and authored paths, legible to people and parseable by drafting
