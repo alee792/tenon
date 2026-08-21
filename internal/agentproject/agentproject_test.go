@@ -170,7 +170,7 @@ func TestLoadRejectsOversizedInstructions(t *testing.T) {
 
 func TestLoadRefusesUnimplementedComponents(t *testing.T) {
 	root := writeAgent(t, "agent", validInstructions)
-	if err := os.Mkdir(filepath.Join(root, "skills"), 0o755); err != nil {
+	if err := os.Mkdir(filepath.Join(root, "tools"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	p, diags, err := Load(root)

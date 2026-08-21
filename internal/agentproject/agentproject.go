@@ -31,6 +31,8 @@ type Project struct {
 	// Instructions is nil when the root carries no instructions.md; the
 	// root must then be proven by a supplied agent manifest.
 	Instructions *Instructions
+	// Skills are the validated Agent Skills directories, sorted by name.
+	Skills []Skill
 	// Fingerprint is "sha256:<hex>" over every authored input.
 	Fingerprint string
 }
@@ -48,7 +50,7 @@ type Instructions struct {
 // component is implemented, its presence fails validation: silently dropping
 // authored behavior would pretend the compiled agent is complete.
 var componentDirs = []string{
-	"skills", "plugins", "tools", "subagents", "connections", "schedules", "harnesses",
+	"plugins", "tools", "subagents", "connections", "schedules", "harnesses",
 }
 
 // Load validates the agent project at dir. Contract violations are reported
@@ -99,9 +101,14 @@ func Load(dir string) (*Project, *diagnostics.List, error) {
 			"a directory is an agent project only when instructions.md is present or a supplied agent manifest matches it; neither proof was found")
 	}
 
-	p.Fingerprint = fingerprint([]sourceInput{
+	skills, skillInputs := loadSkills(root, diags)
+	p.Skills = skills
+
+	inputs := []sourceInput{
 		{Path: "instructions.md", Content: instructionsBytes, Executable: false},
-	})
+	}
+	inputs = append(inputs, skillInputs...)
+	p.Fingerprint = fingerprint(inputs)
 	if diags.HasErrors() {
 		return nil, diags, nil
 	}

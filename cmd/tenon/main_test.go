@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/alee792/tenon/internal/generated"
 )
 
 const validInstructions = `---
@@ -129,6 +132,341 @@ func TestJSONLDiagnosticsAreParseable(t *testing.T) {
 	}
 	if !sawMissingFrontmatter {
 		t.Fatalf("expected instructions.frontmatter.missing at instructions.md, got %v", lines)
+	}
+}
+
+const echoSkillMD = `---
+name: echo
+description: Echoes input back.
+---
+
+Run scripts/run.sh to echo.
+`
+
+const vendorSkillMD = `---
+name: vendor
+description: Uses vendor fields.
+when_to_use: Testing vendor fields.
+model: opus
+allowed-tools: Bash Read
+---
+
+Body.
+`
+
+func writeFile(t *testing.T, root, rel string, content []byte, mode os.FileMode) {
+	t.Helper()
+	full := filepath.Join(root, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(full, content, mode); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// markedSkillMD is the expected generated SKILL.md: the authored source with
+// exactly one marker line inserted after the closing frontmatter delimiter.
+func markedSkillMD(t *testing.T, source string) string {
+	t.Helper()
+	i := strings.Index(source, "\n---\n")
+	if i < 0 {
+		t.Fatalf("no closing delimiter in %q", source)
+	}
+	i += len("\n---\n")
+	return source[:i] + generated.Marker + "\n" + source[i:]
+}
+
+type testDiag struct {
+	ID       string `json:"id"`
+	Severity string `json:"severity"`
+	Path     string `json:"path"`
+	Rule     string `json:"rule"`
+}
+
+// parseDiagLines decodes the leading JSONL diagnostics from a command's
+// stdout, ignoring the human summary lines that follow.
+func parseDiagLines(t *testing.T, out string) []testDiag {
+	t.Helper()
+	var ds []testDiag
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.HasPrefix(line, "{") {
+			continue
+		}
+		var d testDiag
+		if err := json.Unmarshal([]byte(line), &d); err != nil {
+			t.Fatalf("line %q is not one JSON diagnostic: %v", line, err)
+		}
+		ds = append(ds, d)
+	}
+	return ds
+}
+
+func filterDiags(ds []testDiag, id string) []testDiag {
+	var out []testDiag
+	for _, d := range ds {
+		if d.ID == id {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// TestSkillAppliesToBothHarnesses proves skill-compatibility acceptance 1:
+// a standard skill with referenced and arbitrary nested resources appears in
+// both native project skill directories byte-identical to source with
+// executable intent preserved, and the generated SKILL.md differs from
+// source by exactly the one inserted marker line.
+func TestSkillAppliesToBothHarnesses(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	script := []byte("#!/bin/sh\necho \"$@\"\n")
+	notes := []byte("# Notes\n")
+	blob := []byte{0x00, 0x01, 0xfe, 0xff}
+	writeFile(t, agent, "skills/echo/SKILL.md", []byte(echoSkillMD), 0o644)
+	writeFile(t, agent, "skills/echo/scripts/run.sh", script, 0o755)
+	writeFile(t, agent, "skills/echo/references/notes.md", notes, 0o644)
+	writeFile(t, agent, "skills/echo/deep/nested/data.bin", blob, 0o644)
+
+	wantSkillMD := markedSkillMD(t, echoSkillMD)
+	check := func(harness, prefix string) {
+		t.Helper()
+		ws := t.TempDir()
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"apply", agent, "--harness", harness, "--workspace", ws}, &stdout, &stderr); code != 0 {
+			t.Fatalf("%s apply exit %d\nstderr: %s", harness, code, stderr.String())
+		}
+		got, err := os.ReadFile(filepath.Join(ws, prefix, "SKILL.md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != wantSkillMD {
+			t.Fatalf("%s SKILL.md = %q, want the source with one marker line %q", harness, got, wantSkillMD)
+		}
+		for rel, want := range map[string][]byte{
+			"scripts/run.sh":       script,
+			"references/notes.md":  notes,
+			"deep/nested/data.bin": blob,
+		} {
+			got, err := os.ReadFile(filepath.Join(ws, prefix, rel))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, want) {
+				t.Fatalf("%s %s = %q, want byte-identical source %q", harness, rel, got, want)
+			}
+		}
+		info, err := os.Stat(filepath.Join(ws, prefix, "scripts/run.sh"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm()&0o111 == 0 {
+			t.Fatalf("%s script must stay executable: %v", harness, info.Mode())
+		}
+		info, err = os.Stat(filepath.Join(ws, prefix, "references/notes.md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm()&0o111 != 0 {
+			t.Fatalf("%s non-executable resource must stay non-executable: %v", harness, info.Mode())
+		}
+	}
+	check("claude", ".claude/skills/echo")
+	check("codex", ".agents/skills/echo")
+}
+
+// TestSkillExecutableBitChangesFingerprint proves skill-compatibility
+// acceptance 2: a mode-only change to a skill resource is a source change.
+func TestSkillExecutableBitChangesFingerprint(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	writeFile(t, agent, "skills/echo/SKILL.md", []byte(echoSkillMD), 0o644)
+	writeFile(t, agent, "skills/echo/scripts/run.sh", []byte("#!/bin/sh\n"), 0o644)
+
+	fingerprint := func() string {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"validate", agent, "--harness", "claude"}, &stdout, &stderr); code != 0 {
+			t.Fatalf("validate exit %d\nstderr: %s", code, stderr.String())
+		}
+		i := strings.Index(stdout.String(), "fingerprint ")
+		if i < 0 {
+			t.Fatalf("no fingerprint in %q", stdout.String())
+		}
+		return strings.TrimSuffix(strings.TrimSpace(stdout.String()[i+len("fingerprint "):]), ")")
+	}
+	before := fingerprint()
+	if err := os.Chmod(filepath.Join(agent, "skills/echo/scripts/run.sh"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	after := fingerprint()
+	if before == after {
+		t.Fatalf("flipping the source executable bit must change the fingerprint: %s", before)
+	}
+}
+
+// TestSymlinkedSkillResourceFailsBeforeWriting proves skill-compatibility
+// acceptance 3: symlinked resources fail validation and a failing apply
+// writes nothing.
+func TestSymlinkedSkillResourceFailsBeforeWriting(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	writeFile(t, agent, "skills/echo/SKILL.md", []byte(echoSkillMD), 0o644)
+	target := filepath.Join(t.TempDir(), "real.md")
+	if err := os.WriteFile(target, []byte("real\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(agent, "skills/echo/link.md")); err != nil {
+		t.Fatal(err)
+	}
+
+	ws := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--diagnostics", "jsonl"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("a symlinked skill resource must fail apply")
+	}
+	if len(filterDiags(parseDiagLines(t, stdout.String()), "skill.resource.invalid")) == 0 {
+		t.Fatalf("expected skill.resource.invalid, got %q", stdout.String())
+	}
+	entries, err := os.ReadDir(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("a failing apply must write nothing; found %v", entries)
+	}
+}
+
+// TestVendorFieldsWarnForCodexOnly proves skill-compatibility acceptance 4:
+// recognized Claude frontmatter survives both applies and produces one
+// sorted field-level warning per field for Codex only, exiting zero.
+func TestVendorFieldsWarnForCodexOnly(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	writeFile(t, agent, "skills/vendor/SKILL.md", []byte(vendorSkillMD), 0o644)
+	wantFields := []string{"allowed-tools", "model", "when_to_use"}
+
+	requireCodexWarnings := func(out string) {
+		t.Helper()
+		warnings := filterDiags(parseDiagLines(t, out), "skill.vendor-field.not-honored")
+		if len(warnings) != len(wantFields) {
+			t.Fatalf("warnings = %+v, want one per field %v", warnings, wantFields)
+		}
+		for i, d := range warnings {
+			if d.Severity != "warning" || d.Path != "skills/vendor/SKILL.md" {
+				t.Fatalf("warning %d = %+v", i, d)
+			}
+			if !strings.Contains(d.Rule, "\""+wantFields[i]+"\"") || !strings.Contains(d.Rule, "codex") ||
+				!strings.Contains(d.Rule, "copied unchanged") {
+				t.Fatalf("warning %d must name field %q, the selected harness, and the passthrough: %+v",
+					i, wantFields[i], d)
+			}
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	ws := t.TempDir()
+	if code := run([]string{"apply", agent, "--harness", "codex", "--workspace", ws, "--diagnostics", "jsonl"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("warnings alone must not fail apply: exit %d, %s", code, stdout.String())
+	}
+	requireCodexWarnings(stdout.String())
+	if _, err := os.ReadFile(filepath.Join(ws, ".agents/skills/vendor/SKILL.md")); err != nil {
+		t.Fatal("the warned skill must still apply:", err)
+	}
+
+	stdout.Reset()
+	if code := run([]string{"validate", agent, "--harness", "codex", "--diagnostics", "jsonl"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("warnings alone must not fail validate: exit %d, %s", code, stdout.String())
+	}
+	requireCodexWarnings(stdout.String())
+
+	stdout.Reset()
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", t.TempDir(), "--diagnostics", "jsonl"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("claude apply exit %d: %s", code, stdout.String())
+	}
+	if got := filterDiags(parseDiagLines(t, stdout.String()), "skill.vendor-field.not-honored"); len(got) != 0 {
+		t.Fatalf("claude must not warn on its own documented fields: %+v", got)
+	}
+}
+
+// TestOpenAIYAMLRoundTripsAndWarnsForClaudeOnly proves skill-compatibility
+// acceptance 5: agents/openai.yaml survives both applies byte-for-byte and
+// produces exactly one file-level warning for Claude only.
+func TestOpenAIYAMLRoundTripsAndWarnsForClaudeOnly(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	yaml := []byte("interface:\n  display_name: Echo\n")
+	writeFile(t, agent, "skills/echo/SKILL.md", []byte(echoSkillMD), 0o644)
+	writeFile(t, agent, "skills/echo/agents/openai.yaml", yaml, 0o644)
+
+	apply := func(harness, ws string) []testDiag {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"apply", agent, "--harness", harness, "--workspace", ws, "--diagnostics", "jsonl"}, &stdout, &stderr); code != 0 {
+			t.Fatalf("%s apply exit %d: %s", harness, code, stdout.String())
+		}
+		return parseDiagLines(t, stdout.String())
+	}
+
+	claudeWS, codexWS := t.TempDir(), t.TempDir()
+	claudeDiags := apply("claude", claudeWS)
+	codexDiags := apply("codex", codexWS)
+
+	for harness, full := range map[string]string{
+		"claude": filepath.Join(claudeWS, ".claude/skills/echo/agents/openai.yaml"),
+		"codex":  filepath.Join(codexWS, ".agents/skills/echo/agents/openai.yaml"),
+	} {
+		got, err := os.ReadFile(full)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, yaml) {
+			t.Fatalf("%s agents/openai.yaml = %q, want byte-identical source", harness, got)
+		}
+	}
+	warnings := filterDiags(claudeDiags, "skill.vendor-file.not-honored")
+	if len(warnings) != 1 || warnings[0].Severity != "warning" ||
+		warnings[0].Path != "skills/echo/agents/openai.yaml" ||
+		!strings.Contains(warnings[0].Rule, "copied unchanged") {
+		t.Fatalf("claude must emit exactly one file-level warning: %+v", claudeDiags)
+	}
+	if got := filterDiags(codexDiags, "skill.vendor-file.not-honored"); len(got) != 0 {
+		t.Fatalf("codex must not warn on its own documented file: %+v", got)
+	}
+}
+
+// TestFlatSkillLayoutIsRejected proves skill-compatibility acceptance 6.
+func TestFlatSkillLayoutIsRejected(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	writeFile(t, agent, "skills/flat.md", []byte("flat skill\n"), 0o644)
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"validate", agent, "--harness", "claude", "--diagnostics", "jsonl"}, &stdout, &stderr); code == 0 {
+		t.Fatal("the flat skills/NAME.md layout must be rejected")
+	}
+	got := filterDiags(parseDiagLines(t, stdout.String()), "skill.entry.invalid")
+	if len(got) != 1 || got[0].Path != "skills/flat.md" ||
+		!strings.Contains(got[0].Rule, "skills/flat/SKILL.md") {
+		t.Fatalf("expected the flat-layout diagnostic naming skills/flat/SKILL.md, got %+v", got)
+	}
+}
+
+// TestValidateApplyWarningParity proves spec acceptance 12 for warnings:
+// validate's structured diagnostics on a skill-warning project are exactly
+// apply's, and both exit zero.
+func TestValidateApplyWarningParity(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	writeFile(t, agent, "skills/vendor/SKILL.md", []byte(vendorSkillMD), 0o644)
+
+	var validateOut, applyOut, stderr bytes.Buffer
+	validateCode := run([]string{"validate", agent, "--harness", "codex", "--diagnostics", "jsonl"}, &validateOut, &stderr)
+	applyCode := run([]string{"apply", agent, "--harness", "codex", "--workspace", t.TempDir(), "--diagnostics", "jsonl"}, &applyOut, &stderr)
+	if validateCode != 0 || applyCode != 0 {
+		t.Fatalf("warnings alone must not fail: validate=%d apply=%d", validateCode, applyCode)
+	}
+	validateDiags := parseDiagLines(t, validateOut.String())
+	applyDiags := parseDiagLines(t, applyOut.String())
+	if len(validateDiags) == 0 {
+		t.Fatalf("expected warning diagnostics, got %q", validateOut.String())
+	}
+	if !slices.Equal(validateDiags, applyDiags) {
+		t.Fatalf("validate and apply must report identical diagnostics:\n%+v\n%+v", validateDiags, applyDiags)
 	}
 }
 

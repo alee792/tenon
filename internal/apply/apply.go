@@ -33,9 +33,11 @@ type GeneratedFile struct {
 type Driver interface {
 	// Harness is the stable harness name: "claude" or "codex".
 	Harness() string
-	// Generate renders every tenon-owned native file for the project. It
-	// must be deterministic for identical source.
-	Generate(p *agentproject.Project) []GeneratedFile
+	// Generate renders every tenon-owned native file for the project and
+	// reports harness-specific warnings on diags, so validate and apply
+	// surface identical diagnostics. It must be deterministic for identical
+	// source.
+	Generate(p *agentproject.Project, diags *diagnostics.List) []GeneratedFile
 }
 
 // Record is the durable apply record: schema version, identity, the source
@@ -95,7 +97,9 @@ func Apply(p *agentproject.Project, workspace string, driver Driver) (*Result, *
 		return nil, diags, nil
 	}
 
-	files := driver.Generate(p)
+	// Generation precedes the conflict checks so its warnings survive a
+	// conflict refusal.
+	files := driver.Generate(p, diags)
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
 
 	// Every conflict check precedes every write.

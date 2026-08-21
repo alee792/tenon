@@ -110,7 +110,7 @@ func render(diags *diagnostics.List, jsonl bool, stdout, stderr io.Writer) {
 }
 
 func runValidate(args []string, stdout, stderr io.Writer) int {
-	agent, _, _, jsonl, ok := commonFlags("validate", args, stderr, false)
+	agent, _, driver, jsonl, ok := commonFlags("validate", args, stderr, false)
 	if !ok {
 		return 2
 	}
@@ -118,6 +118,11 @@ func runValidate(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintln(stderr, "tenon validate:", err)
 		return 1
+	}
+	if p != nil && !diags.HasErrors() {
+		// Generation is warning-bearing but write-free: validate reports
+		// exactly the diagnostics apply would, and discards the files.
+		_ = driver.Generate(p, diags)
 	}
 	render(diags, jsonl, stdout, stderr)
 	if p == nil || diags.HasErrors() {

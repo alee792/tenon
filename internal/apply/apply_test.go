@@ -19,7 +19,9 @@ type fakeDriver struct {
 
 func (fakeDriver) Harness() string { return "fake" }
 
-func (d fakeDriver) Generate(*agentproject.Project) []GeneratedFile { return d.files }
+func (d fakeDriver) Generate(*agentproject.Project, *diagnostics.List) []GeneratedFile {
+	return d.files
+}
 
 func project(t *testing.T) *agentproject.Project {
 	t.Helper()

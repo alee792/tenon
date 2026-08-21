@@ -14,3 +14,20 @@ func Instructions(body string) []byte {
 	body = strings.TrimRight(body, "\n")
 	return []byte(Marker + "\n\n" + body + "\n")
 }
+
+// SkillMD renders a generated SKILL.md: the authored bytes with the
+// ownership marker inserted as one line immediately after the closing
+// frontmatter delimiter line at bodyStart, and no other change. The marker
+// deliberately carries no fingerprint, version, or provenance: setup
+// metadata never enters model-facing generated content.
+func SkillMD(source []byte, bodyStart int) []byte {
+	out := make([]byte, 0, len(source)+len(Marker)+2)
+	out = append(out, source[:bodyStart]...)
+	if bodyStart == 0 || source[bodyStart-1] != '\n' {
+		out = append(out, '\n')
+	}
+	out = append(out, Marker...)
+	out = append(out, '\n')
+	out = append(out, source[bodyStart:]...)
+	return out
+}

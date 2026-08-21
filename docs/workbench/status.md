@@ -15,6 +15,16 @@ diagnostics with stable identifiers, authored paths, and validate/apply
 parity. Recognized component directories that are not yet compiled fail
 validation rather than being silently dropped.
 
+Skills, per the skill-compatibility matrix: `skills/NAME/SKILL.md` validates
+against the Agent Skills standard through one strict YAML frontmatter
+engine, resources round-trip byte-for-byte to both native skill locations
+with executable intent preserved and fingerprinted, generated SKILL.md
+carries one provenance-free ownership marker line, recognized vendor fields
+and `agents/openai.yaml` pass through unchanged with per-harness warnings,
+and ADR 0013's count and byte ceilings fail before mutation. All six
+acceptance-evidence items are credential-free tested, and generation-time
+warnings report identically from validate and apply.
+
 ## Gaps
 
 The complete [product specification](../product-spec.md) acceptance list, to
