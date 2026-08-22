@@ -28,6 +28,16 @@ type GeneratedFile struct {
 	Executable bool
 }
 
+// Target identifies where generated files land and how the managed server
+// is launched from them. Generated managed-server configuration embeds
+// absolute paths, so generation needs both.
+type Target struct {
+	// Workspace is the absolute workspace directory.
+	Workspace string
+	// Executable is the absolute resolved tenon executable.
+	Executable string
+}
+
 // Driver is the seam between the portable project and one native harness.
 // Harness-specific formats stay behind it.
 type Driver interface {
@@ -36,8 +46,8 @@ type Driver interface {
 	// Generate renders every tenon-owned native file for the project and
 	// reports harness-specific warnings on diags, so validate and apply
 	// surface identical diagnostics. It must be deterministic for identical
-	// source.
-	Generate(p *agentproject.Project, diags *diagnostics.List) []GeneratedFile
+	// source and target.
+	Generate(p *agentproject.Project, target Target, diags *diagnostics.List) []GeneratedFile
 }
 
 // Record is the durable apply record: schema version, identity, the source
@@ -74,11 +84,18 @@ type Result struct {
 	Removed []string
 }
 
-// Apply writes the driver's generated files into the workspace. Contract
+// Apply writes the driver's generated files into the workspace, launching the
+// managed server in generated configuration from executable. Contract
 // violations are reported as diagnostics with stable identifiers; the error
 // is reserved for environment failures.
-func Apply(p *agentproject.Project, workspace string, driver Driver) (*Result, *diagnostics.List, error) {
+func Apply(p *agentproject.Project, workspace, executable string, driver Driver) (*Result, *diagnostics.List, error) {
 	diags := &diagnostics.List{}
+
+	// An unresolved executable reaching a driver is a caller bug, not an
+	// authored contract violation, so it is never a diagnostic.
+	if executable == "" || !filepath.IsAbs(executable) {
+		return nil, diags, fmt.Errorf("the tenon executable must be an absolute resolved path: %q", executable)
+	}
 
 	ws, err := filepath.Abs(workspace)
 	if err != nil {
@@ -99,7 +116,7 @@ func Apply(p *agentproject.Project, workspace string, driver Driver) (*Result, *
 
 	// Generation precedes the conflict checks so its warnings survive a
 	// conflict refusal.
-	files := driver.Generate(p, diags)
+	files := driver.Generate(p, Target{Workspace: ws, Executable: executable}, diags)
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
 
 	// Every conflict check precedes every write.
@@ -138,7 +155,7 @@ func Apply(p *agentproject.Project, workspace string, driver Driver) (*Result, *
 		full := filepath.Join(ws, f.Path)
 		current, err := os.ReadFile(full)
 		if err == nil && hashBytes(current) == desired.Hash {
-			if info, err := os.Stat(full); err == nil && executable(info.Mode()) == desired.Executable {
+			if info, err := os.Stat(full); err == nil && isExecutable(info.Mode()) == desired.Executable {
 				result.Written = append(result.Written, f.Path)
 				continue // identical reapply leaves the file untouched
 			}
@@ -174,6 +191,60 @@ func Apply(p *agentproject.Project, workspace string, driver Driver) (*Result, *
 	return result, diags, nil
 }
 
+// Verify reports whether the workspace still carries exactly the state the
+// last apply of p for harness wrote: the record exists, targets this harness
+// and this source fingerprint, and every owned generated file is present and
+// unmodified. Every failure names the stale path or fingerprint and directs
+// the operator to reapply, so a tenon-owned process opened against drifted
+// setup fails closed rather than serving a stale agent.
+func Verify(p *agentproject.Project, workspace, harness string) error {
+	ws, err := filepath.Abs(workspace)
+	if err != nil {
+		return fmt.Errorf("resolving workspace: %w", err)
+	}
+	record, err := readRecord(RecordPath(ws, harness))
+	if err != nil {
+		return fmt.Errorf("the %s apply record could not be read (%v); run tenon apply", harness, err)
+	}
+	if record == nil {
+		return fmt.Errorf("the workspace %s carries no %s apply record; run tenon apply", ws, harness)
+	}
+	if record.Harness != harness {
+		return fmt.Errorf("the apply record in %s was written for harness %q, not %q; run tenon apply", ws, record.Harness, harness)
+	}
+	if record.Fingerprint != p.Fingerprint {
+		return fmt.Errorf("the applied source fingerprint %s no longer matches the agent source %s; run tenon apply",
+			record.Fingerprint, p.Fingerprint)
+	}
+	if len(record.Files) == 0 {
+		return fmt.Errorf("the %s apply record in %s owns no generated files; run tenon apply", harness, ws)
+	}
+	paths := make([]string, 0, len(record.Files))
+	for path := range record.Files {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	for _, path := range paths {
+		owned := record.Files[path]
+		full := filepath.Join(ws, path)
+		info, err := os.Lstat(full)
+		if err != nil {
+			return fmt.Errorf("the tenon-owned file %s is missing from %s; run tenon apply", path, ws)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("the tenon-owned file %s is no longer a regular file; run tenon apply", path)
+		}
+		current, err := os.ReadFile(full)
+		if err != nil {
+			return fmt.Errorf("the tenon-owned file %s could not be read: %v; run tenon apply", path, err)
+		}
+		if hashBytes(current) != owned.Hash || isExecutable(info.Mode()) != owned.Executable {
+			return fmt.Errorf("the tenon-owned file %s was modified since the last apply; run tenon apply", path)
+		}
+	}
+	return nil
+}
+
 // checkOwnership reports a conflict diagnostic when the workspace file at
 // path cannot be safely replaced or removed: it exists without a record
 // (hand-authored) or its bytes or executable bit differ from the recorded
@@ -204,7 +275,7 @@ func checkOwnership(ws, path string, previous *Record, diags *diagnostics.List) 
 		diags.Errorf("apply.conflict.unowned", path, "the existing workspace file could not be read: %v", err)
 		return true
 	}
-	if hashBytes(current) != recorded.Hash || executable(info.Mode()) != recorded.Executable {
+	if hashBytes(current) != recorded.Hash || isExecutable(info.Mode()) != recorded.Executable {
 		diags.Errorf("apply.conflict.modified", path,
 			"the tenon-owned file was modified since the previous apply; tenon fails closed rather than discard the edit")
 		return true
@@ -212,7 +283,7 @@ func checkOwnership(ws, path string, previous *Record, diags *diagnostics.List) 
 	return false
 }
 
-func executable(mode os.FileMode) bool {
+func isExecutable(mode os.FileMode) bool {
 	return mode.Perm()&0o111 != 0
 }
 

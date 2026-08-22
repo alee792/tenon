@@ -46,6 +46,18 @@ harness directories fail, and per-harness ADR 0013 ceilings (1,024 files,
 1 MiB each, 8 MiB aggregate) hold. With skills, subagents, and this
 round-trip landed, acceptance item 4 is complete.
 
+The managed MCP boundary, first half: apply generates the `managed` stdio
+server into Claude's `.mcp.json` and Codex's `.codex/config.toml` (required
+and pre-approved for Codex, per spec) with the absolute resolved tenon
+executable, and `tenon mcp serve` fails closed unless the workspace's
+generated setup matches the apply record exactly. The server speaks MCP
+2025-06-18 with strict decoding and bounded lines, exposes built-in `echo`
+and the opt-in `record-friction` (owner-only per-agent inbox, 256-record
+cap, never evicting), and writes content-free lifecycle audit — agent,
+tool, hashed request ID, outcome; never arguments or output — proving
+acceptance item 10. Authored tools are discovered and statically validated
+but stay gated until the language hosts land.
+
 
 ## Gaps
 

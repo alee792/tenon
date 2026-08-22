@@ -3,6 +3,8 @@
 package claude
 
 import (
+	"encoding/json"
+
 	"github.com/alee792/tenon/internal/agentproject"
 	"github.com/alee792/tenon/internal/apply"
 	"github.com/alee792/tenon/internal/diagnostics"
@@ -14,13 +16,17 @@ type Driver struct{}
 
 func (Driver) Harness() string { return "claude" }
 
-// Generate renders CLAUDE.md from the instructions body and every skill
-// under .claude/skills/. An instructions-free project generates no always-on
-// surface. Skill resources copy byte-for-byte with their executable intent;
-// SKILL.md carries one inserted ownership marker line. A vendor surface
-// Claude does not document honoring is copied unchanged and warned.
-func (Driver) Generate(p *agentproject.Project, diags *diagnostics.List) []apply.GeneratedFile {
-	var files []apply.GeneratedFile
+// Generate renders CLAUDE.md from the instructions body, .mcp.json wiring the
+// managed MCP server, and every skill under .claude/skills/. An
+// instructions-free project generates no always-on surface. Skill resources
+// copy byte-for-byte with their executable intent; SKILL.md carries one
+// inserted ownership marker line. A vendor surface Claude does not document
+// honoring is copied unchanged and warned.
+func (Driver) Generate(p *agentproject.Project, target apply.Target, diags *diagnostics.List) []apply.GeneratedFile {
+	files := []apply.GeneratedFile{{
+		Path:    ".mcp.json",
+		Content: managedMCPConfig(target.Executable, p.Root, target.Workspace),
+	}}
 	if p.Instructions != nil {
 		files = append(files, apply.GeneratedFile{
 			Path:    "CLAUDE.md",
@@ -62,4 +68,22 @@ func (Driver) Generate(p *agentproject.Project, diags *diagnostics.List) []apply
 		})
 	}
 	return files
+}
+
+// managedMCPConfig renders .mcp.json: Claude's project MCP configuration
+// carrying exactly the tenon-owned managed stdio server, launched from the
+// resolved tenon executable against the absolute agent source and workspace.
+// It is model-facing configuration, so it carries no fingerprint, version, or
+// other setup metadata beyond the paths the server itself needs. Keys are
+// ordered by encoding/json's sorted map marshalling, so identical input
+// always renders identical bytes.
+func managedMCPConfig(executable, source, workspace string) []byte {
+	config := map[string]any{"mcpServers": map[string]any{"managed": map[string]any{
+		"type":    "stdio",
+		"command": executable,
+		"args":    []string{"mcp", "serve", source, "--workspace", workspace, "--harness", "claude"},
+	}}}
+	// A fixed map of strings and string slices always encodes.
+	content, _ := json.MarshalIndent(config, "", "  ")
+	return append(content, '\n')
 }

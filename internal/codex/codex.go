@@ -3,6 +3,8 @@
 package codex
 
 import (
+	"strings"
+
 	"github.com/alee792/tenon/internal/agentproject"
 	"github.com/alee792/tenon/internal/apply"
 	"github.com/alee792/tenon/internal/diagnostics"
@@ -14,13 +16,17 @@ type Driver struct{}
 
 func (Driver) Harness() string { return "codex" }
 
-// Generate renders AGENTS.md from the instructions body and every skill
-// under .agents/skills/. An instructions-free project generates no always-on
-// surface. Skill resources copy byte-for-byte with their executable intent;
-// SKILL.md carries one inserted ownership marker line. A recognized vendor
-// field Codex does not document honoring is copied unchanged and warned.
-func (Driver) Generate(p *agentproject.Project, diags *diagnostics.List) []apply.GeneratedFile {
-	var files []apply.GeneratedFile
+// Generate renders AGENTS.md from the instructions body, .codex/config.toml
+// wiring the managed MCP server, and every skill under .agents/skills/. An
+// instructions-free project generates no always-on surface. Skill resources
+// copy byte-for-byte with their executable intent; SKILL.md carries one
+// inserted ownership marker line. A recognized vendor field Codex does not
+// document honoring is copied unchanged and warned.
+func (Driver) Generate(p *agentproject.Project, target apply.Target, diags *diagnostics.List) []apply.GeneratedFile {
+	files := []apply.GeneratedFile{{
+		Path:    ".codex/config.toml",
+		Content: managedMCPConfig(target.Executable, p.Root, target.Workspace),
+	}}
 	if p.Instructions != nil {
 		files = append(files, apply.GeneratedFile{
 			Path:    "AGENTS.md",
@@ -67,4 +73,28 @@ func (Driver) Generate(p *agentproject.Project, diags *diagnostics.List) []apply
 		})
 	}
 	return files
+}
+
+// managedMCPConfig renders .codex/config.toml: Codex's project configuration
+// carrying exactly the tenon-owned managed stdio server, launched from the
+// resolved tenon executable against the absolute agent source and workspace.
+// The managed server alone is required and pre-approved, because tenon
+// validates and audits every call that crosses its own boundary; every other
+// generated entry keeps Codex's native per-call prompt approval. It is
+// model-facing configuration, so it carries no fingerprint, version, or other
+// setup metadata beyond the paths the server itself needs.
+func managedMCPConfig(executable, source, workspace string) []byte {
+	args := []string{"mcp", "serve", source, "--workspace", workspace, "--harness", "codex"}
+	quoted := make([]string, len(args))
+	for i, arg := range args {
+		quoted[i] = generated.TOMLString(arg)
+	}
+	var b strings.Builder
+	b.WriteString(generated.TOMLHeader + "\n")
+	b.WriteString("[mcp_servers.managed]\n")
+	b.WriteString("command = " + generated.TOMLString(executable) + "\n")
+	b.WriteString("args = [" + strings.Join(quoted, ", ") + "]\n")
+	b.WriteString("required = true\n")
+	b.WriteString("default_tools_approval_mode = \"approve\"\n")
+	return []byte(b.String())
 }
