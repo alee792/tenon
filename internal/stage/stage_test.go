@@ -1,0 +1,381 @@
+package stage
+
+import (
+	"context"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/alee792/tenon/internal/apply"
+	"github.com/alee792/tenon/internal/claude"
+	"github.com/alee792/tenon/internal/codex"
+)
+
+const validInstructions = `---
+description: Reviews pull requests.
+---
+
+You review pull requests carefully.
+`
+
+// writeAgent creates a minimal valid agent directory named name.
+func writeAgent(t *testing.T, name string) string {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), name)
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "instructions.md"), []byte(validInstructions), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+// fakeExecutable writes a stand-in tenon binary and returns its absolute path.
+// Staging copies its bytes; it need not be runnable.
+func fakeExecutable(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "tenon")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return abs
+}
+
+// treeHashes returns a map of every regular file's tree-relative slash path to
+// its content hash.
+func treeHashes(t *testing.T, root string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		rel, _ := filepath.Rel(root, path)
+		h, herr := hashFile(path)
+		if herr != nil {
+			return herr
+		}
+		out[filepath.ToSlash(rel)] = h
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func TestStageDeterministic(t *testing.T) {
+	agent := writeAgent(t, "my-agent")
+	exe := fakeExecutable(t)
+
+	a := stageWith(t, agent, "claude", exe)
+	b := stageWith(t, agent, "claude", exe)
+
+	ha, hb := treeHashes(t, a), treeHashes(t, b)
+	if len(ha) != len(hb) {
+		t.Fatalf("file counts differ: %d vs %d", len(ha), len(hb))
+	}
+	for path, h := range ha {
+		if hb[path] != h {
+			t.Fatalf("file %s differs between two staged trees", path)
+		}
+	}
+
+	ma, err := os.ReadFile(filepath.Join(a, filepath.FromSlash(strings.TrimPrefix(finalArtifact, "/"))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mb, err := os.ReadFile(filepath.Join(b, filepath.FromSlash(strings.TrimPrefix(finalArtifact, "/"))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(ma) != string(mb) {
+		t.Fatal("artifact.json is not deterministic across two identical stagings")
+	}
+}
+
+// stageWith stages into a named subdirectory of a fresh temp parent.
+func stageWith(t *testing.T, agent, harness, exe string) string {
+	t.Helper()
+	out := filepath.Join(t.TempDir(), "staged")
+	res, diags, err := Stage(context.Background(), Options{
+		AgentDir: agent, Harness: harness, Output: out, Executable: exe, Driver: pickDriver(harness),
+	})
+	if err != nil {
+		t.Fatalf("stage error: %v", err)
+	}
+	if diags.HasErrors() {
+		t.Fatalf("stage diagnostics: %v", diags.All())
+	}
+	if res == nil {
+		t.Fatal("nil result")
+	}
+	return out
+}
+
+func pickDriver(harness string) apply.Driver {
+	if harness == "codex" {
+		return codex.Driver{}
+	}
+	return claude.Driver{}
+}
+
+func TestStageDoesNotMutateSource(t *testing.T) {
+	agent := writeAgent(t, "immutable-agent")
+	exe := fakeExecutable(t)
+	before, err := hashSource(agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stageWith(t, agent, "codex", exe)
+	after, err := hashSource(agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before != after {
+		t.Fatal("staging mutated authored source")
+	}
+}
+
+func TestStageRefusesExistingOutput(t *testing.T) {
+	agent := writeAgent(t, "agent")
+	exe := fakeExecutable(t)
+	out := filepath.Join(t.TempDir(), "exists")
+	if err := os.MkdirAll(out, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	res, diags, err := Stage(context.Background(), Options{
+		AgentDir: agent, Harness: "claude", Output: out, Executable: exe, Driver: claude.Driver{},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res != nil || !diags.HasErrors() {
+		t.Fatal("staging into an existing directory must fail with a diagnostic")
+	}
+	found := false
+	for _, d := range diags.All() {
+		if d.ID == "stage.output.exists" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected stage.output.exists diagnostic, got %v", diags.All())
+	}
+}
+
+func TestStageFinalPathCorrectness(t *testing.T) {
+	agent := writeAgent(t, "paths-agent")
+	exe := fakeExecutable(t)
+	out := stageWith(t, agent, "claude", exe)
+
+	mcp, err := os.ReadFile(filepath.Join(out, "workspace", ".mcp.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(mcp), finalTenonBin) {
+		t.Fatalf(".mcp.json must embed the final tenon path %s: %s", finalTenonBin, mcp)
+	}
+	if !strings.Contains(string(mcp), finalWorkspace) {
+		t.Fatalf(".mcp.json must embed the final workspace path %s: %s", finalWorkspace, mcp)
+	}
+	if !strings.Contains(string(mcp), finalAgentsRoot+"/paths-agent") {
+		t.Fatalf(".mcp.json must embed the final agent source path: %s", mcp)
+	}
+	if strings.Contains(string(mcp), out) {
+		t.Fatalf(".mcp.json must never embed the physical staging directory %s: %s", out, mcp)
+	}
+
+	record, err := os.ReadFile(filepath.Join(out, "workspace", ".tenon", "apply-claude.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(record), finalAgentsRoot+"/paths-agent") {
+		t.Fatalf("apply record must record the final source path: %s", record)
+	}
+	if strings.Contains(string(record), out) {
+		t.Fatalf("apply record must never record the physical staging directory: %s", record)
+	}
+}
+
+func TestStageCredentialAbsent(t *testing.T) {
+	t.Setenv("FAKE_SECRET", "CONSPICUOUS")
+	agent := writeAgent(t, "clean-agent")
+	exe := fakeExecutable(t)
+	out := stageWith(t, agent, "codex", exe)
+
+	err := filepath.WalkDir(out, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		data, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return rerr
+		}
+		if strings.Contains(string(data), "CONSPICUOUS") {
+			t.Fatalf("the conspicuous secret leaked into %s", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStageVerifyRoundTrip(t *testing.T) {
+	agent := writeAgent(t, "verify-agent")
+	exe := fakeExecutable(t)
+	out := stageWith(t, agent, "claude", exe)
+	artifact := filepath.Join(out, "opt", "tenon", "artifact.json")
+
+	if err := Verify(artifact, out); err != nil {
+		t.Fatalf("a freshly staged tree must verify: %v", err)
+	}
+
+	// Corrupt a staged generated file: verification must fail closed.
+	target := filepath.Join(out, "workspace", "CLAUDE.md")
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, append(data, '!'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Verify(artifact, out); err == nil {
+		t.Fatal("verification must fail closed after a staged file is corrupted")
+	}
+}
+
+func TestStageAtomicPublishNoLeftoverOnFailure(t *testing.T) {
+	agent := writeAgent(t, "symlink-agent")
+	exe := fakeExecutable(t)
+	// A stray symlink in the source is rejected mid-stage, after some files
+	// were written to the temporary tree.
+	if err := os.Symlink("/etc/hostname", filepath.Join(agent, "link")); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	parent := t.TempDir()
+	out := filepath.Join(parent, "out")
+	res, _, err := Stage(context.Background(), Options{
+		AgentDir: agent, Harness: "claude", Output: out, Executable: exe, Driver: claude.Driver{},
+	})
+	if err == nil {
+		t.Fatal("staging a source with a symlink must fail")
+	}
+	if res != nil {
+		t.Fatal("no result on failure")
+	}
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Fatal("a failed staging must leave no output directory")
+	}
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".tenon-stage-") {
+			t.Fatalf("a failed staging left a temporary directory behind: %s", e.Name())
+		}
+	}
+}
+
+func TestStageToolFreeCarriesNoRuntime(t *testing.T) {
+	agent := writeAgent(t, "tool-free")
+	exe := fakeExecutable(t)
+	out := stageWith(t, agent, "claude", exe)
+
+	runtimes := filepath.Join(out, "opt", "tenon", "runtimes")
+	entries, err := os.ReadDir(runtimes)
+	if err != nil {
+		t.Fatalf("the runtimes directory must exist: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("a tool-free agent must stage no runtime closure, found %d entries", len(entries))
+	}
+}
+
+func TestStageGoToolCarriesRuntimeClosure(t *testing.T) {
+	agent := writeAgent(t, "go-tool-agent")
+	writeFile(t, agent, "go.mod", "module example.com/go-tool-agent\n\ngo 1.24\n")
+	writeFile(t, agent, "tools/hash_text/tool.go", goTool)
+	exe := fakeExecutable(t)
+
+	out := filepath.Join(t.TempDir(), "staged")
+	res, diags, err := Stage(context.Background(), Options{
+		AgentDir: agent, Harness: "codex", Output: out, Executable: exe, Driver: codex.Driver{},
+	})
+	if err != nil {
+		t.Fatalf("stage error: %v", err)
+	}
+	if diags.HasErrors() {
+		t.Fatalf("stage diagnostics: %v", diags.All())
+	}
+	if len(res.RuntimeLanguages) != 1 || res.RuntimeLanguages[0] != "go" {
+		t.Fatalf("expected a go runtime closure, got %v", res.RuntimeLanguages)
+	}
+
+	// The self-contained Go host binary must be present under the closure.
+	var found bool
+	closure := filepath.Join(out, "opt", "tenon", "runtimes", "tools")
+	_ = filepath.WalkDir(closure, func(path string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && filepath.Base(path) == "host" {
+			found = true
+		}
+		return nil
+	})
+	if !found {
+		t.Fatal("the staged Go closure must contain the built host binary")
+	}
+	if err := Verify(filepath.Join(out, "opt", "tenon", "artifact.json"), out); err != nil {
+		t.Fatalf("a staged Go-tool tree must verify: %v", err)
+	}
+}
+
+func writeFile(t *testing.T, root, rel, content string) {
+	t.Helper()
+	full := filepath.Join(root, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+const goTool = `package hash_text
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+)
+
+var Description = "Hash bounded text with SHA-256."
+
+type Input struct {
+	Text string ` + "`json:\"text\"`" + `
+}
+
+type Output struct {
+	Hex string ` + "`json:\"hex\"`" + `
+}
+
+func Execute(ctx context.Context, in Input) (Output, error) {
+	sum := sha256.Sum256([]byte(in.Text))
+	return Output{Hex: hex.EncodeToString(sum[:])}, nil
+}
+`

@@ -36,6 +36,8 @@ const usage = `usage:
   tenon apply AGENT --harness <claude|codex> [--workspace DIR] [--diagnostics <prose|jsonl>]
   tenon validate AGENT --harness <claude|codex> [--diagnostics <prose|jsonl>]
   tenon mcp serve AGENT --harness <claude|codex> [--workspace DIR]
+  tenon stage AGENT --harness <claude|codex> --output DIR
+  tenon stage verify --artifact PATH [--prefix DIR]
   tenon connection add AGENT NAME --url HTTPS_URL [--context TEXT]
   tenon connection status AGENT [NAME]
   tenon connection remove AGENT NAME
@@ -64,6 +66,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return 2
 		}
 		return runMCPServe(args[2:], stdin, stdout, stderr)
+	case "stage":
+		return runStage(args[1:], stdout, stderr)
 	case "connection":
 		return runConnection(args[1:], stdout, stderr)
 	case "integration":

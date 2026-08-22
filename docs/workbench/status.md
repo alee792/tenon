@@ -124,6 +124,21 @@ returns a credential-free launch descriptor for the connection-wiring
 follow-up; nothing here changes generation yet.
 
 
+Staged agent filesystems, per ADR 0012 (acceptance item 9): `tenon stage`
+re-applies an agent as if its immutable source lived at
+`/opt/tenon/agents/<name>` and its workspace at `/workspace`, so the staged
+apply record and generated MCP configuration embed those final runtime paths
+rather than the physical build directory. The tree is built in a temporary
+sibling and published with a single rename only after a schema-versioned
+artifact manifest — recording every staged file's final path, hash, mode, and
+intended ownership — is complete, so a failure leaves no output. Staging
+verifies authored source is byte-identical before and after, reads no
+credential (a conspicuous environment value never reaches the tree), and its
+fail-closed `agent-entrypoint` runs `tenon stage verify` before any harness
+handoff. Two honest limitations are recorded in the manifest, not hidden: the
+native harness runtime is not yet bundled (expected on the base image), and
+the tool execution closure is staged whole rather than minimized.
+
 ## Gaps
 
 The complete [product specification](../product-spec.md) acceptance list, to
