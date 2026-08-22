@@ -33,6 +33,9 @@ type Project struct {
 	Instructions *Instructions
 	// Skills are the validated Agent Skills directories, sorted by name.
 	Skills []Skill
+	// Subagents are the validated immediate subagents/ directories, sorted
+	// by name.
+	Subagents []Subagent
 	// Fingerprint is "sha256:<hex>" over every authored input.
 	Fingerprint string
 }
@@ -50,7 +53,7 @@ type Instructions struct {
 // component is implemented, its presence fails validation: silently dropping
 // authored behavior would pretend the compiled agent is complete.
 var componentDirs = []string{
-	"plugins", "tools", "subagents", "connections", "schedules", "harnesses",
+	"plugins", "tools", "connections", "schedules", "harnesses",
 }
 
 // Load validates the agent project at dir. Contract violations are reported
@@ -104,10 +107,14 @@ func Load(dir string) (*Project, *diagnostics.List, error) {
 	skills, skillInputs := loadSkills(root, diags)
 	p.Skills = skills
 
+	subagents, subagentInputs := loadSubagents(root, diags)
+	p.Subagents = subagents
+
 	inputs := []sourceInput{
 		{Path: "instructions.md", Content: instructionsBytes, Executable: false},
 	}
 	inputs = append(inputs, skillInputs...)
+	inputs = append(inputs, subagentInputs...)
 	p.Fingerprint = fingerprint(inputs)
 	if diags.HasErrors() {
 		return nil, diags, nil

@@ -44,5 +44,11 @@ func (Driver) Generate(p *agentproject.Project, diags *diagnostics.List) []apply
 				"OpenAI host metadata is not documented by the selected harness (claude); the file was copied unchanged and may have no effect")
 		}
 	}
+	for _, sub := range p.Subagents {
+		files = append(files, apply.GeneratedFile{
+			Path:    ".claude/agents/" + sub.Name + ".md",
+			Content: generated.ClaudeSubagent(sub.Name, sub.Description, sub.Effort, sub.Body),
+		})
+	}
 	return files
 }

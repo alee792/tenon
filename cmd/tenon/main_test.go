@@ -470,6 +470,224 @@ func TestValidateApplyWarningParity(t *testing.T) {
 	}
 }
 
+const subagentInstructionsWithEffort = `---
+description: Reviews the diff for style and correctness.
+effort: high
+---
+
+Review the diff carefully.
+
+Flag anything unclear.
+`
+
+const subagentInstructionsWithoutEffort = `---
+description: Reviews the diff for style and correctness.
+---
+
+Review the diff carefully.
+
+Flag anything unclear.
+`
+
+const wantClaudeSubagentWithEffort = "---\n" +
+	"name: code-reviewer\n" +
+	"description: \"Reviews the diff for style and correctness.\"\n" +
+	"effort: high\n" +
+	"---\n\n" +
+	"Review the diff carefully.\n\nFlag anything unclear.\n"
+
+const wantClaudeSubagentWithoutEffort = "---\n" +
+	"name: code-reviewer\n" +
+	"description: \"Reviews the diff for style and correctness.\"\n" +
+	"---\n\n" +
+	"Review the diff carefully.\n\nFlag anything unclear.\n"
+
+const wantCodexSubagentWithEffort = "name = \"code_reviewer\"\n" +
+	"description = \"Reviews the diff for style and correctness.\"\n" +
+	"model_reasoning_effort = \"high\"\n" +
+	"developer_instructions = \"Review the diff carefully.\\n\\nFlag anything unclear.\"\n"
+
+const wantCodexSubagentWithoutEffort = "name = \"code_reviewer\"\n" +
+	"description = \"Reviews the diff for style and correctness.\"\n" +
+	"developer_instructions = \"Review the diff carefully.\\n\\nFlag anything unclear.\"\n"
+
+// TestSubagentAppliesToBothHarnessesAndEffortRefreshRemovesLine proves
+// subagent acceptance: a subagent with description, high effort, and a
+// multi-line body applies to both harnesses with exactly the specified
+// native rendering; removing effort from source and reapplying refreshes
+// the owned generated file, dropping the effort/model_reasoning_effort line
+// entirely rather than emitting it empty.
+func TestSubagentAppliesToBothHarnessesAndEffortRefreshRemovesLine(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	writeFile(t, agent, "subagents/code-reviewer/instructions.md", []byte(subagentInstructionsWithEffort), 0o644)
+
+	claudeWS, codexWS := t.TempDir(), t.TempDir()
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", claudeWS}, &stdout, &stderr); code != 0 {
+		t.Fatalf("claude apply exit %d: %s", code, stderr.String())
+	}
+	if code := run([]string{"apply", agent, "--harness", "codex", "--workspace", codexWS}, &stdout, &stderr); code != 0 {
+		t.Fatalf("codex apply exit %d: %s", code, stderr.String())
+	}
+
+	claudePath := filepath.Join(claudeWS, ".claude/agents/code-reviewer.md")
+	codexPath := filepath.Join(codexWS, ".codex/agents/code-reviewer.toml")
+	got, err := os.ReadFile(claudePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != wantClaudeSubagentWithEffort {
+		t.Fatalf("claude subagent file = %q, want %q", got, wantClaudeSubagentWithEffort)
+	}
+	got, err = os.ReadFile(codexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != wantCodexSubagentWithEffort {
+		t.Fatalf("codex subagent file = %q, want %q", got, wantCodexSubagentWithEffort)
+	}
+
+	// Remove effort from source and reapply; ownership allows the refresh.
+	writeFile(t, agent, "subagents/code-reviewer/instructions.md", []byte(subagentInstructionsWithoutEffort), 0o644)
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", claudeWS}, &stdout, &stderr); code != 0 {
+		t.Fatalf("claude reapply exit %d: %s", code, stderr.String())
+	}
+	if code := run([]string{"apply", agent, "--harness", "codex", "--workspace", codexWS}, &stdout, &stderr); code != 0 {
+		t.Fatalf("codex reapply exit %d: %s", code, stderr.String())
+	}
+	got, err = os.ReadFile(claudePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != wantClaudeSubagentWithoutEffort {
+		t.Fatalf("claude subagent file after effort removal = %q, want %q", got, wantClaudeSubagentWithoutEffort)
+	}
+	got, err = os.ReadFile(codexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != wantCodexSubagentWithoutEffort {
+		t.Fatalf("codex subagent file after effort removal = %q, want %q", got, wantCodexSubagentWithoutEffort)
+	}
+}
+
+// TestSubagentChildToolsDirectoryFailsApplyBeforeWriting proves a subagent
+// directory carrying an extra tools/ entry is rejected — not ignored — and
+// a failing apply writes nothing.
+func TestSubagentChildToolsDirectoryFailsApplyBeforeWriting(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	writeFile(t, agent, "subagents/reviewer/instructions.md", []byte(minimalSubagentInstructionsFor("reviewer")), 0o644)
+	writeFile(t, agent, "subagents/reviewer/tools/helper.ts", []byte("export default {}\n"), 0o644)
+
+	ws := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--diagnostics", "jsonl"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("a subagent with a tools/ child must fail apply")
+	}
+	got := filterDiags(parseDiagLines(t, stdout.String()), "subagent.child.unsupported")
+	if len(got) == 0 {
+		t.Fatalf("expected subagent.child.unsupported, got %q", stdout.String())
+	}
+	entries, err := os.ReadDir(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("a failing apply must write nothing; found %v", entries)
+	}
+}
+
+// TestNestedSubagentsDirectoryFailsApplyBeforeWriting proves a subagent
+// directory carrying a nested subagents/ entry is rejected the same way as
+// any other unsupported child, and a failing apply writes nothing.
+func TestNestedSubagentsDirectoryFailsApplyBeforeWriting(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	writeFile(t, agent, "subagents/reviewer/instructions.md", []byte(minimalSubagentInstructionsFor("reviewer")), 0o644)
+	writeFile(t, agent, "subagents/reviewer/subagents/nested/instructions.md", []byte(minimalSubagentInstructionsFor("nested")), 0o644)
+
+	ws := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"apply", agent, "--harness", "codex", "--workspace", ws, "--diagnostics", "jsonl"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("a nested subagents/ directory must fail apply")
+	}
+	got := filterDiags(parseDiagLines(t, stdout.String()), "subagent.child.unsupported")
+	if len(got) == 0 {
+		t.Fatalf("expected subagent.child.unsupported, got %q", stdout.String())
+	}
+	entries, err := os.ReadDir(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("a failing apply must write nothing; found %v", entries)
+	}
+}
+
+// TestDeletingSubagentPrunesGeneratedFile proves stale removal end-to-end
+// for subagents: removing an authored subagent and reapplying deletes its
+// previously generated native file for the applied harness.
+func TestDeletingSubagentPrunesGeneratedFile(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	writeFile(t, agent, "subagents/helper/instructions.md", []byte(minimalSubagentInstructionsFor("helper")), 0o644)
+
+	ws := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws}, &stdout, &stderr); code != 0 {
+		t.Fatalf("apply exit %d: %s", code, stderr.String())
+	}
+	generated := filepath.Join(ws, ".claude/agents/helper.md")
+	if _, err := os.Stat(generated); err != nil {
+		t.Fatal("expected the generated subagent file to exist:", err)
+	}
+
+	if err := os.RemoveAll(filepath.Join(agent, "subagents", "helper")); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws}, &stdout, &stderr); code != 0 {
+		t.Fatalf("reapply exit %d: %s", code, stderr.String())
+	}
+	if _, err := os.Stat(generated); !os.IsNotExist(err) {
+		t.Fatalf("expected the stale generated subagent file to be pruned: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "removed .claude/agents/helper.md") {
+		t.Fatalf("expected the removal to be reported: %q", stdout.String())
+	}
+}
+
+// TestValidateApplyParityOnSubagentError proves spec acceptance 12 for a
+// subagent-error project: validate's structured diagnostics equal apply's,
+// and neither mutates the workspace.
+func TestValidateApplyParityOnSubagentError(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	writeFile(t, agent, "subagents/reviewer/instructions.md", []byte(minimalSubagentInstructionsFor("reviewer")), 0o644)
+	writeFile(t, agent, "subagents/reviewer/tools/helper.ts", []byte("export default {}\n"), 0o644)
+
+	var validateOut, applyOut, stderr bytes.Buffer
+	validateCode := run([]string{"validate", agent, "--harness", "claude", "--diagnostics", "jsonl"}, &validateOut, &stderr)
+	applyCode := run([]string{"apply", agent, "--harness", "claude", "--workspace", t.TempDir(), "--diagnostics", "jsonl"}, &applyOut, &stderr)
+	if validateCode == 0 || applyCode == 0 {
+		t.Fatalf("both must fail: validate=%d apply=%d", validateCode, applyCode)
+	}
+	if validateOut.String() != applyOut.String() {
+		t.Fatalf("validate and apply must report identical diagnostics:\n%s\n%s",
+			validateOut.String(), applyOut.String())
+	}
+	validateDiags := parseDiagLines(t, validateOut.String())
+	if len(filterDiags(validateDiags, "subagent.child.unsupported")) == 0 {
+		t.Fatalf("expected subagent.child.unsupported, got %q", validateOut.String())
+	}
+}
+
+func minimalSubagentInstructionsFor(desc string) string {
+	return "---\ndescription: Subagent " + desc + ".\n---\n\nDo the " + desc + " task.\n"
+}
+
 func TestUnknownCommandAndHarnessAreRejected(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"deploy"}, &stdout, &stderr); code == 0 {

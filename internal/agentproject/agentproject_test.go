@@ -115,6 +115,8 @@ func TestLoadRejectsFrontmatterViolations(t *testing.T) {
 		"missing frontmatter": {"just a body\n", "instructions.frontmatter.missing"},
 		"unknown field": {"---\ndescription: d\nmodel: opus\n---\n\nbody\n",
 			"instructions.frontmatter.unknown-field"},
+		"root effort is unknown": {"---\ndescription: d\neffort: high\n---\n\nbody\n",
+			"instructions.frontmatter.unknown-field"},
 		"missing description": {"---\nfriction-notes: true\n---\n\nbody\n",
 			"instructions.description.missing"},
 		"empty description": {"---\ndescription:\n---\n\nbody\n",

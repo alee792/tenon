@@ -49,5 +49,11 @@ func (Driver) Generate(p *agentproject.Project, diags *diagnostics.List) []apply
 				"frontmatter field %q carries Claude-specific behavior that the selected harness (codex) does not document honoring; the content was copied unchanged and may have no effect", field)
 		}
 	}
+	for _, sub := range p.Subagents {
+		files = append(files, apply.GeneratedFile{
+			Path:    ".codex/agents/" + sub.Name + ".toml",
+			Content: generated.CodexSubagent(sub.Name, sub.Description, sub.Effort, sub.Body),
+		})
+	}
 	return files
 }

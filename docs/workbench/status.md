@@ -25,6 +25,18 @@ and ADR 0013's count and byte ceilings fail before mutation. All six
 acceptance-evidence items are credential-free tested, and generation-time
 warnings report identically from validate and apply.
 
+Subagents, per ADRs 0004 and 0007: each immediate `subagents/NAME/`
+directory carries only an `instructions.md` (description, optional
+`low|medium|high` effort, non-empty body); anything else — child skills,
+tools, dependency files, nested subagents — is rejected, not ignored.
+Generation relies on native inheritance and emits only the child's routing
+metadata and body: `.claude/agents/NAME.md` frontmatter with the exact
+native effort field, and `.codex/agents/NAME.toml` with the underscored
+name value, valid-TOML string escaping, and `model_reasoning_effort`,
+each field omitted when effort is absent. Reserved built-in tool names are
+refused, ADR 0013 ceilings enforced, and effort changes and subagent
+deletion round-trip through ownership-checked reapply.
+
 ## Gaps
 
 The complete [product specification](../product-spec.md) acceptance list, to
