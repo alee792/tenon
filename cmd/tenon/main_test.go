@@ -453,6 +453,105 @@ func TestFlatSkillLayoutIsRejected(t *testing.T) {
 	}
 }
 
+// validPluginJSON is a minimal manifest targeting the canonical Agent
+// Plugins v1.0.0 schema.
+func validPluginJSON(name string) string {
+	return `{"$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json", "name": "` + name + `"}`
+}
+
+// TestPluginSkillCollisionParity proves that when a plugin skill collides
+// with a root skill of the same name, the root skill's bytes win in both
+// harnesses' generated output, and validate and apply report the identical
+// collision warning (parity).
+func TestPluginSkillCollisionParity(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	rootSkillMD := "---\nname: echo\ndescription: The root echo skill.\n---\n\nRoot body.\n"
+	pluginSkillMD := "---\nname: echo\ndescription: A vendored echo skill.\n---\n\nPlugin body.\n"
+	writeFile(t, agent, "skills/echo/SKILL.md", []byte(rootSkillMD), 0o644)
+	writeFile(t, agent, "plugins/vendor-x/plugin.json", []byte(validPluginJSON("vendor-x")), 0o644)
+	writeFile(t, agent, "plugins/vendor-x/skills/echo/SKILL.md", []byte(pluginSkillMD), 0o644)
+
+	requireCollisionWarning := func(out string) {
+		t.Helper()
+		got := filterDiags(parseDiagLines(t, out), "plugin.skill.collision")
+		if len(got) != 1 || got[0].Severity != "warning" || got[0].Path != "plugins/vendor-x/skills/echo" ||
+			!strings.Contains(got[0].Rule, "skills/echo") {
+			t.Fatalf("expected exactly one plugin.skill.collision naming both authored paths, got %+v", got)
+		}
+	}
+
+	var validateOut, stderr bytes.Buffer
+	if code := run([]string{"validate", agent, "--harness", "claude", "--diagnostics", "jsonl"}, nil, &validateOut, &stderr); code != 0 {
+		t.Fatalf("a collision warning alone must not fail validate: exit %d, %s", code, validateOut.String())
+	}
+	requireCollisionWarning(validateOut.String())
+
+	wantSkillMD := markedSkillMD(t, rootSkillMD)
+	check := func(harness, prefix string) {
+		t.Helper()
+		ws := t.TempDir()
+		var applyOut bytes.Buffer
+		if code := run([]string{"apply", agent, "--harness", harness, "--workspace", ws, "--diagnostics", "jsonl"}, nil, &applyOut, &stderr); code != 0 {
+			t.Fatalf("%s apply exit %d\nstdout: %s", harness, code, applyOut.String())
+		}
+		requireCollisionWarning(applyOut.String())
+		got, err := os.ReadFile(filepath.Join(ws, prefix, "SKILL.md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != wantSkillMD {
+			t.Fatalf("%s SKILL.md = %q, want the root skill's bytes %q", harness, got, wantSkillMD)
+		}
+	}
+	check("claude", ".claude/skills/echo")
+	check("codex", ".agents/skills/echo")
+}
+
+// TestPluginSkillRoundTripsByteForByte proves plugin-vendored skill
+// resources round-trip byte-for-byte like root skills, including the
+// inserted SKILL.md ownership marker.
+func TestPluginSkillRoundTripsByteForByte(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	script := []byte("#!/bin/sh\necho \"$@\"\n")
+	writeFile(t, agent, "plugins/vendor-x/plugin.json", []byte(validPluginJSON("vendor-x")), 0o644)
+	writeFile(t, agent, "plugins/vendor-x/skills/echo/SKILL.md", []byte(echoSkillMD), 0o644)
+	writeFile(t, agent, "plugins/vendor-x/skills/echo/scripts/run.sh", script, 0o755)
+
+	wantSkillMD := markedSkillMD(t, echoSkillMD)
+	check := func(harness, prefix string) {
+		t.Helper()
+		ws := t.TempDir()
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"apply", agent, "--harness", harness, "--workspace", ws}, nil, &stdout, &stderr); code != 0 {
+			t.Fatalf("%s apply exit %d\nstderr: %s", harness, code, stderr.String())
+		}
+		got, err := os.ReadFile(filepath.Join(ws, prefix, "SKILL.md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != wantSkillMD {
+			t.Fatalf("%s SKILL.md = %q, want the source with one marker line %q", harness, got, wantSkillMD)
+		}
+		gotScript, err := os.ReadFile(filepath.Join(ws, prefix, "scripts/run.sh"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(gotScript, script) {
+			t.Fatalf("%s scripts/run.sh = %q, want byte-identical source %q", harness, gotScript, script)
+		}
+		info, err := os.Stat(filepath.Join(ws, prefix, "scripts/run.sh"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm()&0o111 == 0 {
+			t.Fatalf("%s script must stay executable: %v", harness, info.Mode())
+		}
+	}
+	// The destination uses the skill name, not the plugin storage path.
+	check("claude", ".claude/skills/echo")
+	check("codex", ".agents/skills/echo")
+}
+
 // TestValidateApplyWarningParity proves spec acceptance 12 for warnings:
 // validate's structured diagnostics on a skill-warning project are exactly
 // apply's, and both exit zero.

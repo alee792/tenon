@@ -98,20 +98,37 @@ var skillClaudeFields = map[string]bool{
 	"when_to_use":              true,
 }
 
-// skillSetBudget tracks the file and byte budget shared across every skill
-// (ADR 0013), so the whole set stays bounded even when each skill is small.
+// skillSetBudget tracks the count, file, and byte budget shared across every
+// skill from every source — root skills/ and imported plugin skills alike
+// (ADR 0009, ADR 0013) — so the merged set stays bounded even when composed
+// from many small skills.
 type skillSetBudget struct {
+	count         int
 	files         int
 	bytes         int64
 	filesExceeded bool
 	bytesExceeded bool
 }
 
+// countSkill increments the aggregate skill count and emits the aggregate
+// skill.bounds.exceeded error exactly once when the shared MaxSkills ceiling
+// is first crossed. This aggregate ceiling is a hard safety limit that keeps
+// its existing project-rejecting behavior regardless of source, so counting
+// and validation both continue afterward rather than stopping early.
+func (b *skillSetBudget) countSkill(diags *diagnostics.List) {
+	b.count++
+	if b.count == MaxSkills+1 {
+		diags.Errorf("skill.bounds.exceeded", "skills",
+			"skills may contain at most %d skills", MaxSkills)
+	}
+}
+
 // loadSkills discovers and validates skills/, returning the skills sorted by
 // name and every skill file as a fingerprint input. Invalid skills reject
 // the project: they are authored project source, not isolatable plugin
-// components.
-func loadSkills(root string, diags *diagnostics.List) ([]Skill, []sourceInput) {
+// components. budget tracks the aggregate skill-set count, file, and byte
+// ceilings shared with any imported plugin skills (ADR 0013).
+func loadSkills(root string, budget *skillSetBudget, diags *diagnostics.List) ([]Skill, []sourceInput) {
 	dir := filepath.Join(root, "skills")
 	info, err := os.Lstat(dir)
 	if err != nil {
@@ -130,8 +147,6 @@ func loadSkills(root string, diags *diagnostics.List) ([]Skill, []sourceInput) {
 
 	var skills []Skill
 	var inputs []sourceInput
-	budget := &skillSetBudget{}
-	count := 0
 	for _, entry := range entries {
 		entryPath := "skills/" + entry.Name()
 		if entry.Type()&os.ModeSymlink != 0 {
@@ -150,12 +165,8 @@ func loadSkills(root string, diags *diagnostics.List) ([]Skill, []sourceInput) {
 			}
 			continue
 		}
-		count++
-		if count == MaxSkills+1 {
-			diags.Errorf("skill.bounds.exceeded", "skills",
-				"skills may contain at most %d skills", MaxSkills)
-		}
-		skill, skillInputs, ok := loadSkill(dir, entry.Name(), budget, diags)
+		budget.countSkill(diags)
+		skill, skillInputs, ok := loadSkill(dir, entry.Name(), entryPath, budget, diags)
 		inputs = append(inputs, skillInputs...)
 		if ok {
 			skills = append(skills, skill)
@@ -168,9 +179,10 @@ func loadSkills(root string, diags *diagnostics.List) ([]Skill, []sourceInput) {
 // loadSkill validates one skill directory: its name, its bounded regular
 // files, and its SKILL.md contract. Every regular file is returned as a
 // fingerprint input regardless of validity so identity tracks exactly what
-// was authored.
-func loadSkill(skillsDir, dirName string, budget *skillSetBudget, diags *diagnostics.List) (Skill, []sourceInput, bool) {
-	sourcePath := "skills/" + dirName
+// was authored. sourcePath is the skill's authored path relative to the
+// agent root ("skills/NAME" for root skills, "plugins/X/skills/NAME" for an
+// imported plugin skill); every diagnostic and the returned Skill name it.
+func loadSkill(skillsDir, dirName, sourcePath string, budget *skillSetBudget, diags *diagnostics.List) (Skill, []sourceInput, bool) {
 	valid := true
 	if len(dirName) > 64 || !skillNamePattern.MatchString(dirName) {
 		diags.Errorf("skill.name.invalid", sourcePath,
@@ -297,7 +309,7 @@ func loadSkill(skillsDir, dirName string, budget *skillSetBudget, diags *diagnos
 	mdIndex := slices.IndexFunc(s.Files, func(f SkillFile) bool { return f.RelPath == "SKILL.md" })
 	if mdIndex < 0 {
 		diags.Errorf("skill.skill-md.missing", sourcePath,
-			"each skill requires a SKILL.md regular file at skills/%s/SKILL.md", dirName)
+			"each skill requires a SKILL.md regular file at %s/SKILL.md", sourcePath)
 		valid = false
 	} else if skillMDRead {
 		mdPath := sourcePath + "/SKILL.md"

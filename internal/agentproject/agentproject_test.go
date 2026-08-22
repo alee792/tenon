@@ -172,7 +172,7 @@ func TestLoadRejectsOversizedInstructions(t *testing.T) {
 
 func TestLoadRefusesUnimplementedComponents(t *testing.T) {
 	root := writeAgent(t, "agent", validInstructions)
-	if err := os.Mkdir(filepath.Join(root, "plugins"), 0o755); err != nil {
+	if err := os.Mkdir(filepath.Join(root, "connections"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	p, diags, err := Load(root)
@@ -183,6 +183,22 @@ func TestLoadRefusesUnimplementedComponents(t *testing.T) {
 		t.Fatal("expected refusal: authored behavior must never be silently dropped")
 	}
 	requireErrorID(t, diags, "component.unsupported")
+}
+
+// TestLoadAllowsEmptyPlugins proves plugins/ is now an implemented,
+// optional component: an empty plugins/ directory produces no diagnostics.
+func TestLoadAllowsEmptyPlugins(t *testing.T) {
+	root := writeAgent(t, "agent", validInstructions)
+	if err := os.Mkdir(filepath.Join(root, "plugins"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p, diags, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p == nil || diags.HasErrors() {
+		t.Fatalf("an empty plugins/ must be normal: %v", diags.All())
+	}
 }
 
 func TestLoadWarnsOnChannelProduct(t *testing.T) {

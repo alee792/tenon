@@ -73,6 +73,16 @@ same tool surface on both harnesses (acceptance item 2). Tool/subagent
 name collisions fail before mutation, and a stale tool cache fails closed
 at serve with a run-apply message.
 
+Plugin skills, per ADR 0009: vendored Agent Plugins v1 directories under
+`plugins/` validate their `plugin.json` locally against the exact v1.0.0
+schema identifier without any fetch, and contribute skills from their fixed
+`skills/` location through the same shared loader and aggregate budgets as
+root skills. Component failure is isolated — an invalid plugin, skill, or
+manifest warns and skips at its authored path while valid siblings
+continue — root skills load first, and the first name wins with collisions
+warned and never renamed. Plugin manifests and consumed resources join the
+fingerprint, and imported skills round-trip byte-for-byte like root skills.
+
 
 ## Gaps
 

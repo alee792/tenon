@@ -32,6 +32,9 @@ type Project struct {
 	// root must then be proven by a supplied agent manifest.
 	Instructions *Instructions
 	// Skills are the validated Agent Skills directories, sorted by name.
+	// They merge root skills/ with every valid plugin's imported skills/
+	// (ADR 0009): root skills always win a name collision, and among
+	// plugins the lexically first plugin and skill directory wins.
 	Skills []Skill
 	// Subagents are the validated immediate subagents/ directories, sorted
 	// by name.
@@ -58,7 +61,7 @@ type Instructions struct {
 // component is implemented, its presence fails validation: silently dropping
 // authored behavior would pretend the compiled agent is complete.
 var componentDirs = []string{
-	"plugins", "connections", "schedules",
+	"connections", "schedules",
 }
 
 // Load validates the agent project at dir. Contract violations are reported
@@ -109,8 +112,11 @@ func Load(dir string) (*Project, *diagnostics.List, error) {
 			"a directory is an agent project only when instructions.md is present or a supplied agent manifest matches it; neither proof was found")
 	}
 
-	skills, skillInputs := loadSkills(root, diags)
-	p.Skills = skills
+	skillBudget := &skillSetBudget{}
+	skills, skillInputs := loadSkills(root, skillBudget, diags)
+	pluginSkills, manifestInputs := loadPlugins(root, skillBudget, diags)
+	mergedSkills, pluginSkillInputs := mergeSkills(skills, pluginSkills, diags)
+	p.Skills = mergedSkills
 
 	subagents, subagentInputs := loadSubagents(root, diags)
 	p.Subagents = subagents
@@ -127,6 +133,8 @@ func Load(dir string) (*Project, *diagnostics.List, error) {
 		{Path: "instructions.md", Content: instructionsBytes, Executable: false},
 	}
 	inputs = append(inputs, skillInputs...)
+	inputs = append(inputs, pluginSkillInputs...)
+	inputs = append(inputs, manifestInputs...)
 	inputs = append(inputs, subagentInputs...)
 	inputs = append(inputs, toolInputs...)
 	inputs = append(inputs, harnessInputs...)
