@@ -698,3 +698,168 @@ func TestUnknownCommandAndHarnessAreRejected(t *testing.T) {
 		t.Fatal("unknown harness must fail")
 	}
 }
+
+// TestHarnessFilesApplyOnlyToTheirOwnHarness proves harness-specific files
+// round-trip byte-for-byte only to their selected harness: a claude apply
+// writes exactly harnesses/claude's files and never codex's, and vice versa,
+// with executable intent preserved.
+func TestHarnessFilesApplyOnlyToTheirOwnHarness(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	settings := []byte(`{"model":"opus"}`)
+	hook := []byte("#!/bin/sh\necho pre\n")
+	rules := []byte("# Codex rules\n")
+	writeFile(t, agent, "harnesses/claude/.claude/settings.json", settings, 0o644)
+	writeFile(t, agent, "harnesses/claude/.claude/hooks/pre.sh", hook, 0o755)
+	writeFile(t, agent, "harnesses/codex/.codex/rules.md", rules, 0o644)
+
+	claudeWS := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", claudeWS}, &stdout, &stderr); code != 0 {
+		t.Fatalf("claude apply exit %d\nstderr: %s", code, stderr.String())
+	}
+	got, err := os.ReadFile(filepath.Join(claudeWS, ".claude", "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, settings) {
+		t.Fatalf(".claude/settings.json = %q, want byte-identical %q", got, settings)
+	}
+	info, err := os.Stat(filepath.Join(claudeWS, ".claude", "hooks", "pre.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		t.Fatalf(".claude/hooks/pre.sh must stay executable: %v", info.Mode())
+	}
+	if _, err := os.Stat(filepath.Join(claudeWS, ".codex")); !os.IsNotExist(err) {
+		t.Fatal("a claude apply must not write codex's harness-specific files")
+	}
+
+	codexWS := t.TempDir()
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"apply", agent, "--harness", "codex", "--workspace", codexWS}, &stdout, &stderr); code != 0 {
+		t.Fatalf("codex apply exit %d\nstderr: %s", code, stderr.String())
+	}
+	got, err = os.ReadFile(filepath.Join(codexWS, ".codex", "rules.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, rules) {
+		t.Fatalf(".codex/rules.md = %q, want byte-identical %q", got, rules)
+	}
+	if _, err := os.Stat(filepath.Join(codexWS, ".claude")); !os.IsNotExist(err) {
+		t.Fatal("a codex apply must not write claude's harness-specific files")
+	}
+}
+
+// TestHarnessFilesReservedDestinationsFailBeforeWriting proves reserved
+// tenon-owned destinations are refused, including a case-folded alias, and a
+// failing apply writes nothing.
+func TestHarnessFilesReservedDestinationsFailBeforeWriting(t *testing.T) {
+	cases := map[string]string{
+		"claude skills":      "harnesses/claude/.claude/skills/anything",
+		"claude case-folded": "harnesses/claude/.claude/SKILLS/x",
+		"codex config.toml":  "harnesses/codex/.codex/config.toml",
+	}
+	for name, path := range cases {
+		t.Run(name, func(t *testing.T) {
+			agent := writeAgent(t, "my-agent", validInstructions)
+			writeFile(t, agent, path, []byte("x"), 0o644)
+
+			ws := t.TempDir()
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--diagnostics", "jsonl"}, &stdout, &stderr)
+			if code == 0 {
+				t.Fatal("a reserved harness-file destination must fail apply")
+			}
+			if len(filterDiags(parseDiagLines(t, stdout.String()), "harnessfile.path.reserved")) == 0 {
+				t.Fatalf("expected harnessfile.path.reserved, got %q", stdout.String())
+			}
+			entries, err := os.ReadDir(ws)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 0 {
+				t.Fatalf("a failing apply must write nothing; found %v", entries)
+			}
+		})
+	}
+}
+
+// TestHarnessFilesUnknownHarnessDirectoryFails proves an unrecognized
+// immediate entry under harnesses/ fails with the stable unknown-harness
+// identifier.
+func TestHarnessFilesUnknownHarnessDirectoryFails(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	writeFile(t, agent, "harnesses/cursor/rules.md", []byte("body\n"), 0o644)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"validate", agent, "--harness", "claude", "--diagnostics", "jsonl"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("an unknown harnesses/ entry must fail validation")
+	}
+	if len(filterDiags(parseDiagLines(t, stdout.String()), "harnessfile.harness.unknown")) == 0 {
+		t.Fatalf("expected harnessfile.harness.unknown, got %q", stdout.String())
+	}
+}
+
+// TestHarnessFilesRefuseHandAuthoredWorkspaceFile proves apply's generic
+// ownership machinery covers harness-specific destinations too: a
+// hand-authored .claude/settings.json already in the workspace is refused
+// with apply.conflict.unowned rather than overwritten.
+func TestHarnessFilesRefuseHandAuthoredWorkspaceFile(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	writeFile(t, agent, "harnesses/claude/.claude/settings.json", []byte(`{"model":"opus"}`), 0o644)
+
+	ws := t.TempDir()
+	writeFile(t, ws, ".claude/settings.json", []byte(`{"hand":"authored"}`), 0o644)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--diagnostics", "jsonl"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("a hand-authored native file already in the workspace must refuse apply")
+	}
+	got := filterDiags(parseDiagLines(t, stdout.String()), "apply.conflict.unowned")
+	if len(got) == 0 {
+		t.Fatalf("expected apply.conflict.unowned, got %q", stdout.String())
+	}
+	current, err := os.ReadFile(filepath.Join(ws, ".claude", "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(current) != `{"hand":"authored"}` {
+		t.Fatal("the hand-authored file must not be overwritten")
+	}
+}
+
+// TestHarnessFilesValidateApplyParity proves spec acceptance 12 for a
+// harness-file error project: validate's structured diagnostics equal
+// apply's, and neither mutates the workspace.
+func TestHarnessFilesValidateApplyParity(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	writeFile(t, agent, "harnesses/claude/.claude/agents/anything", []byte("x"), 0o644)
+
+	ws := t.TempDir()
+	var validateOut, applyOut, stderr bytes.Buffer
+	validateCode := run([]string{"validate", agent, "--harness", "claude", "--diagnostics", "jsonl"}, &validateOut, &stderr)
+	applyCode := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--diagnostics", "jsonl"}, &applyOut, &stderr)
+	if validateCode == 0 || applyCode == 0 {
+		t.Fatalf("both must fail: validate=%d apply=%d", validateCode, applyCode)
+	}
+	if validateOut.String() != applyOut.String() {
+		t.Fatalf("validate and apply must report identical diagnostics:\n%s\n%s",
+			validateOut.String(), applyOut.String())
+	}
+	validateDiags := parseDiagLines(t, validateOut.String())
+	if len(filterDiags(validateDiags, "harnessfile.path.reserved")) == 0 {
+		t.Fatalf("expected harnessfile.path.reserved, got %q", validateOut.String())
+	}
+	entries, err := os.ReadDir(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("a failing apply must write nothing; found %v", entries)
+	}
+}

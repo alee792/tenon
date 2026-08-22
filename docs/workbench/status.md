@@ -1,6 +1,6 @@
 # Working status
 
-- Updated: 2026-08-20
+- Updated: 2026-08-22
 
 ## Implemented
 
@@ -36,6 +36,16 @@ name value, valid-TOML string escaping, and `model_reasoning_effort`,
 each field omitted when effort is absent. Reserved built-in tool names are
 refused, ADR 0013 ceilings enforced, and effort changes and subagent
 deletion round-trip through ownership-checked reapply.
+
+Harness-specific files: `harnesses/claude/.claude/` and
+`harnesses/codex/.codex/` subtrees copy byte-for-byte, unparsed and
+unmarked, to only the selected harness; tenon-owned destinations
+(`.claude/skills/`, `.claude/agents/`, `.codex/agents/`,
+`.codex/config.toml`) are refused including case-folded aliases, unknown
+harness directories fail, and per-harness ADR 0013 ceilings (1,024 files,
+1 MiB each, 8 MiB aggregate) hold. With skills, subagents, and this
+round-trip landed, acceptance item 4 is complete.
+
 
 ## Gaps
 

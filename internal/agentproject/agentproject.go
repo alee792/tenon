@@ -36,6 +36,9 @@ type Project struct {
 	// Subagents are the validated immediate subagents/ directories, sorted
 	// by name.
 	Subagents []Subagent
+	// HarnessFiles are the validated harness-specific files, keyed by
+	// harness name ("claude", "codex") and sorted by RelPath within each.
+	HarnessFiles map[string][]HarnessFile
 	// Fingerprint is "sha256:<hex>" over every authored input.
 	Fingerprint string
 }
@@ -53,7 +56,7 @@ type Instructions struct {
 // component is implemented, its presence fails validation: silently dropping
 // authored behavior would pretend the compiled agent is complete.
 var componentDirs = []string{
-	"plugins", "tools", "connections", "schedules", "harnesses",
+	"plugins", "tools", "connections", "schedules",
 }
 
 // Load validates the agent project at dir. Contract violations are reported
@@ -110,11 +113,15 @@ func Load(dir string) (*Project, *diagnostics.List, error) {
 	subagents, subagentInputs := loadSubagents(root, diags)
 	p.Subagents = subagents
 
+	harnessFiles, harnessInputs := loadHarnessFiles(root, diags)
+	p.HarnessFiles = harnessFiles
+
 	inputs := []sourceInput{
 		{Path: "instructions.md", Content: instructionsBytes, Executable: false},
 	}
 	inputs = append(inputs, skillInputs...)
 	inputs = append(inputs, subagentInputs...)
+	inputs = append(inputs, harnessInputs...)
 	p.Fingerprint = fingerprint(inputs)
 	if diags.HasErrors() {
 		return nil, diags, nil

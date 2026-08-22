@@ -50,5 +50,16 @@ func (Driver) Generate(p *agentproject.Project, diags *diagnostics.List) []apply
 			Content: generated.ClaudeSubagent(sub.Name, sub.Description, sub.Effort, sub.Body),
 		})
 	}
+	// Harness-specific files copy byte-for-byte with no marker and no
+	// transformation: tenon does not parse their semantics. Only this
+	// harness's own files apply; codex's harness-specific files contribute
+	// nothing here.
+	for _, f := range p.HarnessFiles["claude"] {
+		files = append(files, apply.GeneratedFile{
+			Path:       f.RelPath,
+			Content:    f.Content,
+			Executable: f.Executable,
+		})
+	}
 	return files
 }
