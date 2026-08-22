@@ -56,7 +56,22 @@ and the opt-in `record-friction` (owner-only per-agent inbox, 256-record
 cap, never evicting), and writes content-free lifecycle audit — agent,
 tool, hashed request ID, outcome; never arguments or output — proving
 acceptance item 10. Authored tools are discovered and statically validated
-but stay gated until the language hosts land.
+and, as of the hosts slice below, fully served.
+
+Authored tools, completing the managed boundary: `tools/*.ts`, `tools/*.py`,
+and `tools/NAME/tool.go` compile through one fresh embedded host per
+language speaking a bounded JSONL protocol (64 KiB call lines, 8 MiB
+catalog, deadline and overflow kill the host, stderr never forwarded).
+Apply prepares once per workspace — `deno check --frozen`,
+`uv sync --locked`, an offline standard-library-only generated Go host —
+records absolute executable receipts, and inspects every catalog before
+mutation; validate runs the identical preparation against a throwaway
+cache so parity holds while writing nothing. Authored tools join the
+managed MCP surface behind the existing content-free audit, and the
+mixed-language end-to-end proves one host process per language with the
+same tool surface on both harnesses (acceptance item 2). Tool/subagent
+name collisions fail before mutation, and a stale tool cache fails closed
+at serve with a run-apply message.
 
 
 ## Gaps

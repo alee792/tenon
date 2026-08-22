@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -351,5 +352,175 @@ func TestCanceledContextStopsServing(t *testing.T) {
 	}
 	if out.Len() != 0 {
 		t.Fatalf("a canceled session must not answer: %q", out.String())
+	}
+}
+
+// stubCaller stands in for the language hosts: it records what crossed the
+// boundary and returns whatever the test needs.
+type stubCaller struct {
+	calls     int
+	name      string
+	arguments string
+	output    string
+	err       error
+}
+
+func (c *stubCaller) Call(name string, arguments json.RawMessage) (json.RawMessage, error) {
+	c.calls++
+	c.name = name
+	c.arguments = string(arguments)
+	if c.err != nil {
+		return nil, c.err
+	}
+	return json.RawMessage(c.output), nil
+}
+
+// authoredConfig serves one authored tool with a conspicuous schema, so a
+// rewritten or re-derived surface is visible in the test.
+func authoredConfig(caller Caller) Config {
+	cfg := config(false, nil)
+	cfg.Definitions = []Definition{{
+		Name:         "hash-text",
+		Description:  "Hash bounded text with SHA-256.",
+		InputSchema:  json.RawMessage(`{"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false}`),
+		OutputSchema: json.RawMessage(`{"type":"object","properties":{"hex":{"type":"string"}},"required":["hex"],"additionalProperties":false}`),
+	}}
+	cfg.Tools = caller
+	return cfg
+}
+
+// TestAuthoredToolsArePublishedAfterTheBuiltIns proves the authored surface
+// joins the managed one verbatim: tenon publishes the author's own name,
+// description, and schemas, after echo and record-friction.
+func TestAuthoredToolsArePublishedAfterTheBuiltIns(t *testing.T) {
+	cfg := authoredConfig(&stubCaller{output: `{"hex":"ab"}`})
+	cfg.FrictionNotes = true
+	cfg.Recorder = &stubRecorder{}
+
+	responses, _ := serve(t, cfg, `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`)
+	names := toolNames(t, responses[0])
+	if len(names) != 3 || names[0] != "echo" || names[1] != "record-friction" || names[2] != "hash-text" {
+		t.Fatalf("managed surface = %v, want the built-ins then the authored tool", names)
+	}
+	listed := result(t, responses[0])["tools"].([]any)[2].(map[string]any)
+	if listed["description"] != "Hash bounded text with SHA-256." {
+		t.Fatalf("description = %v, want the author's own words", listed["description"])
+	}
+	input := listed["inputSchema"].(map[string]any)
+	if input["type"] != "object" || input["additionalProperties"] != false ||
+		input["properties"].(map[string]any)["text"].(map[string]any)["type"] != "string" {
+		t.Fatalf("inputSchema = %#v, want the reported schema verbatim", input)
+	}
+	if listed["outputSchema"].(map[string]any)["properties"].(map[string]any)["hex"] == nil {
+		t.Fatalf("outputSchema = %#v", listed["outputSchema"])
+	}
+}
+
+// TestAuthoredToolCallRoundTripsAndAudits proves an authored call crosses the
+// boundary with its arguments intact, returns structured content beside a
+// bounded text rendering, and audits through the same content-free lifecycle
+// as a built-in.
+func TestAuthoredToolCallRoundTripsAndAudits(t *testing.T) {
+	caller := &stubCaller{output: `{"hex":"CONSPICUOUS-OUTPUT"}`}
+	responses, audit := serve(t, authoredConfig(caller),
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"hash-text","arguments":{"text":"hi"}}}`)
+
+	called := result(t, responses[0])
+	if called["isError"] != false {
+		t.Fatalf("authored call failed: %#v", called)
+	}
+	if called["structuredContent"].(map[string]any)["hex"] != "CONSPICUOUS-OUTPUT" {
+		t.Fatalf("structuredContent = %#v", called["structuredContent"])
+	}
+	text := called["content"].([]any)[0].(map[string]any)["text"].(string)
+	if text != `{"hex":"CONSPICUOUS-OUTPUT"}` {
+		t.Fatalf("text rendering = %q", text)
+	}
+	if caller.calls != 1 || caller.name != "hash-text" || caller.arguments != `{"text":"hi"}` {
+		t.Fatalf("caller = %+v", caller)
+	}
+	for _, outcome := range []string{"requested", "authorized", "completed"} {
+		if !strings.Contains(audit, "managed agent=my-agent tool=hash-text request=") ||
+			!strings.Contains(audit, "outcome="+outcome) {
+			t.Fatalf("audit is missing tool=hash-text outcome=%s: %q", outcome, audit)
+		}
+	}
+	if strings.Contains(audit, "CONSPICUOUS") {
+		t.Fatalf("audit must stay content-free: %q", audit)
+	}
+}
+
+// TestAuthoredToolFailuresAreBoundedInBandErrors proves a failing tool is an
+// unsuccessful result carrying one bounded sentence — never a protocol error,
+// never unbounded host output.
+func TestAuthoredToolFailuresAreBoundedInBandErrors(t *testing.T) {
+	caller := &stubCaller{err: errors.New(strings.Repeat("z", 4096) + "\nsecond line")}
+	responses, audit := serve(t, authoredConfig(caller),
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"hash-text","arguments":{"text":"hi"}}}`)
+
+	failed := result(t, responses[0])
+	if failed["isError"] != true {
+		t.Fatalf("a failing tool must be an in-band error result: %#v", failed)
+	}
+	message := failed["content"].([]any)[0].(map[string]any)["text"].(string)
+	if len(message) > MaxErrorBytes+3 || strings.Contains(message, "\n") {
+		t.Fatalf("a tool error must be one bounded line: %d bytes", len(message))
+	}
+	if !strings.Contains(audit, "outcome=failed") {
+		t.Fatalf("a failing authored call must audit its outcome: %q", audit)
+	}
+
+	// A tool whose result is not one JSON object never becomes structured
+	// content.
+	responses, _ = serve(t, authoredConfig(&stubCaller{output: `[1,2]`}),
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"hash-text","arguments":{"text":"hi"}}}`)
+	if result(t, responses[0])["isError"] != true {
+		t.Fatalf("a non-object result must fail: %#v", responses[0])
+	}
+}
+
+// TestAuthoredToolArgumentsAreValidatedBeforeTheHost proves malformed
+// arguments never reach a language host, and that an oversized call is
+// refused by the line bound before it is ever decoded.
+func TestAuthoredToolArgumentsAreValidatedBeforeTheHost(t *testing.T) {
+	caller := &stubCaller{output: `{"hex":"ab"}`}
+	responses, _ := serve(t, authoredConfig(caller),
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"hash-text","arguments":"not an object"}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"hash-text","arguments":[1,2]}}`)
+
+	for i, response := range responses {
+		refused := result(t, response)
+		if refused["isError"] != true {
+			t.Fatalf("refusal %d was accepted: %#v", i, refused)
+		}
+	}
+	if caller.calls != 0 {
+		t.Fatalf("invalid arguments reached the host %d times", caller.calls)
+	}
+
+	oversize := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"hash-text","arguments":{"text":"` +
+		strings.Repeat("x", maxLineBytes) + `"}}}` + "\n"
+	if _, _, err := serveRaw(t, authoredConfig(caller), oversize); err == nil {
+		t.Fatal("a request line over its bound must stop the session")
+	}
+	if caller.calls != 0 {
+		t.Fatalf("an oversized line reached the host %d times", caller.calls)
+	}
+}
+
+// TestAuthoredToolsNeedARuntime proves a published definition without an open
+// runtime is not merely unadvertised but uncallable.
+func TestAuthoredToolsNeedARuntime(t *testing.T) {
+	cfg := authoredConfig(nil)
+	cfg.Tools = nil
+
+	responses, _ := serve(t, cfg,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"hash-text","arguments":{"text":"hi"}}}`)
+	if names := toolNames(t, responses[0]); len(names) != 1 || names[0] != "echo" {
+		t.Fatalf("surface without a runtime = %v, want echo alone", names)
+	}
+	if result(t, responses[1])["isError"] != true {
+		t.Fatalf("an authored tool without a runtime must be uncallable: %#v", responses[1])
 	}
 }

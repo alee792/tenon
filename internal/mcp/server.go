@@ -1,7 +1,9 @@
 // Package mcp is tenon's managed tool boundary: one stdio MCP server that
-// exposes the bounded built-in tools to both harnesses over JSON-RPC 2.0
-// framed as line-delimited JSON. Every request line, tool name, and argument
-// is bounded and schema-validated before anything runs, and audit output
+// exposes the bounded built-in tools and the project's authored tools to both
+// harnesses over JSON-RPC 2.0 framed as line-delimited JSON. Every request
+// line, tool name, and argument is bounded and validated before anything runs,
+// authored calls cross into the long-lived language hosts through one caller
+// under tenon's own deadline, and audit output
 // carries only a safe request identifier, a fixed tool name, and a lifecycle
 // outcome — never arguments, outputs, notes, or error text. The boundary is
 // additive: it does not disable, authorize, observe, or retry the harness's
@@ -37,6 +39,11 @@ const (
 	// MaxNoteBytes bounds one friction note accepted at the boundary. The
 	// store bounds what it retains independently.
 	MaxNoteBytes = 1024
+	// MaxResultTextBytes bounds the text rendering of one authored tool
+	// result. Structured content carries the whole result.
+	MaxResultTextBytes = 4096
+	// MaxErrorBytes bounds one model-visible tool error.
+	MaxErrorBytes = 512
 	// maxLineBytes bounds one request line. A longer line is not truncated
 	// and not partially interpreted: the server reports it and exits.
 	maxLineBytes = 64 << 10
@@ -59,6 +66,24 @@ type Recorder interface {
 	Record(note string) bool
 }
 
+// Definition is one authored tool as its language host reported it. The
+// managed surface publishes it verbatim: tenon validated the shape before the
+// server opened and does not rewrite an author's words or schemas.
+type Definition struct {
+	Name         string
+	Description  string
+	InputSchema  json.RawMessage
+	OutputSchema json.RawMessage
+}
+
+// Caller runs one authored tool call against the long-lived language hosts.
+// The boundary hands it validated, bounded arguments and expects one bounded
+// JSON object back; a violation of the tool's own contract is an ordinary
+// error, answered in band.
+type Caller interface {
+	Call(name string, arguments json.RawMessage) (json.RawMessage, error)
+}
+
 // Config is the served project's identity and the surface it opts into.
 // Identity travels with the session so audit output and any recorded note
 // name the exact agent; none of it is model-facing.
@@ -72,6 +97,26 @@ type Config struct {
 	FrictionNotes bool
 	// Recorder stores friction notes. A nil recorder records nothing.
 	Recorder Recorder
+	// Definitions are the authored tools to publish after the built-ins,
+	// already validated and sorted by the tool runtime.
+	Definitions []Definition
+	// Tools runs authored tool calls. It must be present whenever
+	// Definitions is non-empty; a nil caller serves no authored tool.
+	Tools Caller
+}
+
+// authored returns the definition of one authored tool, if the served project
+// declares it.
+func (c Config) authored(name string) (Definition, bool) {
+	if c.Tools == nil {
+		return Definition{}, false
+	}
+	for _, d := range c.Definitions {
+		if d.Name == name {
+			return d, true
+		}
+	}
+	return Definition{}, false
 }
 
 // Serve reads line-delimited JSON-RPC requests from in, writes responses to
@@ -138,7 +183,7 @@ func (s *server) handle(line []byte) {
 			"serverInfo":      map[string]any{"name": serverName, "version": Version},
 		})
 	case "tools/list":
-		s.writeResult(request.ID, map[string]any{"tools": tools(s.cfg.FrictionNotes)})
+		s.writeResult(request.ID, map[string]any{"tools": tools(s.cfg)})
 	case "tools/call":
 		s.callTool(request.ID, request.Params)
 	default:
@@ -164,10 +209,20 @@ func (s *server) callTool(id, params json.RawMessage) {
 		return
 	}
 	handler, known := handlers[decoded.Name]
-	if !known || (decoded.Name == frictionTool && !s.cfg.FrictionNotes) {
+	if known && decoded.Name == frictionTool && !s.cfg.FrictionNotes {
+		known = false
+	}
+	definition, authored := s.cfg.authored(decoded.Name)
+	if !known && !authored {
 		s.writeAudit(unnamedTool, requestID, "failed")
 		s.writeToolError(id, "invalid managed tool call")
 		return
+	}
+	if !known {
+		// An authored tool is dispatched through the same lifecycle as a
+		// built-in: the boundary audits, bounds, and validates identically
+		// whoever wrote the tool.
+		handler = func(s *server, c call) (map[string]any, error) { return s.callAuthored(definition, c) }
 	}
 
 	s.writeAudit(decoded.Name, requestID, "requested")
@@ -198,8 +253,8 @@ const (
 	frictionTool = "record-friction"
 )
 
-// handlers routes the fixed managed tools. Authored tools join in a later
-// slice; until then every other name is refused.
+// handlers routes the fixed built-in tools. Every other name is refused
+// unless the served project authored a tool by exactly that name.
 var handlers = map[string]handler{
 	echoTool:     callEcho,
 	frictionTool: callRecordFriction,
@@ -251,9 +306,87 @@ func callRecordFriction(s *server, c call) (map[string]any, error) {
 	}, nil
 }
 
-// tools is the advertised managed surface: echo always, and record-friction
-// only when root instructions opted in.
-func tools(frictionNotes bool) []any {
+// callAuthored runs one authored tool through the long-lived language hosts.
+// The arguments are bounded and proven to be one JSON object before they leave
+// tenon, and the tool's own result must be one JSON object, published as
+// structured content beside a bounded text rendering. A failure — the tool's,
+// the host's, or the boundary's — is a bounded sentence: raw host output never
+// reaches the model.
+func (s *server) callAuthored(definition Definition, c call) (map[string]any, error) {
+	arguments := c.arguments
+	if len(bytes.TrimSpace(arguments)) == 0 {
+		arguments = json.RawMessage("{}")
+	}
+	// The request line is already bounded, so size is settled; what remains
+	// is that the arguments are one JSON object and not a bare value.
+	var decoded map[string]any
+	if err := json.Unmarshal(arguments, &decoded); err != nil || decoded == nil {
+		return nil, errors.New("the tool arguments must be one JSON object")
+	}
+	s.authorize(c)
+
+	output, err := s.cfg.Tools.Call(definition.Name, arguments)
+	if err != nil {
+		return nil, errors.New(boundMessage(err.Error()))
+	}
+	var structured map[string]any
+	if err := json.Unmarshal(output, &structured); err != nil || structured == nil {
+		return nil, errors.New("the tool returned something other than one JSON object")
+	}
+	return map[string]any{
+		"content":           []any{map[string]any{"type": "text", "text": renderOutput(output)}},
+		"structuredContent": structured,
+		"isError":           false,
+	}, nil
+}
+
+// renderOutput is the bounded text rendering of one tool result, for clients
+// that read content rather than structured content.
+func renderOutput(output json.RawMessage) string {
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, output); err != nil {
+		return "the tool result could not be rendered as text"
+	}
+	text := compact.String()
+	if len(text) > MaxResultTextBytes {
+		return text[:MaxResultTextBytes] + "..."
+	}
+	return text
+}
+
+// boundMessage trims a tool or host error to one bounded single-line sentence.
+func boundMessage(message string) string {
+	flat := strings.Join(strings.Fields(message), " ")
+	if flat == "" {
+		return "the tool call failed"
+	}
+	if len(flat) > MaxErrorBytes {
+		return flat[:MaxErrorBytes] + "..."
+	}
+	return flat
+}
+
+// tools is the advertised managed surface: echo always, record-friction only
+// when root instructions opted in, and then every authored tool, published
+// exactly as its language host reported it.
+func tools(cfg Config) []any {
+	advertised := builtinTools(cfg.FrictionNotes)
+	for _, d := range cfg.Definitions {
+		if cfg.Tools == nil {
+			break
+		}
+		advertised = append(advertised, map[string]any{
+			"name":         d.Name,
+			"description":  d.Description,
+			"inputSchema":  d.InputSchema,
+			"outputSchema": d.OutputSchema,
+		})
+	}
+	return advertised
+}
+
+// builtinTools is the fixed built-in surface.
+func builtinTools(frictionNotes bool) []any {
 	advertised := []any{map[string]any{
 		"name":        echoTool,
 		"description": "Return bounded text through the managed boundary.",

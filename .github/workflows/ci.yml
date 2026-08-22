@@ -27,5 +27,15 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # Deno and uv let the polyglot authored-tool tests run rather than
+      # skip; the suite stays green without them.
+      - name: Set up Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
       - name: Run repository checks
         run: ./scripts/check.sh

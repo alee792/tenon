@@ -36,8 +36,9 @@ const (
 // digits, or hyphens, at most 63 characters total.
 var subagentNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
 
-// reservedSubagentNames are names claimed by the managed built-in tools that
-// a later slice ships; when authored tools exist they join this set.
+// reservedSubagentNames are names claimed by the managed built-in tools.
+// Authored tool names are not reserved here: they are discovered per project
+// and checked against subagents once both discoveries have run.
 var reservedSubagentNames = map[string]bool{
 	"echo":            true,
 	"record-friction": true,

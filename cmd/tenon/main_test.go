@@ -82,7 +82,7 @@ func TestFiveMinuteJourney(t *testing.T) {
 // either command on a failing project.
 func TestValidateReportsApplyFailuresWithoutMutating(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
-	if err := os.Mkdir(filepath.Join(agent, "tools"), 0o755); err != nil {
+	if err := os.Mkdir(filepath.Join(agent, "connections"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 

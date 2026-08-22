@@ -4,6 +4,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -11,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/alee792/tenon/internal/agentproject"
 	"github.com/alee792/tenon/internal/apply"
@@ -19,7 +22,12 @@ import (
 	"github.com/alee792/tenon/internal/diagnostics"
 	"github.com/alee792/tenon/internal/friction"
 	"github.com/alee792/tenon/internal/mcp"
+	"github.com/alee792/tenon/internal/toolruntime"
 )
+
+// prepareBudget bounds one tool preparation: installing locked dependencies
+// and building a Go host is slow, but it is not unbounded.
+const prepareBudget = 5 * time.Minute
 
 const usage = `usage:
   tenon apply AGENT --harness <claude|codex> [--workspace DIR] [--diagnostics <prose|jsonl>]
@@ -170,7 +178,22 @@ func runValidate(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "tenon validate:", err)
 			return 1
 		}
-		_ = driver.Generate(p, apply.Target{Workspace: workspace, Executable: executable}, diags)
+		// Tool preparation is the same work apply does, in the same order,
+		// against a throwaway cache that is deleted afterwards: validate
+		// reports apply's tool failures while writing nothing to the
+		// workspace.
+		cache := ""
+		if len(p.Tools) > 0 {
+			cache, err = os.MkdirTemp("", "tenon-tools-")
+			if err != nil {
+				fmt.Fprintln(stderr, "tenon validate:", err)
+				return 1
+			}
+			defer os.RemoveAll(cache)
+		}
+		if prepareTools(p, workspace, cache, diags) {
+			_ = driver.Generate(p, apply.Target{Workspace: workspace, Executable: executable}, diags)
+		}
 	}
 	render(diags, jsonl, stdout, stderr)
 	if p == nil || diags.HasErrors() {
@@ -197,6 +220,13 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 	executable, err := resolveExecutable()
 	if err != nil {
 		fmt.Fprintln(stderr, "tenon apply:", err)
+		return 1
+	}
+	// Tools are prepared and inspected once, before anything in the
+	// workspace is mutated: a project whose tools cannot be built is not
+	// half-applied.
+	if !prepareTools(p, workspace, "", diags) {
+		render(diags, jsonl, stdout, stderr)
 		return 1
 	}
 
@@ -226,14 +256,78 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// managedTools names the built-in tools the managed boundary will expose for
-// the project. Authored tools join in a later slice.
+// managedTools names the tools the managed boundary will expose for the
+// project: the built-ins first, then every authored tool.
 func managedTools(p *agentproject.Project) []string {
 	tools := []string{"echo"}
 	if p.Instructions != nil && p.Instructions.FrictionNotes {
 		tools = append(tools, "record-friction")
 	}
+	for _, tool := range p.Tools {
+		tools = append(tools, tool.Name)
+	}
 	return tools
+}
+
+// toolConfig describes the project's tool runtime. cacheRoot is empty for the
+// workspace cache apply writes and serving reads, and a throwaway directory
+// for validate.
+func toolConfig(p *agentproject.Project, workspace, cacheRoot string) (toolruntime.Config, error) {
+	ws, err := filepath.Abs(workspace)
+	if err != nil {
+		return toolruntime.Config{}, fmt.Errorf("resolving workspace: %w", err)
+	}
+	return toolruntime.Config{
+		Source:      p.Root,
+		Workspace:   ws,
+		Fingerprint: p.Fingerprint,
+		Tools:       p.Tools,
+		CacheRoot:   cacheRoot,
+	}, nil
+}
+
+// prepareTools prepares and inspects the project's authored tools, reporting
+// every failure as a diagnostic. A project without tools prepares nothing, so
+// apply and validate behave exactly as before for it.
+func prepareTools(p *agentproject.Project, workspace, cacheRoot string, diags *diagnostics.List) bool {
+	if len(p.Tools) == 0 {
+		return true
+	}
+	cfg, err := toolConfig(p, workspace, cacheRoot)
+	if err != nil {
+		diags.Errorf("tool.prepare.failed", "tools", "%s", diagnostics.Bound(err.Error(), 512))
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), prepareBudget)
+	defer cancel()
+	if err := toolruntime.Prepare(ctx, cfg); err != nil {
+		reportToolFailure(err, diags)
+		return false
+	}
+	return true
+}
+
+// reportToolFailure renders one preparation or inspection failure as a stable
+// diagnostic. The message names the language and the step; it never carries a
+// toolchain's raw output.
+func reportToolFailure(err error, diags *diagnostics.List) {
+	var failure *toolruntime.Failure
+	id := "tool.prepare.failed"
+	if errors.As(err, &failure) && failure.Phase == "inspect" {
+		id = "tool.inspect.failed"
+	}
+	diags.Errorf(id, "tools", "%s", diagnostics.Bound(err.Error(), 512))
+}
+
+// toolCaller binds the open tool runtime to the managed boundary, applying
+// tenon's own per-call deadline: the boundary never waits on authored code
+// indefinitely, and an overrun takes the language host down with it.
+type toolCaller struct {
+	runtime *toolruntime.Runtime
+}
+
+func (c toolCaller) Call(name string, arguments json.RawMessage) (json.RawMessage, error) {
+	return c.runtime.Call(name, arguments, toolruntime.CallDeadline)
 }
 
 // runMCPServe serves the managed tool boundary on stdin/stdout with audit on
@@ -271,6 +365,30 @@ func runMCPServe(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	if cfg.FrictionNotes {
 		cfg.Recorder = newFrictionRecorder(p, driver.Harness())
+	}
+	// One host per authored language starts once and stays alive for the
+	// whole session. A project without tools opens no runtime at all.
+	if len(p.Tools) > 0 {
+		toolCfg, err := toolConfig(p, workspace, "")
+		if err != nil {
+			fmt.Fprintln(stderr, "tenon mcp serve:", err)
+			return 1
+		}
+		rt, err := toolruntime.Open(toolCfg)
+		if err != nil {
+			fmt.Fprintln(stderr, "tenon mcp serve:", err)
+			return 1
+		}
+		defer rt.Close()
+		for _, d := range rt.Definitions() {
+			cfg.Definitions = append(cfg.Definitions, mcp.Definition{
+				Name:         d.Name,
+				Description:  d.Description,
+				InputSchema:  d.InputSchema,
+				OutputSchema: d.OutputSchema,
+			})
+		}
+		cfg.Tools = toolCaller{runtime: rt}
 	}
 	if err := mcp.Serve(context.Background(), stdin, stdout, stderr, cfg); err != nil {
 		fmt.Fprintln(stderr, "tenon mcp serve:", err)

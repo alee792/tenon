@@ -326,3 +326,66 @@ func TestToolNames(t *testing.T) {
 		t.Fatalf("toolNames = %v", names)
 	}
 }
+
+// TestLoadWiresToolsIntoTheProject proves tools/ is a compiled component
+// rather than a refused one: a project carrying tools loads, its tools reach
+// the project, and tool source joins the fingerprint.
+func TestLoadWiresToolsIntoTheProject(t *testing.T) {
+	root := writeAgent(t, "agent", validInstructions)
+	writeSkillFile(t, root, "tools/hash_text.ts", []byte("export default {};\n"), 0o644)
+	writeSkillFile(t, root, "deno.json", []byte("{}"), 0o644)
+	writeSkillFile(t, root, "deno.lock", []byte("{}"), 0o644)
+
+	p, diags, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p == nil || diags.HasErrors() {
+		t.Fatalf("a project with tools must load: %v", diags.All())
+	}
+	if len(p.Tools) != 1 || p.Tools[0].Name != "hash-text" || p.Tools[0].Language != "typescript" {
+		t.Fatalf("project tools = %+v", p.Tools)
+	}
+
+	before := p.Fingerprint
+	writeSkillFile(t, root, "tools/hash_text.ts", []byte("export default { changed: true };\n"), 0o644)
+	p, _, err = Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Fingerprint == before {
+		t.Fatal("changed tool source must change the source fingerprint")
+	}
+}
+
+// TestToolAndSubagentNamesCollide proves the two name spaces are one: a tool
+// and a subagent may not share a name, and the diagnostic names both paths.
+func TestToolAndSubagentNamesCollide(t *testing.T) {
+	root := writeAgent(t, "agent", validInstructions)
+	writeSkillFile(t, root, "tools/reviewer.py", []byte("# tool\n"), 0o644)
+	writeSkillFile(t, root, "pyproject.toml", []byte("[project]\n"), 0o644)
+	writeSkillFile(t, root, "uv.lock", []byte("version = 1\n"), 0o644)
+	writeSkillFile(t, root, "subagents/reviewer/instructions.md",
+		[]byte("---\ndescription: Reviews the diff.\n---\n\nReview it.\n"), 0o644)
+
+	p, diags, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p != nil {
+		t.Fatal("a colliding tool and subagent must fail validation")
+	}
+	found := false
+	for _, d := range diags.All() {
+		if d.ID != "tool.name.collision" {
+			continue
+		}
+		found = true
+		if d.Path != "tools/reviewer.py" || !strings.Contains(d.Rule, "subagents/reviewer") {
+			t.Fatalf("the collision must name both authored paths: %+v", d)
+		}
+	}
+	if !found {
+		t.Fatalf("expected tool.name.collision, got %v", diags.All())
+	}
+}

@@ -36,6 +36,8 @@ type Project struct {
 	// Subagents are the validated immediate subagents/ directories, sorted
 	// by name.
 	Subagents []Subagent
+	// Tools are the validated authored tools, sorted by name.
+	Tools []Tool
 	// HarnessFiles are the validated harness-specific files, keyed by
 	// harness name ("claude", "codex") and sorted by RelPath within each.
 	HarnessFiles map[string][]HarnessFile
@@ -56,7 +58,7 @@ type Instructions struct {
 // component is implemented, its presence fails validation: silently dropping
 // authored behavior would pretend the compiled agent is complete.
 var componentDirs = []string{
-	"plugins", "tools", "connections", "schedules",
+	"plugins", "connections", "schedules",
 }
 
 // Load validates the agent project at dir. Contract violations are reported
@@ -113,20 +115,43 @@ func Load(dir string) (*Project, *diagnostics.List, error) {
 	subagents, subagentInputs := loadSubagents(root, diags)
 	p.Subagents = subagents
 
+	tools, toolInputs := loadTools(root, diags)
+	p.Tools = tools
+
 	harnessFiles, harnessInputs := loadHarnessFiles(root, diags)
 	p.HarnessFiles = harnessFiles
+
+	checkNameCollisions(tools, subagents, diags)
 
 	inputs := []sourceInput{
 		{Path: "instructions.md", Content: instructionsBytes, Executable: false},
 	}
 	inputs = append(inputs, skillInputs...)
 	inputs = append(inputs, subagentInputs...)
+	inputs = append(inputs, toolInputs...)
 	inputs = append(inputs, harnessInputs...)
 	p.Fingerprint = fingerprint(inputs)
 	if diags.HasErrors() {
 		return nil, diags, nil
 	}
 	return p, diags, nil
+}
+
+// checkNameCollisions refuses a project whose authored tool shares a name with
+// an immediate subagent. Both are addressed by name in the same harness turn,
+// so one shadowing the other would silently drop authored behavior; the
+// diagnostic names both authored paths.
+func checkNameCollisions(tools []Tool, subagents []Subagent, diags *diagnostics.List) {
+	byName := toolNames(tools)
+	for _, sub := range subagents {
+		sourcePath, collides := byName[sub.Name]
+		if !collides {
+			continue
+		}
+		diags.Errorf("tool.name.collision", sourcePath,
+			"the tool name %q collides with the subagent declared at subagents/%s; subagent and tool names may not collide",
+			sub.Name, sub.Name)
+	}
 }
 
 // loadInstructions returns the parsed instructions and their exact source
