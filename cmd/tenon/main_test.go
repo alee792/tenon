@@ -1709,3 +1709,144 @@ func TestConnectionValidateApplyParityOnConnectionError(t *testing.T) {
 		t.Fatal("a failing apply must not mutate the workspace")
 	}
 }
+
+// --- Installed connections (ADR 0016 closing the installed form) ----------
+
+// TestConnectionStatusInstalledHealthyAndUnresolved proves status resolves
+// an installed connection offline against the store: a connection whose
+// filename matches the capability's declared server name reports resolved
+// with its supported harness targets, and one selecting a package the store
+// does not have reports unresolved with a bounded authored-path diagnostic,
+// without executing anything or suppressing the healthy sibling.
+func TestConnectionStatusInstalledHealthyAndUnresolved(t *testing.T) {
+	isolateStore(t)
+	src := connectionFixtureSourceDir(t, "demo-pkg", "fixture-server")
+	if code, _, errb := runInt("install", src, "--trust", "operator"); code != 0 {
+		t.Fatalf("install exit %d: %s", code, errb)
+	}
+
+	agent := writeAgent(t, "my-agent", validInstructions)
+	writeFile(t, agent, "connections/fixture-server.md",
+		[]byte("---\ntype: mcp\npackage: demo-pkg\ncapability: mcp\n---\n"), 0o644)
+	writeFile(t, agent, "connections/nope.md",
+		[]byte("---\ntype: mcp\npackage: nope-pkg\ncapability: mcp\n---\n"), 0o644)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"connection", "status", agent}, nil, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("status must be nonzero when one connection is unresolved")
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "fixture-server: target=installed package=demo-pkg capability=mcp") ||
+		!strings.Contains(out, "resolved targets=") {
+		t.Fatalf("expected the healthy installed connection reported resolved: %s", out)
+	}
+	if !strings.Contains(out, "nope: target=installed package=nope-pkg capability=mcp") ||
+		!strings.Contains(out, "unresolved") {
+		t.Fatalf("expected the unresolvable installed connection reported unresolved: %s", out)
+	}
+	if !strings.Contains(out, "connections/nope.md") {
+		t.Fatalf("expected the unresolved connection's status line to name its authored path: %s", out)
+	}
+	if !strings.Contains(stderr.String(), "nope:") || !strings.Contains(stderr.String(), "store.not-found") {
+		t.Fatalf("expected a bounded resolution-failure diagnostic on stderr: %s", stderr.String())
+	}
+}
+
+// TestConnectionValidateApplyParityOnInstalledResolutionError proves validate
+// and apply report identical diagnostics for an installed connection that
+// cannot be resolved, and that the failing apply never mutates the
+// workspace.
+func TestConnectionValidateApplyParityOnInstalledResolutionError(t *testing.T) {
+	isolateStore(t)
+	agent := writeAgent(t, "my-agent", validInstructions)
+	writeFile(t, agent, "connections/nope.md",
+		[]byte("---\ntype: mcp\npackage: nope-pkg\ncapability: mcp\n---\n"), 0o644)
+
+	var validateOut, applyOut, stderr bytes.Buffer
+	validateCode := run([]string{"validate", agent, "--harness", "claude", "--diagnostics", "jsonl"}, nil, &validateOut, &stderr)
+	applyCode := run([]string{"apply", agent, "--harness", "claude", "--diagnostics", "jsonl"}, nil, &applyOut, &stderr)
+	if validateCode == 0 || applyCode == 0 {
+		t.Fatalf("both must fail: validate=%d apply=%d", validateCode, applyCode)
+	}
+	if validateOut.String() != applyOut.String() {
+		t.Fatalf("validate and apply must report identical diagnostics:\n%s\n%s",
+			validateOut.String(), applyOut.String())
+	}
+	diags := parseDiagLines(t, validateOut.String())
+	if len(filterDiags(diags, "connection.package.unresolved")) == 0 {
+		t.Fatalf("expected connection.package.unresolved, got %q", validateOut.String())
+	}
+	if _, err := os.Stat(filepath.Join(agent, ".mcp.json")); !os.IsNotExist(err) {
+		t.Fatal("a failing apply must not mutate the workspace")
+	}
+}
+
+// TestInstalledConnectionFakeAmbientValueNeverLeaks is the headline
+// acceptance for the installed target (ADR 0016 item 6): a conspicuous fake
+// ambient value must never appear anywhere tenon writes or prints, because
+// resolution only ever carries the required ambient variable's NAME, never
+// its value. It installs a fixture native-mcp package, authors a connection
+// selecting it, sets the fixture's required ambient variable to a
+// conspicuous fake value in the apply process's own environment, applies for
+// both harnesses, and proves the value appears in neither generated
+// configuration, the apply record, nor stdout/stderr — while the server
+// entry itself is present with the correct executable path and, for codex,
+// the required name is forwarded.
+func TestInstalledConnectionFakeAmbientValueNeverLeaks(t *testing.T) {
+	const fakeValue = "CONSPICUOUS-FAKE-VALUE"
+	isolateStore(t)
+	src := connectionFixtureSourceDir(t, "demo-pkg", "demo")
+	if code, _, errb := runInt("install", src, "--trust", "operator"); code != 0 {
+		t.Fatalf("install exit %d: %s", code, errb)
+	}
+
+	agent := writeAgent(t, "my-agent", validInstructions)
+	writeFile(t, agent, "connections/demo.md",
+		[]byte("---\ntype: mcp\npackage: demo-pkg\ncapability: mcp\n---\n"), 0o644)
+
+	t.Setenv("DEMO_TOKEN", fakeValue)
+
+	claudeWS, codexWS := t.TempDir(), t.TempDir()
+	var claudeOut, claudeErr, codexOut, codexErr bytes.Buffer
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", claudeWS}, nil, &claudeOut, &claudeErr); code != 0 {
+		t.Fatalf("claude apply exit %d: %s", code, claudeErr.String())
+	}
+	if code := run([]string{"apply", agent, "--harness", "codex", "--workspace", codexWS}, nil, &codexOut, &codexErr); code != 0 {
+		t.Fatalf("codex apply exit %d: %s", code, codexErr.String())
+	}
+
+	mcpJSON := string(mustRead(t, filepath.Join(claudeWS, ".mcp.json")))
+	codexConfig := string(mustRead(t, filepath.Join(codexWS, ".codex", "config.toml")))
+	claudeRecord := string(mustRead(t, filepath.Join(claudeWS, ".tenon", "apply-claude.json")))
+	codexRecord := string(mustRead(t, filepath.Join(codexWS, ".tenon", "apply-codex.json")))
+
+	for name, content := range map[string]string{
+		".mcp.json":           mcpJSON,
+		".codex/config.toml":  codexConfig,
+		"claude apply record": claudeRecord,
+		"codex apply record":  codexRecord,
+		"claude apply stdout": claudeOut.String(),
+		"claude apply stderr": claudeErr.String(),
+		"codex apply stdout":  codexOut.String(),
+		"codex apply stderr":  codexErr.String(),
+	} {
+		if strings.Contains(content, fakeValue) {
+			t.Fatalf("the ambient value must never appear in %s: %s", name, content)
+		}
+	}
+
+	execSuffix := filepath.Join("bin", "server")
+	if !strings.Contains(mcpJSON, `"demo"`) || !strings.Contains(mcpJSON, execSuffix) {
+		t.Fatalf(".mcp.json missing the installed connection entry: %s", mcpJSON)
+	}
+	if strings.Contains(mcpJSON, "DEMO_TOKEN") {
+		t.Fatalf(".mcp.json must never carry the required ambient name as a value channel; claude inherits the launch environment instead: %s", mcpJSON)
+	}
+	if !strings.Contains(codexConfig, "[mcp_servers.demo]") || !strings.Contains(codexConfig, execSuffix) {
+		t.Fatalf("config.toml missing the installed connection entry: %s", codexConfig)
+	}
+	if !strings.Contains(codexConfig, `env_vars = ["DEMO_TOKEN"]`) {
+		t.Fatalf("config.toml must forward the required ambient name by name only for codex: %s", codexConfig)
+	}
+}

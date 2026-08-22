@@ -84,6 +84,74 @@ func cliSourceDir(t *testing.T) string {
 	return dir
 }
 
+// connectionFixtureSourceDir builds a valid host-targeted native-mcp package
+// source for the installed-connection tests (ADR 0016), with a configurable
+// package id and native server name so a test can exercise both a matching
+// and a mismatched connection filename, and one required ambient variable
+// DEMO_TOKEN whose value the store, and everything generated from it, must
+// never carry.
+func connectionFixtureSourceDir(t *testing.T, id, serverName string) string {
+	t.Helper()
+	p := cliPayload()
+	sha := cliSHA(p)
+	m := map[string]any{
+		"schema_version": 1,
+		"id":             id,
+		"version":        "1.0.0",
+		"name":           "Connection Fixture",
+		"description":    "A credential-free fake native MCP server for connection tests.",
+		"license":        "MIT",
+		"source":         "https://example.test/fixture",
+		"revision":       "abc123",
+		"compat":         map[string]any{"minimum": "0.0.1", "before": "1.0.0"},
+		"artifacts": []any{map[string]any{
+			"id":          "server-host",
+			"os":          runtime.GOOS,
+			"arch":        runtime.GOARCH,
+			"format":      "binary",
+			"size":        len(p),
+			"sha256":      sha,
+			"exec_path":   "bin/server",
+			"exec_size":   len(p),
+			"exec_sha256": sha,
+			"package":     "payload/server",
+		}},
+		"capabilities": []any{map[string]any{
+			"id":          "mcp",
+			"type":        "native-mcp",
+			"version":     1,
+			"server_name": serverName,
+			"artifacts":   []any{"server-host"},
+			"executable":  "bin/server",
+			"args":        []any{"--stdio"},
+			"workdir":     "",
+			"env":         map[string]any{"LOG_LEVEL": "info"},
+			"required_env": []any{
+				map[string]any{"name": "DEMO_TOKEN", "description": "The ambient demo token the fixture server reads from its own environment."},
+			},
+			"targets": map[string]any{
+				"claude": map[string]any{"startup": "optional"},
+				"codex":  map[string]any{"startup": "optional"},
+			},
+		}},
+	}
+	raw, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "integration.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "payload"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "payload", "server"), p, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 // isolateStore points the CLI's default store at a temporary location for the
 // duration of one test.
 func isolateStore(t *testing.T) {

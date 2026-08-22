@@ -262,25 +262,93 @@ func TestLoadConnectionsRejectsYAMLAlias(t *testing.T) {
 	requireErrorID(t, diags, "connection.frontmatter.invalid")
 }
 
-// TestLoadConnectionsInstalledFormFailsUnsupported proves the installed
-// package/capability shape is recognized and rejected with the exact honest
-// diagnostic, not silently dropped.
-func TestLoadConnectionsInstalledFormFailsUnsupported(t *testing.T) {
+// --- Installed frontmatter shape matrix --------------------------------
+
+func installedConnection(pkg, capability, context string) string {
+	body := "---\ntype: mcp\npackage: " + pkg + "\ncapability: " + capability + "\n---\n"
+	if context != "" {
+		body += "\n" + context + "\n"
+	}
+	return body
+}
+
+// TestLoadValidInstalledConnection proves the exact accepted installed
+// shape: name from filename, package/capability preserved exactly, kind set,
+// URL left empty.
+func TestLoadValidInstalledConnection(t *testing.T) {
 	root := writeAgent(t, "agent", validInstructions)
-	writeConnectionFile(t, root, "github.md",
-		"---\ntype: mcp\npackage: github-mcp-server\ncapability: github\n---\n\nUse for GitHub work.\n")
+	writeConnectionFile(t, root, "github.md", installedConnection("github-mcp-server", "github", "Use for GitHub work."))
+
+	p, diags, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p == nil || diags.HasErrors() {
+		t.Fatalf("unexpected diagnostics: %v", diags.All())
+	}
+	if len(p.Connections) != 1 {
+		t.Fatalf("connections = %+v", p.Connections)
+	}
+	c := p.Connections[0]
+	if c.Kind != ConnectionKindInstalled || c.Name != "github" ||
+		c.Package != "github-mcp-server" || c.Capability != "github" ||
+		c.Context != "Use for GitHub work." || c.URL != "" {
+		t.Fatalf("connection = %+v", c)
+	}
+}
+
+func TestLoadInstalledConnectionMissingPackage(t *testing.T) {
+	root := writeAgent(t, "agent", validInstructions)
+	writeConnectionFile(t, root, "github.md", "---\ntype: mcp\ncapability: github\n---\n")
 	_, diags, err := Load(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireErrorID(t, diags, "connection.target.unsupported")
-	for _, d := range diags.All() {
-		if d.ID == "connection.target.unsupported" {
-			if !strings.Contains(d.Rule, "installed package targets are not supported yet") {
-				t.Fatalf("rule text = %q", d.Rule)
-			}
-		}
+	requireErrorID(t, diags, "connection.target.invalid")
+}
+
+func TestLoadInstalledConnectionMissingCapability(t *testing.T) {
+	root := writeAgent(t, "agent", validInstructions)
+	writeConnectionFile(t, root, "github.md", "---\ntype: mcp\npackage: github-mcp-server\n---\n")
+	_, diags, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
 	}
+	requireErrorID(t, diags, "connection.target.invalid")
+}
+
+func TestLoadInstalledConnectionBadPackageGrammar(t *testing.T) {
+	root := writeAgent(t, "agent", validInstructions)
+	writeConnectionFile(t, root, "github.md", installedConnection("GitHub_MCP", "github", ""))
+	_, diags, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireErrorID(t, diags, "connection.target.invalid")
+}
+
+func TestLoadInstalledConnectionBadCapabilityGrammar(t *testing.T) {
+	root := writeAgent(t, "agent", validInstructions)
+	writeConnectionFile(t, root, "github.md", installedConnection("github-mcp-server", "Git Hub", ""))
+	_, diags, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireErrorID(t, diags, "connection.target.invalid")
+}
+
+// TestLoadConnectionsRejectsMixedRemoteAndInstalledFields proves a
+// frontmatter mixing remote and installed fields still fails, now that the
+// installed form is otherwise accepted.
+func TestLoadConnectionsRejectsMixedRemoteAndInstalledFields(t *testing.T) {
+	root := writeAgent(t, "agent", validInstructions)
+	writeConnectionFile(t, root, "catalog.md",
+		"---\ntype: mcp\ntransport: streamable-http\nurl: https://example.com/mcp\npackage: github-mcp-server\ncapability: github\n---\n")
+	_, diags, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireErrorID(t, diags, "connection.frontmatter.unknown-field")
 }
 
 // --- URL matrix -------------------------------------------------------------

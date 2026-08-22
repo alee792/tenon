@@ -9,6 +9,7 @@ import (
 	"github.com/alee792/tenon/internal/apply"
 	"github.com/alee792/tenon/internal/diagnostics"
 	"github.com/alee792/tenon/internal/generated"
+	"github.com/alee792/tenon/internal/integration"
 )
 
 // Driver implements the apply seam for Claude Code.
@@ -24,8 +25,9 @@ func (Driver) Harness() string { return "claude" }
 // honoring is copied unchanged and warned.
 func (Driver) Generate(p *agentproject.Project, target apply.Target, diags *diagnostics.List) []apply.GeneratedFile {
 	connections := acceptedConnections(p, diags)
+	resolved := agentproject.ResolveInstalledConnections(p.Connections, target.IntegrationStore, target.TenonVersion, diags)
 	config := mcpConfig(target.Executable, p.Root, target.Workspace,
-		acceptedServers(p, target, diags), connections)
+		acceptedServers(p, target, diags), connections, resolved)
 	if len(config) > generated.MaxMCPConfigBytes {
 		diags.Errorf("plugin.mcp.bounds.exceeded", "plugins",
 			"the generated .mcp.json may contain at most %d bytes; the accepted plugin MCP servers render %d",
@@ -125,12 +127,16 @@ func acceptedConnections(p *agentproject.Project, diags *diagnostics.List) []age
 // mcpConfig renders .mcp.json: Claude's project MCP configuration carrying
 // the tenon-owned managed stdio server, launched from the resolved tenon
 // executable against the absolute agent source and workspace, every accepted
-// plugin server, and every accepted standalone connection as a native http
-// entry with no headers field. It is model-facing configuration, so it
-// carries no fingerprint, version, or other setup metadata beyond the paths
-// the servers themselves need. Keys are ordered by encoding/json's sorted map
-// marshalling, so identical input always renders identical bytes.
-func mcpConfig(executable, source, workspace string, servers []agentproject.ResolvedServer, connections []agentproject.Connection) []byte {
+// plugin server, every accepted remote connection as a native http entry
+// with no headers field, and every accepted installed connection that
+// resolved cleanly as a native stdio entry from its launch descriptor. An
+// installed connection absent from resolved already carries a
+// connection.package.* error on diags and contributes no entry. It is
+// model-facing configuration, so it carries no fingerprint, version, or
+// other setup metadata beyond the paths the servers themselves need. Keys
+// are ordered by encoding/json's sorted map marshalling, so identical input
+// always renders identical bytes.
+func mcpConfig(executable, source, workspace string, servers []agentproject.ResolvedServer, connections []agentproject.Connection, resolved map[string]*integration.LaunchDescriptor) []byte {
 	entries := map[string]any{"managed": map[string]any{
 		"type":    "stdio",
 		"command": executable,
@@ -140,11 +146,31 @@ func mcpConfig(executable, source, workspace string, servers []agentproject.Reso
 		entries[s.Name] = serverEntry(s)
 	}
 	for _, c := range connections {
-		entries[c.Name] = map[string]any{"type": "http", "url": c.URL}
+		switch c.Kind {
+		case agentproject.ConnectionKindInstalled:
+			desc, ok := resolved[c.Name]
+			if !ok {
+				continue // already reported as connection.package.unresolved/mismatch
+			}
+			entries[c.Name] = installedServerEntry(desc)
+		default:
+			entries[c.Name] = map[string]any{"type": "http", "url": c.URL}
+		}
 	}
 	// A fixed map of strings, string slices, and string maps always encodes.
 	content, _ := json.MarshalIndent(map[string]any{"mcpServers": entries}, "", "  ")
 	return append(content, '\n')
+}
+
+// installedServerEntry renders one resolved installed connection in Claude's
+// project format: the /usr/bin/env -C adapter carrying the descriptor's
+// absolute workdir and executable, its literal args, and its non-secret env
+// defaults. .mcp.json cannot forward an ambient value by name, so the server
+// simply inherits the launch environment: a required-ambient NAME is never
+// written here as a value or otherwise.
+func installedServerEntry(desc *integration.LaunchDescriptor) map[string]any {
+	args := append([]string{"-C", desc.Workdir, "--", desc.Executable}, desc.Args...)
+	return map[string]any{"type": "stdio", "command": "/usr/bin/env", "args": args, "env": desc.Env}
 }
 
 // serverEntry renders one accepted plugin server in Claude's project format.

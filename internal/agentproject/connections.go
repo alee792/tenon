@@ -2,10 +2,12 @@ package agentproject
 
 // Connections author standalone native MCP servers (ADR 0016). Each
 // connections/<name>.md carries one closed YAML frontmatter document
-// selecting exactly one target form. This slice implements only the remote
-// streamable-http form; an installed package/capability target is recognized
-// by shape and fails with a clear, honest diagnostic rather than being
-// silently dropped or half-implemented.
+// selecting exactly one target form: remote streamable-http, or installed —
+// an exact operator-installed native-mcp capability (ADR 0014) selected by
+// package and capability id. Load validates the installed frontmatter shape
+// only; resolving the selection against the operator's integration store
+// happens offline at generation time (internal/claude, internal/codex),
+// exactly like plugin ${PLUGIN_DATA}.
 
 import (
 	"fmt"
@@ -37,6 +39,12 @@ const (
 // hyphens. Underscores are permitted here, unlike the skill grammar.
 var connectionNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
 
+// installedIDPattern is the shared grammar for an installed connection's
+// package and capability identifiers: ADR 0014's stable identifier grammar
+// (^[a-z][a-z0-9-]{0,62}$), reused here so authored source is validated
+// against the exact same rule the store enforces.
+var installedIDPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
+
 // managedConnectionName is reserved for tenon's own managed server.
 const managedConnectionName = "managed"
 
@@ -44,14 +52,23 @@ const managedConnectionName = "managed"
 // that must reject it offline, before ever touching the filesystem.
 const ManagedConnectionName = managedConnectionName
 
-// Connection is one validated standalone native MCP connection. Only the
-// remote streamable-http target is implemented; an installed target fails
-// during loading and never reaches this shape.
+// Connection is one validated standalone native MCP connection: either a
+// remote streamable-http endpoint or an installed package capability
+// selection (ADR 0016). Kind discriminates which fields apply.
 type Connection struct {
 	// Name is the filename-derived connection and native server name.
 	Name string
-	// URL is the exact validated absolute HTTPS URL.
+	// Kind is "remote" or "installed".
+	Kind string
+	// URL is the exact validated absolute HTTPS URL. Set only when
+	// Kind == "remote".
 	URL string
+	// Package and Capability select one installed, operator-trusted
+	// native-mcp capability (ADR 0014). Set only when Kind == "installed";
+	// resolution against the integration store happens at generation time,
+	// not here.
+	Package    string
+	Capability string
 	// Context is the optional trimmed Markdown body, model-facing usage
 	// guidance; empty when the body is absent or whitespace-only.
 	Context string
@@ -59,6 +76,13 @@ type Connection struct {
 	// "connections/<name>.md".
 	SourcePath string
 }
+
+// ConnectionKindRemote and ConnectionKindInstalled are the two supported
+// connection target kinds (ADR 0016).
+const (
+	ConnectionKindRemote    = "remote"
+	ConnectionKindInstalled = "installed"
+)
 
 // loadConnections discovers and validates the optional connections/
 // directory, returning the connections sorted by name and every source file
@@ -200,9 +224,11 @@ func loadConnectionFile(dir, filename string, diags *diagnostics.List) (Connecti
 }
 
 // parseConnection enforces the closed connection frontmatter contract: one
-// plain field "type" set to exactly "mcp", then exactly one target form. Only
-// the remote streamable-http form yields a Connection; the installed form is
-// recognized by shape and rejected with an honest, temporary diagnostic.
+// plain field "type" set to exactly "mcp", then exactly one target form —
+// remote (transport, url) or installed (package, capability). It validates
+// installed frontmatter shape only: package and capability must each be
+// present, non-empty, and match ADR 0014's stable identifier grammar. It
+// never contacts the integration store; that happens at generation time.
 func parseConnection(content, path string, diags *diagnostics.List) (*Connection, bool) {
 	raw, bodyStart, err := frontmatter.Split([]byte(content))
 	if err != nil {
@@ -265,26 +291,38 @@ func parseConnection(content, path string, diags *diagnostics.List) (*Connection
 		}
 	}
 
+	var conn Connection
 	if isInstalled {
-		diags.Errorf("connection.target.unsupported", path,
-			"installed package targets are not supported yet; only remote streamable-http targets are available")
-		return nil, false
-	}
-
-	transport, err := doc.String("transport")
-	if err != nil || transport != "streamable-http" {
-		diags.Errorf("connection.target.invalid", path,
-			"frontmatter field \"transport\" must be exactly \"streamable-http\"")
-		return nil, false
-	}
-	rawURL, err := doc.String("url")
-	if err != nil || rawURL == "" {
-		diags.Errorf("connection.target.invalid", path, "frontmatter field \"url\" must be a non-empty string")
-		return nil, false
-	}
-	if err := validConnectionURL(rawURL); err != nil {
-		diags.Errorf("connection.target.invalid", path, "%s", err)
-		return nil, false
+		pkg, err := doc.String("package")
+		if err != nil || pkg == "" || !installedIDPattern.MatchString(pkg) {
+			diags.Errorf("connection.target.invalid", path,
+				"frontmatter field \"package\" must be a non-empty string matching %s", installedIDPattern.String())
+			return nil, false
+		}
+		capability, err := doc.String("capability")
+		if err != nil || capability == "" || !installedIDPattern.MatchString(capability) {
+			diags.Errorf("connection.target.invalid", path,
+				"frontmatter field \"capability\" must be a non-empty string matching %s", installedIDPattern.String())
+			return nil, false
+		}
+		conn = Connection{Kind: ConnectionKindInstalled, Package: pkg, Capability: capability}
+	} else {
+		transport, err := doc.String("transport")
+		if err != nil || transport != "streamable-http" {
+			diags.Errorf("connection.target.invalid", path,
+				"frontmatter field \"transport\" must be exactly \"streamable-http\"")
+			return nil, false
+		}
+		rawURL, err := doc.String("url")
+		if err != nil || rawURL == "" {
+			diags.Errorf("connection.target.invalid", path, "frontmatter field \"url\" must be a non-empty string")
+			return nil, false
+		}
+		if err := validConnectionURL(rawURL); err != nil {
+			diags.Errorf("connection.target.invalid", path, "%s", err)
+			return nil, false
+		}
+		conn = Connection{Kind: ConnectionKindRemote, URL: rawURL}
 	}
 
 	body := content[bodyStart:]
@@ -299,8 +337,9 @@ func parseConnection(content, path string, diags *diagnostics.List) (*Connection
 			"the optional Markdown body may contain at most %d Unicode characters; found %d", MaxConnectionContextRunes, runeLen)
 		return nil, false
 	}
+	conn.Context = body
 
-	return &Connection{URL: rawURL, Context: body}, true
+	return &conn, true
 }
 
 // ValidConnectionName reports whether name matches the connection filename

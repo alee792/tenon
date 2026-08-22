@@ -17,6 +17,22 @@ const integrationUsage = `usage:
   tenon integration inspect|verify|list|enable|disable|remove [ID]
 `
 
+// resolveIntegrationStoreBase resolves the operator's integration-package
+// store base directory (ADR 0014's per-OS-user default). It is the one
+// resolution every command that opens the store shares — apply, validate,
+// and connection status alike — so an installed connection resolves
+// identically no matter which command asks. A resolution failure (e.g. an
+// unreadable user config directory) yields an empty base, which callers that
+// generate native configuration treat as "no store configured" rather than
+// an environment failure.
+func resolveIntegrationStoreBase() string {
+	base, err := integration.DefaultBase()
+	if err != nil {
+		return ""
+	}
+	return base
+}
+
 // runIntegration is the operator CLI for the integration-package store. Trust
 // is explicit: install and update refuse to proceed without --trust operator.
 // Diagnostics are bounded and credential-free, and the store is offline: no

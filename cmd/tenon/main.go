@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -22,6 +23,7 @@ import (
 	"github.com/alee792/tenon/internal/codex"
 	"github.com/alee792/tenon/internal/diagnostics"
 	"github.com/alee792/tenon/internal/friction"
+	"github.com/alee792/tenon/internal/integration"
 	"github.com/alee792/tenon/internal/mcp"
 	"github.com/alee792/tenon/internal/toolruntime"
 )
@@ -203,7 +205,12 @@ func runValidate(args []string, stdout, stderr io.Writer) int {
 			defer os.RemoveAll(cache)
 		}
 		if prepareTools(p, workspace, cache, diags) {
-			_ = driver.Generate(p, apply.Target{Workspace: workspace, Executable: executable}, diags)
+			_ = driver.Generate(p, apply.Target{
+				Workspace:        workspace,
+				Executable:       executable,
+				IntegrationStore: resolveIntegrationStoreBase(),
+				TenonVersion:     mcp.Version,
+			}, diags)
 		}
 	}
 	render(diags, jsonl, stdout, stderr)
@@ -241,7 +248,12 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	result, applyDiags, err := apply.Apply(p, workspace, executable, driver)
+	result, applyDiags, err := apply.ApplyWithTarget(p, apply.Target{
+		Workspace:        workspace,
+		Executable:       executable,
+		IntegrationStore: resolveIntegrationStoreBase(),
+		TenonVersion:     mcp.Version,
+	}, driver)
 	for _, d := range applyDiags.All() {
 		diags.Add(d)
 	}
@@ -662,7 +674,14 @@ func runConnectionStatus(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	storeBase := resolveIntegrationStoreBase()
+	var store *integration.Store
+	if storeBase != "" {
+		store = integration.NewStore(storeBase)
+	}
+
 	found := false
+	reportedUnresolved := false
 	for _, c := range connections {
 		if filterName != "" && c.Name != filterName {
 			continue
@@ -671,6 +690,20 @@ func runConnectionStatus(args []string, stdout, stderr io.Writer) int {
 		contextState := "no context"
 		if c.Context != "" {
 			contextState = "context present"
+		}
+		if c.Kind == agentproject.ConnectionKindInstalled {
+			resolved, detail := installedConnectionHealth(store, c)
+			health := "unresolved"
+			if resolved {
+				health = "resolved " + detail
+			}
+			fmt.Fprintf(stdout, "%s: target=installed package=%s capability=%s %s %s (%s)\n",
+				c.Name, c.Package, c.Capability, contextState, health, c.SourcePath)
+			if !resolved {
+				fmt.Fprintf(stderr, "tenon connection status: %s: %s\n", c.Name, detail)
+				reportedUnresolved = true
+			}
+			continue
 		}
 		fmt.Fprintf(stdout, "%s: target=remote transport=streamable-http url=%s %s configured runtime=unchecked (%s)\n",
 			c.Name, c.URL, contextState, c.SourcePath)
@@ -692,10 +725,33 @@ func runConnectionStatus(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "tenon connection status: no connection named %q\n", filterName)
 		return 1
 	}
-	if reportedMalformed {
+	if reportedMalformed || reportedUnresolved {
 		return 1
 	}
 	return 0
+}
+
+// installedConnectionHealth resolves one installed connection against store
+// offline, without executing anything. On success it reports the supported
+// harness targets; on failure it reports a bounded, credential-free
+// diagnostic naming the failure category, never raw store internals.
+func installedConnectionHealth(store *integration.Store, c agentproject.Connection) (resolved bool, detail string) {
+	if store == nil {
+		return false, "no integration store is configured"
+	}
+	desc, err := store.Resolve(c.Package, c.Capability, mcp.Version, runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		return false, diagnostics.Bound(err.Error(), 256)
+	}
+	if desc.ServerName != c.Name {
+		return false, fmt.Sprintf("the capability's declared server name %q does not equal the connection name", desc.ServerName)
+	}
+	targets := make([]string, 0, len(desc.Targets))
+	for harness := range desc.Targets {
+		targets = append(targets, harness)
+	}
+	sort.Strings(targets)
+	return true, "targets=" + strings.Join(targets, ",")
 }
 
 // runConnectionRemove deletes exactly the named real connection file,

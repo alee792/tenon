@@ -36,6 +36,16 @@ type Target struct {
 	Workspace string
 	// Executable is the absolute resolved tenon executable.
 	Executable string
+	// IntegrationStore is the absolute base directory of the operator's
+	// integration-package store (ADR 0014), used to resolve installed
+	// connections (ADR 0016) offline at generation time. Empty means no
+	// store is configured: installed connections then fail to resolve with
+	// a clear diagnostic rather than a panic or a silent skip.
+	IntegrationStore string
+	// TenonVersion is the host tenon version installed-connection resolution
+	// checks compatibility against. Drivers stay pure by receiving it here
+	// rather than reading the single version constant themselves.
+	TenonVersion string
 }
 
 // Driver is the seam between the portable project and one native harness.
@@ -84,26 +94,35 @@ type Result struct {
 	Removed []string
 }
 
-// Apply writes the driver's generated files into the workspace, launching the
-// managed server in generated configuration from executable. Contract
+// Apply is ApplyWithTarget for a target carrying only a workspace and
+// executable, kept for callers that need no configured integration store.
+func Apply(p *agentproject.Project, workspace, executable string, driver Driver) (*Result, *diagnostics.List, error) {
+	return ApplyWithTarget(p, Target{Workspace: workspace, Executable: executable}, driver)
+}
+
+// ApplyWithTarget writes the driver's generated files into the workspace,
+// launching the managed server in generated configuration from target's
+// resolved executable, and threading target's integration-store base and
+// tenon version into generation exactly as validate does. Contract
 // violations are reported as diagnostics with stable identifiers; the error
 // is reserved for environment failures.
-func Apply(p *agentproject.Project, workspace, executable string, driver Driver) (*Result, *diagnostics.List, error) {
+func ApplyWithTarget(p *agentproject.Project, target Target, driver Driver) (*Result, *diagnostics.List, error) {
 	diags := &diagnostics.List{}
 
+	executable := target.Executable
 	// An unresolved executable reaching a driver is a caller bug, not an
 	// authored contract violation, so it is never a diagnostic.
 	if executable == "" || !filepath.IsAbs(executable) {
 		return nil, diags, fmt.Errorf("the tenon executable must be an absolute resolved path: %q", executable)
 	}
 
-	ws, err := filepath.Abs(workspace)
+	ws, err := filepath.Abs(target.Workspace)
 	if err != nil {
 		return nil, diags, fmt.Errorf("resolving workspace: %w", err)
 	}
 	if info, err := os.Stat(ws); err != nil || !info.IsDir() {
 		diags.Errorf("apply.workspace.missing", ".",
-			"the workspace must be an existing directory: %s", workspace)
+			"the workspace must be an existing directory: %s", target.Workspace)
 		return nil, diags, nil
 	}
 
@@ -116,7 +135,12 @@ func Apply(p *agentproject.Project, workspace, executable string, driver Driver)
 
 	// Generation precedes the conflict checks so its warnings survive a
 	// conflict refusal.
-	files := driver.Generate(p, Target{Workspace: ws, Executable: executable}, diags)
+	files := driver.Generate(p, Target{
+		Workspace:        ws,
+		Executable:       executable,
+		IntegrationStore: target.IntegrationStore,
+		TenonVersion:     target.TenonVersion,
+	}, diags)
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
 
 	// Every conflict check precedes every write.

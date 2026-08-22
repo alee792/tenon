@@ -10,6 +10,7 @@ import (
 	"github.com/alee792/tenon/internal/apply"
 	"github.com/alee792/tenon/internal/diagnostics"
 	"github.com/alee792/tenon/internal/generated"
+	"github.com/alee792/tenon/internal/integration"
 )
 
 // Driver implements the apply seam for Codex.
@@ -31,7 +32,8 @@ func (Driver) Generate(p *agentproject.Project, target apply.Target, diags *diag
 				"declared headers for server %q are not emitted into Codex project configuration, which tenon generates without header support; the server may fail to authenticate", s.Name)
 		}
 	}
-	config := mcpConfig(target.Executable, p.Root, target.Workspace, resolved, p.Connections)
+	resolvedConnections := agentproject.ResolveInstalledConnections(p.Connections, target.IntegrationStore, target.TenonVersion, diags)
+	config := mcpConfig(target.Executable, p.Root, target.Workspace, resolved, p.Connections, resolvedConnections)
 	if len(config) > generated.MaxMCPConfigBytes {
 		diags.Errorf("plugin.mcp.bounds.exceeded", "plugins",
 			"the generated .codex/config.toml may contain at most %d bytes; the accepted plugin MCP servers render %d",
@@ -90,14 +92,19 @@ func (Driver) Generate(p *agentproject.Project, target apply.Target, diags *diag
 // carrying the tenon-owned managed stdio server, launched from the resolved
 // tenon executable against the absolute agent source and workspace, followed
 // by every accepted plugin server in lexical order, followed by every
-// standalone connection in lexical order. The managed server alone is
-// required and pre-approved, because tenon validates and audits every call
-// that crosses its own boundary; every other generated entry — including
-// every connection, which is startup-optional — is optional to start and
-// keeps Codex's native per-server prompt approval. It is model-facing
-// configuration, so it carries no fingerprint, version, or other setup
-// metadata beyond the paths the servers themselves need.
-func mcpConfig(executable, source, workspace string, servers []agentproject.ResolvedServer, connections []agentproject.Connection) []byte {
+// standalone connection in lexical order — a remote connection as a native
+// url entry, an installed connection that resolved cleanly as a native
+// command/args/cwd/env entry from its launch descriptor, with its required
+// ambient names forwarded by name only through env_vars. An installed
+// connection absent from resolvedConnections already carries a
+// connection.package.* error on diags and contributes no entry. The managed
+// server alone is required and pre-approved, because tenon validates and
+// audits every call that crosses its own boundary; every other generated
+// entry — including every connection, which is startup-optional — is
+// optional to start and keeps Codex's native per-server prompt approval. It
+// is model-facing configuration, so it carries no fingerprint, version, or
+// other setup metadata beyond the paths the servers themselves need.
+func mcpConfig(executable, source, workspace string, servers []agentproject.ResolvedServer, connections []agentproject.Connection, resolvedConnections map[string]*integration.LaunchDescriptor) []byte {
 	var b strings.Builder
 	b.WriteString(generated.TOMLHeader + "\n")
 	b.WriteString("[mcp_servers.managed]\n")
@@ -140,10 +147,34 @@ func mcpConfig(executable, source, workspace string, servers []agentproject.Reso
 		return strings.Compare(a.Name, c.Name)
 	})
 	for _, c := range sortedConnections {
-		b.WriteString("\n[mcp_servers." + c.Name + "]\n")
-		b.WriteString("url = " + generated.TOMLString(c.URL) + "\n")
-		b.WriteString("required = false\n")
-		b.WriteString("default_tools_approval_mode = \"prompt\"\n")
+		switch c.Kind {
+		case agentproject.ConnectionKindInstalled:
+			desc, ok := resolvedConnections[c.Name]
+			if !ok {
+				continue // already reported as connection.package.unresolved/mismatch
+			}
+			b.WriteString("\n[mcp_servers." + c.Name + "]\n")
+			b.WriteString("command = " + generated.TOMLString(desc.Executable) + "\n")
+			if len(desc.Args) > 0 {
+				b.WriteString("args = " + tomlArray(desc.Args) + "\n")
+			}
+			if desc.Workdir != "" {
+				b.WriteString("cwd = " + generated.TOMLString(desc.Workdir) + "\n")
+			}
+			if len(desc.Env) > 0 {
+				b.WriteString("env = " + tomlInlineTable(desc.Env) + "\n")
+			}
+			if len(desc.RequiredEnv) > 0 {
+				b.WriteString("env_vars = " + tomlArray(desc.RequiredEnv) + "\n")
+			}
+			b.WriteString("required = false\n")
+			b.WriteString("default_tools_approval_mode = \"prompt\"\n")
+		default:
+			b.WriteString("\n[mcp_servers." + c.Name + "]\n")
+			b.WriteString("url = " + generated.TOMLString(c.URL) + "\n")
+			b.WriteString("required = false\n")
+			b.WriteString("default_tools_approval_mode = \"prompt\"\n")
+		}
 	}
 	return []byte(b.String())
 }
