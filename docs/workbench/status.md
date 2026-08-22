@@ -110,6 +110,19 @@ until the integration store wires in. Known refinement: `connection add`
 currently validates the whole project for its collision check rather than a
 connections-and-plugins-scoped load.
 
+Integration package store, per ADR 0014 (native-mcp capability): a bounded
+metadata-first `integration.json` validates strictly without reading any
+artifact, and `tenon integration install/inspect/verify/list/enable/disable/
+update/remove` operate an owner-only, content-addressed store guarded by a
+flock. Install requires an explicit operator trust decision, verifies raw
+and prepared executable identities offline, and writes blobs before state so
+interruptions leave inert bytes; remove retains shared blobs; verify rehashes
+offline. An unknown capability type or version is a typed rejection, required
+ambient environment names are metadata never carrying values, and remote
+https artifacts fail closed as unavailable in this offline slice. Store.Resolve
+returns a credential-free launch descriptor for the connection-wiring
+follow-up; nothing here changes generation yet.
+
 
 ## Gaps
 

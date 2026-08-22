@@ -11,10 +11,12 @@ import (
 )
 
 // Extraction bounds. A malicious or corrupt source can neither exhaust the
-// filesystem nor create an unbounded number of entries.
-const (
-	maxPayloadBytes = 256 * 1024 * 1024
-	maxArchiveFiles = 8192
+// filesystem nor create an unbounded number of entries. They are package
+// variables rather than constants only so a test can lower them to exercise
+// the rejection path without materializing hundreds of megabytes.
+var (
+	maxPayloadBytes int64 = 256 * 1024 * 1024
+	maxArchiveFiles       = 8192
 )
 
 // stageSource materializes an install source into a fresh owner-only temporary
