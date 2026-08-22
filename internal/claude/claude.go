@@ -23,10 +23,14 @@ func (Driver) Harness() string { return "claude" }
 // inserted ownership marker line. A vendor surface Claude does not document
 // honoring is copied unchanged and warned.
 func (Driver) Generate(p *agentproject.Project, target apply.Target, diags *diagnostics.List) []apply.GeneratedFile {
-	files := []apply.GeneratedFile{{
-		Path:    ".mcp.json",
-		Content: managedMCPConfig(target.Executable, p.Root, target.Workspace),
-	}}
+	config := mcpConfig(target.Executable, p.Root, target.Workspace,
+		acceptedServers(p, target, diags))
+	if len(config) > generated.MaxMCPConfigBytes {
+		diags.Errorf("plugin.mcp.bounds.exceeded", "plugins",
+			"the generated .mcp.json may contain at most %d bytes; the accepted plugin MCP servers render %d",
+			generated.MaxMCPConfigBytes, len(config))
+	}
+	files := []apply.GeneratedFile{{Path: ".mcp.json", Content: config}}
 	if p.Instructions != nil {
 		files = append(files, apply.GeneratedFile{
 			Path:    "CLAUDE.md",
@@ -70,20 +74,67 @@ func (Driver) Generate(p *agentproject.Project, target apply.Target, diags *diag
 	return files
 }
 
-// managedMCPConfig renders .mcp.json: Claude's project MCP configuration
-// carrying exactly the tenon-owned managed stdio server, launched from the
-// resolved tenon executable against the absolute agent source and workspace.
-// It is model-facing configuration, so it carries no fingerprint, version, or
-// other setup metadata beyond the paths the server itself needs. Keys are
-// ordered by encoding/json's sorted map marshalling, so identical input
-// always renders identical bytes.
-func managedMCPConfig(executable, source, workspace string) []byte {
-	config := map[string]any{"mcpServers": map[string]any{"managed": map[string]any{
+// acceptedServers expands every accepted plugin MCP server (ADR 0010) for
+// this workspace and drops the ones Claude's own environment-expansion pass
+// could turn into something the portable specification treats as literal.
+// Claude expands project MCP values itself, so text that still looks like a
+// placeholder after portable expansion could substitute an ambient secret;
+// tenon skips such a server for this harness alone rather than risk it.
+func acceptedServers(p *agentproject.Project, target apply.Target, diags *diagnostics.List) []agentproject.ResolvedServer {
+	var out []agentproject.ResolvedServer
+	for _, s := range agentproject.ResolveServers(p.PluginServers, target.Workspace, p.Name) {
+		if s.Placeholder != "" {
+			diags.Warnf("plugin.mcp.claude-expansion", s.SourcePath,
+				"MCP server %q is skipped for the selected harness (claude): its %s %q still contains placeholder-like ${...} text after portable expansion, and claude expands project MCP values itself",
+				s.Name, s.PlaceholderField, diagnostics.Bound(s.Placeholder, 256))
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+// mcpConfig renders .mcp.json: Claude's project MCP configuration carrying
+// the tenon-owned managed stdio server, launched from the resolved tenon
+// executable against the absolute agent source and workspace, plus every
+// accepted plugin server. It is model-facing configuration, so it carries no
+// fingerprint, version, or other setup metadata beyond the paths the servers
+// themselves need. Keys are ordered by encoding/json's sorted map
+// marshalling, so identical input always renders identical bytes.
+func mcpConfig(executable, source, workspace string, servers []agentproject.ResolvedServer) []byte {
+	entries := map[string]any{"managed": map[string]any{
 		"type":    "stdio",
 		"command": executable,
 		"args":    []string{"mcp", "serve", source, "--workspace", workspace, "--harness", "claude"},
-	}}}
-	// A fixed map of strings and string slices always encodes.
-	content, _ := json.MarshalIndent(config, "", "  ")
+	}}
+	for _, s := range servers {
+		entries[s.Name] = serverEntry(s)
+	}
+	// A fixed map of strings, string slices, and string maps always encodes.
+	content, _ := json.MarshalIndent(map[string]any{"mcpServers": entries}, "", "  ")
 	return append(content, '\n')
+}
+
+// serverEntry renders one accepted plugin server in Claude's project format.
+// That format carries no working-directory field, so a declared directory is
+// preserved exactly by wrapping the command in the system exec adapter, which
+// changes directory before replacing itself with the declared command.
+func serverEntry(s agentproject.ResolvedServer) map[string]any {
+	if s.Transport == agentproject.TransportHTTP {
+		entry := map[string]any{"type": "http", "url": s.URL}
+		if len(s.Headers) > 0 {
+			entry["headers"] = s.Headers
+		}
+		return entry
+	}
+	command, args := s.Command, s.Args
+	if s.Cwd != "" {
+		args = append([]string{"-C", s.Cwd, "--", command}, args...)
+		command = "/usr/bin/env"
+	}
+	entry := map[string]any{"type": "stdio", "command": command, "env": s.Env}
+	if len(args) > 0 {
+		entry["args"] = args
+	}
+	return entry
 }

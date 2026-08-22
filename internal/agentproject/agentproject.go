@@ -36,6 +36,11 @@ type Project struct {
 	// (ADR 0009): root skills always win a name collision, and among
 	// plugins the lexically first plugin and skill directory wins.
 	Skills []Skill
+	// PluginServers are the accepted plugin-declared MCP servers (ADR 0010),
+	// in acceptance order: plugin directories lexically, then servers
+	// lexically within each plugin's mcp.json. Their argument, environment,
+	// and working-directory values are still unexpanded.
+	PluginServers []PluginServer
 	// Subagents are the validated immediate subagents/ directories, sorted
 	// by name.
 	Subagents []Subagent
@@ -114,9 +119,10 @@ func Load(dir string) (*Project, *diagnostics.List, error) {
 
 	skillBudget := &skillSetBudget{}
 	skills, skillInputs := loadSkills(root, skillBudget, diags)
-	pluginSkills, manifestInputs := loadPlugins(root, skillBudget, diags)
+	pluginSkills, pluginServers, pluginInputs := loadPlugins(root, skillBudget, diags)
 	mergedSkills, pluginSkillInputs := mergeSkills(skills, pluginSkills, diags)
 	p.Skills = mergedSkills
+	p.PluginServers = pluginServers
 
 	subagents, subagentInputs := loadSubagents(root, diags)
 	p.Subagents = subagents
@@ -134,7 +140,7 @@ func Load(dir string) (*Project, *diagnostics.List, error) {
 	}
 	inputs = append(inputs, skillInputs...)
 	inputs = append(inputs, pluginSkillInputs...)
-	inputs = append(inputs, manifestInputs...)
+	inputs = append(inputs, pluginInputs...)
 	inputs = append(inputs, subagentInputs...)
 	inputs = append(inputs, toolInputs...)
 	inputs = append(inputs, harnessInputs...)

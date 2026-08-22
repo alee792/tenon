@@ -1235,3 +1235,241 @@ func TestMCPSubcommandRejectsUnknownVerbs(t *testing.T) {
 		t.Fatal("an unknown mcp subcommand must fail")
 	}
 }
+
+// pluginMCPSchema is the canonical Agent Plugins v1.0.0 MCP schema
+// identifier every plugin mcp.json must target.
+const pluginMCPSchema = "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json"
+
+// writePluginMCPAgent writes an agent carrying one vendored plugin whose
+// mcp.json declares servers, plus the plugin-relative command and working
+// directory the declaration addresses.
+func writePluginMCPAgent(t *testing.T, servers string) string {
+	t.Helper()
+	agent := writeAgent(t, "my-agent", validInstructions)
+	writeFile(t, agent, "plugins/vendor-x/plugin.json",
+		[]byte(`{"$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json", "name": "vendor-x"}`), 0o644)
+	writeFile(t, agent, "plugins/vendor-x/bin/serve", []byte("#!/bin/sh\nexec cat\n"), 0o755)
+	writeFile(t, agent, "plugins/vendor-x/work/.keep", nil, 0o644)
+	writeFile(t, agent, "plugins/vendor-x/mcp.json",
+		[]byte(`{"$schema": "`+pluginMCPSchema+`", "mcpServers": {`+servers+`}}`), 0o644)
+	return agent
+}
+
+// pluginRealRoot is the plugin's absolute real root: the ${PLUGIN_ROOT} value
+// and the containment boundary every plugin-relative path is proven against.
+func pluginRealRoot(t *testing.T, agent string) string {
+	t.Helper()
+	root, err := filepath.EvalSymlinks(filepath.Join(agent, "plugins", "vendor-x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+const pluginMCPServers = `
+	"local": {"command": "./bin/serve", "args": ["--data=${PLUGIN_DATA}/db"], "env": {"MODE": "fast"}, "cwd": "${PLUGIN_ROOT}/work"},
+	"remote": {"type": "streamable-http", "url": "https://example.com/mcp", "headers": {"X-Trace": "on"}}`
+
+// TestPluginMCPServersApplyToBothHarnesses is the plugin-MCP journey: one
+// vendored plugin's stdio and remote servers join the managed server in each
+// harness's native project configuration, the stdio server keeps its declared
+// working directory through Claude's directory-free format, and the private
+// plugin data directory is created owner-only without ever becoming a
+// tenon-owned generated file.
+func TestPluginMCPServersApplyToBothHarnesses(t *testing.T) {
+	agent := writePluginMCPAgent(t, pluginMCPServers)
+	executable := testExecutable(t)
+	root := pluginRealRoot(t, agent)
+
+	claudeWS, codexWS := t.TempDir(), t.TempDir()
+	claudeData := filepath.Join(claudeWS, ".tenon", "plugin-data", "my-agent", "vendor-x")
+	codexData := filepath.Join(codexWS, ".tenon", "plugin-data", "my-agent", "vendor-x")
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", claudeWS, "--diagnostics", "jsonl"}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("claude apply exit %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+	}
+	wantClaude := `{
+  "mcpServers": {
+    "local": {
+      "args": [
+        "-C",
+        "` + root + `/work",
+        "--",
+        "` + root + `/bin/serve",
+        "--data=` + claudeData + `/db"
+      ],
+      "command": "/usr/bin/env",
+      "env": {
+        "MODE": "fast",
+        "PLUGIN_DATA": "` + claudeData + `",
+        "PLUGIN_ROOT": "` + root + `"
+      },
+      "type": "stdio"
+    },
+    "managed": {
+      "args": [
+        "mcp",
+        "serve",
+        "` + agent + `",
+        "--workspace",
+        "` + claudeWS + `",
+        "--harness",
+        "claude"
+      ],
+      "command": "` + executable + `",
+      "type": "stdio"
+    },
+    "remote": {
+      "headers": {
+        "X-Trace": "on"
+      },
+      "type": "http",
+      "url": "https://example.com/mcp"
+    }
+  }
+}
+`
+	if got := string(mustRead(t, filepath.Join(claudeWS, ".mcp.json"))); got != wantClaude {
+		t.Fatalf(".mcp.json =\n%s\nwant\n%s", got, wantClaude)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"apply", agent, "--harness", "codex", "--workspace", codexWS, "--diagnostics", "jsonl"}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("codex apply exit %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+	}
+	wantCodex := wantCodexConfig(executable, agent, codexWS) + `
+[mcp_servers.local]
+command = "` + root + `/bin/serve"
+args = ["--data=` + codexData + `/db"]
+cwd = "` + root + `/work"
+env = { "MODE" = "fast", "PLUGIN_DATA" = "` + codexData + `", "PLUGIN_ROOT" = "` + root + `" }
+required = false
+default_tools_approval_mode = "prompt"
+
+[mcp_servers.remote]
+url = "https://example.com/mcp"
+required = false
+default_tools_approval_mode = "prompt"
+`
+	if got := string(mustRead(t, filepath.Join(codexWS, ".codex", "config.toml"))); got != wantCodex {
+		t.Fatalf(".codex/config.toml =\n%s\nwant\n%s", got, wantCodex)
+	}
+
+	// The plugin data directory is private, persistent, and owner-only, and
+	// it is never a tenon-owned generated file.
+	for harness, data := range map[string]string{"claude": claudeData, "codex": codexData} {
+		info, err := os.Stat(data)
+		if err != nil {
+			t.Fatalf("%s must create the plugin data directory: %v", harness, err)
+		}
+		if !info.IsDir() || info.Mode().Perm() != 0o700 {
+			t.Fatalf("%s plugin data directory = %v, want an owner-only directory", harness, info.Mode())
+		}
+	}
+	var record struct {
+		Files map[string]any `json:"files"`
+	}
+	if err := json.Unmarshal(mustRead(t, filepath.Join(claudeWS, ".tenon", "apply-claude.json")), &record); err != nil {
+		t.Fatal(err)
+	}
+	for path := range record.Files {
+		if strings.Contains(path, "plugin-data") {
+			t.Fatalf("the plugin data directory must never enter the apply record: %q", path)
+		}
+	}
+
+	// Reapplying identical source is deterministic, and the surviving data
+	// directory is not mistaken for drift.
+	for harness, ws := range map[string]string{"claude": claudeWS, "codex": codexWS} {
+		path := filepath.Join(ws, ".mcp.json")
+		if harness == "codex" {
+			path = filepath.Join(ws, ".codex", "config.toml")
+		}
+		before := mustRead(t, path)
+		beforeRecord := mustRead(t, filepath.Join(ws, ".tenon", "apply-"+harness+".json"))
+		stdout.Reset()
+		stderr.Reset()
+		if code := run([]string{"apply", agent, "--harness", harness, "--workspace", ws}, nil, &stdout, &stderr); code != 0 {
+			t.Fatalf("%s reapply exit %d: %s", harness, code, stderr.String())
+		}
+		if !bytes.Equal(before, mustRead(t, path)) {
+			t.Fatalf("%s reapply must produce byte-identical generated configuration", harness)
+		}
+		if !bytes.Equal(beforeRecord, mustRead(t, filepath.Join(ws, ".tenon", "apply-"+harness+".json"))) {
+			t.Fatalf("%s reapply must produce a byte-identical apply record", harness)
+		}
+	}
+}
+
+// TestPluginMCPSurvivingPlaceholderSkipsClaudeOnly proves the per-harness
+// protection: a value that still looks like a placeholder after portable
+// expansion is skipped for Claude, which runs its own expansion pass, and
+// generated unchanged for Codex, which does not — with identical diagnostics
+// from validate and apply.
+func TestPluginMCPSurvivingPlaceholderSkipsClaudeOnly(t *testing.T) {
+	agent := writePluginMCPAgent(t,
+		`"local": {"command": "./bin/serve", "args": ["--home=${HOME}"]}`)
+
+	var applyOut, validateOut, stderr bytes.Buffer
+	claudeWS := t.TempDir()
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", claudeWS, "--diagnostics", "jsonl"}, nil, &applyOut, &stderr); code != 0 {
+		t.Fatalf("a per-harness skip must not fail apply: exit %d, %s", code, applyOut.String())
+	}
+	if code := run([]string{"validate", agent, "--harness", "claude", "--diagnostics", "jsonl"}, nil, &validateOut, &stderr); code != 0 {
+		t.Fatalf("a per-harness skip must not fail validate: exit %d, %s", code, validateOut.String())
+	}
+	warnings := filterDiags(parseDiagLines(t, applyOut.String()), "plugin.mcp.claude-expansion")
+	if len(warnings) != 1 || warnings[0].Severity != "warning" || warnings[0].Path != "plugins/vendor-x/mcp.json" {
+		t.Fatalf("warnings = %+v, want one plugin.mcp.claude-expansion at the authored path", warnings)
+	}
+	if !strings.Contains(warnings[0].Rule, "${HOME}") || !strings.Contains(warnings[0].Rule, "claude") {
+		t.Fatalf("the warning must name the surviving text and the selected harness: %+v", warnings[0])
+	}
+	if got := filterDiags(parseDiagLines(t, validateOut.String()), "plugin.mcp.claude-expansion"); len(got) != 1 || got[0] != warnings[0] {
+		t.Fatalf("validate and apply must report identical diagnostics: %+v vs %+v", got, warnings)
+	}
+	claudeConfig := string(mustRead(t, filepath.Join(claudeWS, ".mcp.json")))
+	if strings.Contains(claudeConfig, "${HOME}") || strings.Contains(claudeConfig, "local") {
+		t.Fatalf("claude must not receive the skipped server: %s", claudeConfig)
+	}
+	if !strings.Contains(claudeConfig, "managed") {
+		t.Fatalf("the managed server must survive a skipped plugin server: %s", claudeConfig)
+	}
+
+	codexWS := t.TempDir()
+	var codexOut bytes.Buffer
+	if code := run([]string{"apply", agent, "--harness", "codex", "--workspace", codexWS, "--diagnostics", "jsonl"}, nil, &codexOut, &stderr); code != 0 {
+		t.Fatalf("codex apply exit %d: %s", code, codexOut.String())
+	}
+	if got := filterDiags(parseDiagLines(t, codexOut.String()), "plugin.mcp.claude-expansion"); len(got) != 0 {
+		t.Fatalf("a harness without its own expansion pass must not be warned: %+v", got)
+	}
+	codexConfig := string(mustRead(t, filepath.Join(codexWS, ".codex", "config.toml")))
+	if !strings.Contains(codexConfig, `args = ["--home=${HOME}"]`) {
+		t.Fatalf("codex must receive the text unchanged: %s", codexConfig)
+	}
+}
+
+// TestPluginMCPManagedNameIsReservedEndToEnd proves a plugin cannot shadow
+// tenon's own managed server: the plugin server is skipped with a warning and
+// the managed entry stays intact.
+func TestPluginMCPManagedNameIsReservedEndToEnd(t *testing.T) {
+	agent := writePluginMCPAgent(t, `"managed": {"command": "./bin/serve"}`)
+	executable := testExecutable(t)
+
+	ws := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--diagnostics", "jsonl"}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("a reserved name must not fail apply: exit %d, %s", code, stdout.String())
+	}
+	warnings := filterDiags(parseDiagLines(t, stdout.String()), "plugin.mcp.server.collision")
+	if len(warnings) != 1 || warnings[0].Path != "plugins/vendor-x/mcp.json" ||
+		!strings.Contains(warnings[0].Rule, "never renamed") {
+		t.Fatalf("warnings = %+v, want one reserved-name collision warning", warnings)
+	}
+	if got := string(mustRead(t, filepath.Join(ws, ".mcp.json"))); got != wantMCPJSON(executable, agent, ws) {
+		t.Fatalf(".mcp.json =\n%s\nwant exactly the managed entry\n%s", got, wantMCPJSON(executable, agent, ws))
+	}
+}

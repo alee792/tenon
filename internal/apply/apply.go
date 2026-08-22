@@ -139,6 +139,9 @@ func Apply(p *agentproject.Project, workspace, executable string, driver Driver)
 	if diags.HasErrors() {
 		return nil, diags, nil
 	}
+	if err := ensurePluginData(p, ws); err != nil {
+		return nil, diags, err
+	}
 
 	result := &Result{Fingerprint: p.Fingerprint}
 	record := &Record{
@@ -189,6 +192,32 @@ func Apply(p *agentproject.Project, workspace, executable string, driver Driver)
 		return nil, diags, fmt.Errorf("writing apply record: %w", err)
 	}
 	return result, diags, nil
+}
+
+// ensurePluginData creates the private, persistent data directory of every
+// agent-and-plugin identity contributing an accepted MCP server, before any
+// native configuration is written (ADR 0010). Existing permissions are
+// normalized to owner-only. The directory is deliberately not a tenon-owned
+// generated file: it never enters the apply record, so it survives reapply
+// and the removal of the server or plugin that introduced it.
+func ensurePluginData(p *agentproject.Project, ws string) error {
+	seen := map[string]bool{}
+	for _, server := range p.PluginServers {
+		dir := agentproject.PluginDataDir(ws, p.Name, server.Plugin)
+		if seen[dir] {
+			continue
+		}
+		seen[dir] = true
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return fmt.Errorf("creating the plugin data directory for %s: %w", server.Plugin, err)
+		}
+		for _, level := range []string{dir, filepath.Dir(dir), filepath.Dir(filepath.Dir(dir))} {
+			if err := os.Chmod(level, 0o700); err != nil {
+				return fmt.Errorf("securing the plugin data directory for %s: %w", server.Plugin, err)
+			}
+		}
+	}
+	return nil
 }
 
 // Verify reports whether the workspace still carries exactly the state the

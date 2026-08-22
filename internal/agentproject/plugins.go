@@ -63,27 +63,29 @@ type pluginSkill struct {
 	Inputs []sourceInput
 }
 
-// loadPlugins discovers plugins/ and returns every candidate skill from
-// every valid plugin, in precedence order: plugin directories in lexical
-// order by storage name, and each plugin's skill directories in lexical
-// order. Collision resolution against root skills happens in the caller,
-// which alone knows the root names. budget is the aggregate skill-set
-// budget shared with root skills/ (ADR 0013); it is not reset here.
-func loadPlugins(root string, budget *skillSetBudget, diags *diagnostics.List) ([]pluginSkill, []sourceInput) {
+// loadPlugins discovers plugins/ and returns every candidate skill and every
+// accepted MCP server from every valid plugin, in precedence order: plugin
+// directories in lexical order by storage name, and each plugin's skill
+// directories and declared servers in lexical order. Skill collision
+// resolution against root skills happens in the caller, which alone knows the
+// root names; server names have no root surface, so they are resolved here.
+// budget is the aggregate skill-set budget shared with root skills/ (ADR
+// 0013); it is not reset here.
+func loadPlugins(root string, budget *skillSetBudget, diags *diagnostics.List) ([]pluginSkill, []PluginServer, []sourceInput) {
 	dir := filepath.Join(root, "plugins")
 	info, err := os.Lstat(dir)
 	if err != nil {
-		return nil, nil // missing plugins/ is normal
+		return nil, nil, nil // missing plugins/ is normal
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		diags.Errorf("plugin.entry.invalid", "plugins",
 			"plugins must be a real directory; symlinks are never followed")
-		return nil, nil
+		return nil, nil, nil
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		diags.Errorf("plugin.entry.invalid", "plugins", "plugins could not be read: %v", err)
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	var names []string
@@ -115,19 +117,22 @@ func loadPlugins(root string, budget *skillSetBudget, diags *diagnostics.List) (
 	sort.Strings(names)
 
 	var candidates []pluginSkill
+	var servers []PluginServer
 	var inputs []sourceInput
 	for _, name := range names {
-		pluginCandidates, manifestInputs := loadPlugin(dir, name, budget, diags)
+		pluginCandidates, pluginServers, pluginInputs := loadPlugin(dir, name, budget, diags)
 		candidates = append(candidates, pluginCandidates...)
-		inputs = append(inputs, manifestInputs...)
+		servers = append(servers, pluginServers...)
+		inputs = append(inputs, pluginInputs...)
 	}
-	return candidates, inputs
+	return candidates, mergePluginServers(servers, diags), inputs
 }
 
-// loadPlugin validates one plugin directory's manifest and, when it is
-// valid, its skills/ location. A manifest violation makes the plugin
-// contribute no skills, but its bytes still join the fingerprint once read.
-func loadPlugin(pluginsDir, dirName string, budget *skillSetBudget, diags *diagnostics.List) ([]pluginSkill, []sourceInput) {
+// loadPlugin validates one plugin directory's manifest and, when it is valid,
+// its two supported component locations: skills/ and mcp.json. A manifest
+// violation makes the plugin contribute nothing, but its bytes still join the
+// fingerprint once read.
+func loadPlugin(pluginsDir, dirName string, budget *skillSetBudget, diags *diagnostics.List) ([]pluginSkill, []PluginServer, []sourceInput) {
 	pluginRoot := filepath.Join(pluginsDir, dirName)
 	authoredRoot := "plugins/" + dirName
 
@@ -137,12 +142,53 @@ func loadPlugin(pluginsDir, dirName string, budget *skillSetBudget, diags *diagn
 		inputs = append(inputs, *manifestInput)
 	}
 	if !valid {
-		return nil, inputs
+		return nil, nil, inputs
 	}
+
+	warnUnsupportedComponents(pluginRoot, authoredRoot, diags)
 
 	skillsDir := filepath.Join(pluginRoot, "skills")
 	candidates := loadPluginSkills(skillsDir, authoredRoot+"/skills", budget, diags)
-	return candidates, inputs
+	servers, mcpInputs := loadPluginMCP(pluginRoot, authoredRoot, dirName, diags)
+	inputs = append(inputs, mcpInputs...)
+	return candidates, servers, inputs
+}
+
+// pluginComponents are the plugin root entries tenon compiles. Every other
+// entry is an Agent Plugins component tenon does not implement, skipped with
+// one warning each rather than silently ignored (ADR 0009).
+var pluginComponents = map[string]bool{
+	"plugin.json": true,
+	"skills":      true,
+	"mcp.json":    true,
+}
+
+// unsupportedComponentDirs are Agent Plugins component locations tenon
+// cannot operationalize. Only these warn: ordinary payload files and
+// directories (binaries an accepted command runs, READMEs, licenses) are
+// inert plugin content, not skipped components.
+var unsupportedComponentDirs = map[string]bool{
+	"commands": true,
+	"agents":   true,
+	"hooks":    true,
+}
+
+// warnUnsupportedComponents reports each component location tenon cannot
+// operationalize in an accepted plugin's root exactly once, in lexical
+// order.
+func warnUnsupportedComponents(pluginRoot, authoredRoot string, diags *diagnostics.List) {
+	entries, err := os.ReadDir(pluginRoot)
+	if err != nil {
+		return // the manifest already proved the directory readable
+	}
+	for _, entry := range entries {
+		if !unsupportedComponentDirs[entry.Name()] {
+			continue
+		}
+		diags.Warnf("plugin.component.unsupported", authoredRoot+"/"+entry.Name(),
+			"tenon consumes only plugin.json, skills, and mcp.json; the %s component is not supported and is skipped",
+			entry.Name())
+	}
 }
 
 // loadPluginManifest validates plugin.json: a bounded, regular, UTF-8 file

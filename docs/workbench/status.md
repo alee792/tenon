@@ -83,6 +83,18 @@ continue — root skills load first, and the first name wins with collisions
 warned and never renamed. Plugin manifests and consumed resources join the
 fingerprint, and imported skills round-trip byte-for-byte like root skills.
 
+Plugin MCP, per ADR 0010, completing acceptance item 5: an accepted
+plugin's `mcp.json` validates locally against the exact v1.0.0 schema,
+`stdio` and `streamable-http` servers map into native configuration with
+first-wins collision handling, `managed` reserved, and SSE warned and
+skipped; `${PLUGIN_ROOT}` and `${PLUGIN_DATA}` expand exactly once with an
+owner-only persistent per-agent-and-plugin data directory that never
+enters the apply record; Claude's exec-adapter preserves working
+directories its format lacks and placeholder-bearing values skip Claude
+with a warning rather than risk ambient substitution; Codex renders remote
+servers without headers and warns about the drop; and the 8 MiB rendered
+configuration ceiling fails before mutation.
+
 
 ## Gaps
 
