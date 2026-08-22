@@ -81,3 +81,70 @@ func TestRemoteHeadersWarnForCodex(t *testing.T) {
 		}
 	}
 }
+
+func projectWithConnection(name, url, context string) *agentproject.Project {
+	return &agentproject.Project{
+		Root:         "/src/my-agent",
+		Name:         "my-agent",
+		Instructions: &agentproject.Instructions{Body: "Body text.\n"},
+		Connections: []agentproject.Connection{
+			{Name: name, URL: url, Context: context, SourcePath: "connections/" + name + ".md"},
+		},
+	}
+}
+
+// TestConnectionRendersAsCodexHTTPServer proves a standalone connection
+// renders into .codex/config.toml as a startup-optional entry, and into the
+// generated AGENTS.md's connections section (ADR 0016).
+func TestConnectionRendersAsCodexHTTPServer(t *testing.T) {
+	p := projectWithConnection("catalog", "https://example.com/mcp", "Use for the catalog.")
+	diags := &diagnostics.List{}
+	files := Driver{}.Generate(p, apply.Target{Workspace: "/ws", Executable: "/bin/tenon"}, diags)
+	if diags.HasErrors() {
+		t.Fatalf("unexpected diagnostics: %v", diags.All())
+	}
+
+	var config, agentsMD string
+	for _, f := range files {
+		switch f.Path {
+		case ".codex/config.toml":
+			config = string(f.Content)
+		case "AGENTS.md":
+			agentsMD = string(f.Content)
+		}
+	}
+	want := "\n[mcp_servers.catalog]\n" +
+		`url = "https://example.com/mcp"` + "\n" +
+		"required = false\n" +
+		`default_tools_approval_mode = "prompt"` + "\n"
+	if !strings.Contains(config, want) {
+		t.Fatalf("expected exact connection entry in config.toml:\ngot:\n%s\nwant substring:\n%s", config, want)
+	}
+	if !strings.Contains(agentsMD, "### catalog") || !strings.Contains(agentsMD, "Use for the catalog.") {
+		t.Fatalf("expected the connections section in AGENTS.md: %s", agentsMD)
+	}
+}
+
+// TestClaudeReservedConnectionNamePassesForCodex proves the Claude-only
+// native surface reservation (workspace, claude-in-chrome, computer-use) is
+// a per-harness rule: those names are ordinary, accepted connection names
+// for Codex.
+func TestClaudeReservedConnectionNamePassesForCodex(t *testing.T) {
+	for _, name := range []string{"workspace", "claude-in-chrome", "computer-use"} {
+		p := projectWithConnection(name, "https://example.com/mcp", "")
+		diags := &diagnostics.List{}
+		files := Driver{}.Generate(p, apply.Target{Workspace: "/ws", Executable: "/bin/tenon"}, diags)
+		if diags.HasErrors() {
+			t.Fatalf("name %q: unexpected diagnostics for codex: %v", name, diags.All())
+		}
+		found := false
+		for _, f := range files {
+			if f.Path == ".codex/config.toml" && strings.Contains(string(f.Content), "[mcp_servers."+name+"]") {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("name %q: expected the connection to render for codex", name)
+		}
+	}
+}

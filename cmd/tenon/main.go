@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/alee792/tenon/internal/agentproject"
 	"github.com/alee792/tenon/internal/apply"
@@ -33,6 +34,12 @@ const usage = `usage:
   tenon apply AGENT --harness <claude|codex> [--workspace DIR] [--diagnostics <prose|jsonl>]
   tenon validate AGENT --harness <claude|codex> [--diagnostics <prose|jsonl>]
   tenon mcp serve AGENT --harness <claude|codex> [--workspace DIR]
+  tenon connection add AGENT NAME --url HTTPS_URL [--context TEXT]
+  tenon connection status AGENT [NAME]
+  tenon connection remove AGENT NAME
+  tenon integration install SOURCE --trust operator
+  tenon integration inspect|verify|list|enable|disable|remove [ID]
+  tenon integration update ID SOURCE --trust operator
 `
 
 func main() {
@@ -55,6 +62,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return 2
 		}
 		return runMCPServe(args[2:], stdin, stdout, stderr)
+	case "connection":
+		return runConnection(args[1:], stdout, stderr)
+	case "integration":
+		return runIntegration(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "tenon: unknown command %q\n%s", args[0], usage)
 		return 2
@@ -447,4 +458,307 @@ func stateBase() (string, error) {
 		return "", err
 	}
 	return filepath.Join(home, ".local", "state", "tenon"), nil
+}
+
+// runConnection dispatches the "tenon connection" subcommands (ADR 0016).
+func runConnection(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintf(stderr, "tenon connection: a subcommand is required (add, status, remove)\n%s", usage)
+		return 2
+	}
+	switch args[0] {
+	case "add":
+		return runConnectionAdd(args[1:], stdout, stderr)
+	case "status":
+		return runConnectionStatus(args[1:], stdout, stderr)
+	case "remove":
+		return runConnectionRemove(args[1:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "tenon connection: unknown subcommand %q\n%s", args[0], usage)
+		return 2
+	}
+}
+
+// parsePositional parses fs against args, accepting positional arguments
+// intermixed with flags in any order — the same convention commonFlags
+// uses — and returns every positional argument in order.
+func parsePositional(fs *flag.FlagSet, args []string) ([]string, bool) {
+	var positional []string
+	rest := args
+	for len(rest) > 0 {
+		if rest[0] != "" && rest[0][0] != '-' {
+			positional = append(positional, rest[0])
+			rest = rest[1:]
+			continue
+		}
+		if err := fs.Parse(rest); err != nil {
+			return nil, false
+		}
+		next := fs.Args()
+		if len(next) == len(rest) {
+			return nil, false
+		}
+		rest = next
+	}
+	return positional, true
+}
+
+// proveAgentRoot resolves agent to an absolute path and proves it an agent
+// project the same way agentproject.Load does: instructions.md must be
+// present as a real regular file. It never searches ancestors and never
+// selects a workspace or harness (ADR 0016).
+func proveAgentRoot(agent, cmdName string, stderr io.Writer) (string, bool) {
+	root, err := filepath.Abs(agent)
+	if err != nil {
+		fmt.Fprintf(stderr, "tenon %s: %v\n", cmdName, err)
+		return "", false
+	}
+	info, err := os.Stat(root)
+	if err != nil || !info.IsDir() {
+		fmt.Fprintf(stderr, "tenon %s: the agent root must be an existing directory: %s\n", cmdName, agent)
+		return "", false
+	}
+	instr, err := os.Lstat(filepath.Join(root, "instructions.md"))
+	if err != nil || instr.Mode()&os.ModeSymlink != 0 || !instr.Mode().IsRegular() {
+		fmt.Fprintf(stderr, "tenon %s: %s is not a proven agent project; instructions.md must be present as a real regular file\n", cmdName, agent)
+		return "", false
+	}
+	return root, true
+}
+
+// runConnectionAdd validates a new connection entirely offline — name, URL,
+// context length, and every collision it can check — then creates the file
+// atomically. It never overwrites an existing connection and never applies a
+// workspace.
+func runConnectionAdd(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("connection add", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	urlFlag := fs.String("url", "", "absolute HTTPS remote endpoint URL")
+	contextFlag := fs.String("context", "", "optional model-facing usage context")
+	packageFlag := fs.String("package", "", "installed package identifier (not supported yet)")
+	capabilityFlag := fs.String("capability", "", "installed capability identifier (not supported yet)")
+
+	positional, ok := parsePositional(fs, args)
+	if !ok || len(positional) != 2 {
+		fmt.Fprintf(stderr, "tenon connection add: usage: tenon connection add AGENT NAME --url HTTPS_URL [--context TEXT]\n")
+		return 2
+	}
+	agent, name := positional[0], positional[1]
+
+	if *packageFlag != "" || *capabilityFlag != "" {
+		fmt.Fprintln(stderr, "tenon connection add: installed package targets are not supported yet; only remote streamable-http targets are available")
+		return 1
+	}
+	if *urlFlag == "" {
+		fmt.Fprintln(stderr, "tenon connection add: --url is required")
+		return 2
+	}
+
+	// Load proves the root and supplies the exact offline collision space
+	// (existing connections and accepted plugin MCP servers) add must check.
+	p, diags, err := agentproject.Load(agent)
+	if err != nil {
+		fmt.Fprintln(stderr, "tenon connection add:", err)
+		return 1
+	}
+	if p == nil || diags.HasErrors() {
+		_ = diags.WriteProse(stderr)
+		fmt.Fprintln(stderr, "tenon connection add: the agent project is invalid; fix it before adding a connection")
+		return 1
+	}
+
+	if !agentproject.ValidConnectionName(name) {
+		fmt.Fprintf(stderr, "tenon connection add: %q is not a valid connection name: 1-64 characters, a leading lowercase letter, then lowercase letters, digits, underscores, or hyphens\n", name)
+		return 1
+	}
+	if name == agentproject.ManagedConnectionName {
+		fmt.Fprintf(stderr, "tenon connection add: the name %q is reserved for tenon's own managed server\n", name)
+		return 1
+	}
+	for _, c := range p.Connections {
+		if c.Name == name {
+			fmt.Fprintf(stderr, "tenon connection add: the connection name %q already exists at %s\n", name, c.SourcePath)
+			return 1
+		}
+	}
+	for _, s := range p.PluginServers {
+		if s.Name == name {
+			fmt.Fprintf(stderr, "tenon connection add: the connection name %q collides with the accepted plugin MCP server declared at %s\n", name, s.SourcePath)
+			return 1
+		}
+	}
+	if err := agentproject.ValidateConnectionURL(*urlFlag); err != nil {
+		fmt.Fprintln(stderr, "tenon connection add:", err)
+		return 1
+	}
+	context := strings.TrimSpace(*contextFlag)
+	if n := utf8.RuneCountInString(context); n > agentproject.MaxConnectionContextRunes {
+		fmt.Fprintf(stderr, "tenon connection add: context may contain at most %d Unicode characters; found %d\n", agentproject.MaxConnectionContextRunes, n)
+		return 1
+	}
+
+	root, ok := proveAgentRoot(agent, "connection add", stderr)
+	if !ok {
+		return 1
+	}
+	connectionsDir := filepath.Join(root, "connections")
+	if err := os.MkdirAll(connectionsDir, 0o755); err != nil {
+		fmt.Fprintln(stderr, "tenon connection add:", err)
+		return 1
+	}
+	path := filepath.Join(connectionsDir, name+".md")
+	if _, err := os.Lstat(path); err == nil {
+		fmt.Fprintf(stderr, "tenon connection add: connections/%s.md already exists; there is no update command, edit it directly\n", name)
+		return 1
+	} else if !os.IsNotExist(err) {
+		fmt.Fprintln(stderr, "tenon connection add:", err)
+		return 1
+	}
+
+	var b strings.Builder
+	b.WriteString("---\n")
+	b.WriteString("type: mcp\n")
+	b.WriteString("transport: streamable-http\n")
+	b.WriteString("url: " + *urlFlag + "\n")
+	b.WriteString("---\n")
+	if context != "" {
+		b.WriteString("\n" + context + "\n")
+	}
+	if err := writeFileAtomic(path, []byte(b.String())); err != nil {
+		fmt.Fprintln(stderr, "tenon connection add:", err)
+		return 1
+	}
+
+	fmt.Fprintf(stdout, "added: connection %s at connections/%s.md\n", name, name)
+	fmt.Fprintln(stdout, "run tenon apply for each intended workspace")
+	return 0
+}
+
+// runConnectionStatus reports the declared target and context presence of
+// every connection, or one named connection, without contacting anything.
+// Any malformed connection is reported with its authored path and makes the
+// result nonzero.
+func runConnectionStatus(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("connection status", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	positional, ok := parsePositional(fs, args)
+	if !ok || len(positional) < 1 || len(positional) > 2 {
+		fmt.Fprintf(stderr, "tenon connection status: usage: tenon connection status AGENT [NAME]\n")
+		return 2
+	}
+	agent := positional[0]
+	filterName := ""
+	if len(positional) == 2 {
+		filterName = positional[1]
+	}
+
+	if _, ok := proveAgentRoot(agent, "connection status", stderr); !ok {
+		return 1
+	}
+
+	connections, diags, err := agentproject.LoadConnectionsForStatus(agent)
+	if err != nil {
+		fmt.Fprintln(stderr, "tenon connection status:", err)
+		return 1
+	}
+
+	found := false
+	for _, c := range connections {
+		if filterName != "" && c.Name != filterName {
+			continue
+		}
+		found = true
+		contextState := "no context"
+		if c.Context != "" {
+			contextState = "context present"
+		}
+		fmt.Fprintf(stdout, "%s: target=remote transport=streamable-http url=%s %s configured runtime=unchecked (%s)\n",
+			c.Name, c.URL, contextState, c.SourcePath)
+	}
+
+	reportedMalformed := false
+	for _, d := range diags.All() {
+		if filterName != "" && d.Path != "connections/"+filterName+".md" {
+			continue
+		}
+		fmt.Fprintln(stderr, d.String())
+		if d.Severity == diagnostics.Error {
+			reportedMalformed = true
+			found = true
+		}
+	}
+
+	if !found {
+		fmt.Fprintf(stderr, "tenon connection status: no connection named %q\n", filterName)
+		return 1
+	}
+	if reportedMalformed {
+		return 1
+	}
+	return 0
+}
+
+// runConnectionRemove deletes exactly the named real connection file,
+// without requiring it — or any other connection — to be healthy.
+func runConnectionRemove(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("connection remove", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	positional, ok := parsePositional(fs, args)
+	if !ok || len(positional) != 2 {
+		fmt.Fprintf(stderr, "tenon connection remove: usage: tenon connection remove AGENT NAME\n")
+		return 2
+	}
+	agent, name := positional[0], positional[1]
+
+	root, ok := proveAgentRoot(agent, "connection remove", stderr)
+	if !ok {
+		return 1
+	}
+	if !agentproject.ValidConnectionName(name) {
+		fmt.Fprintf(stderr, "tenon connection remove: %q is not a valid connection name\n", name)
+		return 1
+	}
+
+	path := filepath.Join(root, "connections", name+".md")
+	info, err := os.Lstat(path)
+	if err != nil {
+		fmt.Fprintf(stderr, "tenon connection remove: no connection file at connections/%s.md\n", name)
+		return 1
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		fmt.Fprintf(stderr, "tenon connection remove: connections/%s.md is not a real regular file; refusing to remove it\n", name)
+		return 1
+	}
+	if err := os.Remove(path); err != nil {
+		fmt.Fprintln(stderr, "tenon connection remove:", err)
+		return 1
+	}
+
+	fmt.Fprintf(stdout, "removed: connection %s at connections/%s.md\n", name, name)
+	fmt.Fprintln(stdout, "run tenon apply for each intended workspace")
+	return 0
+}
+
+// writeFileAtomic writes content to a same-directory temporary file and
+// renames it into place, so a concurrent reader never observes a partial
+// connection file.
+func writeFileAtomic(path string, content []byte) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".tenon-tmp-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(content); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
 }

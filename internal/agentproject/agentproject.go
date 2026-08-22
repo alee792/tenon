@@ -46,6 +46,9 @@ type Project struct {
 	Subagents []Subagent
 	// Tools are the validated authored tools, sorted by name.
 	Tools []Tool
+	// Connections are the validated standalone native MCP connections
+	// (ADR 0016), sorted by name.
+	Connections []Connection
 	// HarnessFiles are the validated harness-specific files, keyed by
 	// harness name ("claude", "codex") and sorted by RelPath within each.
 	HarnessFiles map[string][]HarnessFile
@@ -66,7 +69,7 @@ type Instructions struct {
 // component is implemented, its presence fails validation: silently dropping
 // authored behavior would pretend the compiled agent is complete.
 var componentDirs = []string{
-	"connections", "schedules",
+	"schedules",
 }
 
 // Load validates the agent project at dir. Contract violations are reported
@@ -133,6 +136,9 @@ func Load(dir string) (*Project, *diagnostics.List, error) {
 	harnessFiles, harnessInputs := loadHarnessFiles(root, diags)
 	p.HarnessFiles = harnessFiles
 
+	connections, connectionInputs := loadConnections(root, pluginServers, diags)
+	p.Connections = connections
+
 	checkNameCollisions(tools, subagents, diags)
 
 	inputs := []sourceInput{
@@ -144,6 +150,7 @@ func Load(dir string) (*Project, *diagnostics.List, error) {
 	inputs = append(inputs, subagentInputs...)
 	inputs = append(inputs, toolInputs...)
 	inputs = append(inputs, harnessInputs...)
+	inputs = append(inputs, connectionInputs...)
 	p.Fingerprint = fingerprint(inputs)
 	if diags.HasErrors() {
 		return nil, diags, nil

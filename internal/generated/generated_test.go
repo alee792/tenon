@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/alee792/tenon/internal/agentproject"
 )
 
 // TestSkillMDInsertsOneMarkerLine proves the deliberate contract point: the
@@ -29,6 +31,51 @@ func TestSkillMDWithoutTrailingNewline(t *testing.T) {
 	want := []byte("---\nname: echo\n---\n" + Marker + "\n")
 	if !bytes.Equal(got, want) {
 		t.Fatalf("SkillMD = %q, want %q", got, want)
+	}
+}
+
+// TestInstructionsWithoutConnections proves the connections section is
+// omitted entirely, not emitted empty, when no connection exists.
+func TestInstructionsWithoutConnections(t *testing.T) {
+	got := Instructions("Body text.\n", nil)
+	want := []byte(Marker + "\n\nBody text.\n")
+	if !bytes.Equal(got, want) {
+		t.Fatalf("Instructions = %q, want %q", got, want)
+	}
+	if strings.Contains(string(got), "Native MCP connections") {
+		t.Fatalf("no connections section expected: %q", got)
+	}
+}
+
+// TestInstructionsWithConnectionsExactBytes proves the exact rendering
+// contract (ADR 0016): the authored body first, then one bounded "## Native
+// MCP connections" section with each connection named once in the given
+// order, its nonempty context rendered once, no frontmatter, and one closing
+// boundary sentence stated exactly once.
+func TestInstructionsWithConnectionsExactBytes(t *testing.T) {
+	connections := []agentproject.Connection{
+		{Name: "catalog", URL: "https://example.com/mcp", Context: "Use this for the public reference catalog."},
+		{Name: "search", URL: "https://search.example.com/mcp", Context: ""},
+	}
+	got := Instructions("Body text.\n", connections)
+	want := []byte(Marker + "\n\n" +
+		"Body text.\n" +
+		"\n## Native MCP connections\n" +
+		"\n### catalog\n" +
+		"\nUse this for the public reference catalog.\n" +
+		"\n### search\n" +
+		"\n" + connectionsBoundary + "\n")
+	if !bytes.Equal(got, want) {
+		t.Fatalf("Instructions =\n%q\nwant\n%q", got, want)
+	}
+	if strings.Contains(string(got), "type: mcp") || strings.Contains(string(got), "transport:") {
+		t.Fatalf("no frontmatter must leak into generated instructions: %q", got)
+	}
+	if strings.Count(string(got), connectionsBoundary) != 1 {
+		t.Fatalf("the boundary sentence must appear exactly once: %q", got)
+	}
+	if strings.Count(string(got), "### catalog") != 1 || strings.Count(string(got), "### search") != 1 {
+		t.Fatalf("each connection name must appear exactly once as a subheading: %q", got)
 	}
 }
 

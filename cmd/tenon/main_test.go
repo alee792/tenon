@@ -82,7 +82,7 @@ func TestFiveMinuteJourney(t *testing.T) {
 // either command on a failing project.
 func TestValidateReportsApplyFailuresWithoutMutating(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
-	if err := os.Mkdir(filepath.Join(agent, "connections"), 0o755); err != nil {
+	if err := os.Mkdir(filepath.Join(agent, "schedules"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1471,5 +1471,241 @@ func TestPluginMCPManagedNameIsReservedEndToEnd(t *testing.T) {
 	}
 	if got := string(mustRead(t, filepath.Join(ws, ".mcp.json"))); got != wantMCPJSON(executable, agent, ws) {
 		t.Fatalf(".mcp.json =\n%s\nwant exactly the managed entry\n%s", got, wantMCPJSON(executable, agent, ws))
+	}
+}
+
+// --- Connection authoring commands (ADR 0016) --------------------------------
+
+// TestConnectionAddCreatesExactFile proves add validates offline and
+// creates the exact expected file bytes, refusing to overwrite an existing
+// connection.
+func TestConnectionAddCreatesExactFile(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"connection", "add", agent, "catalog",
+		"--url", "https://example.com/mcp", "--context", "Use for the catalog."}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("add exit %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "run tenon apply") {
+		t.Fatalf("expected a directive to run tenon apply: %s", stdout.String())
+	}
+
+	got := mustRead(t, filepath.Join(agent, "connections", "catalog.md"))
+	want := "---\ntype: mcp\ntransport: streamable-http\nurl: https://example.com/mcp\n---\n\nUse for the catalog.\n"
+	if string(got) != want {
+		t.Fatalf("connections/catalog.md =\n%q\nwant\n%q", got, want)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = run([]string{"connection", "add", agent, "catalog", "--url", "https://example.com/other"}, nil, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("add must refuse to overwrite an existing connection")
+	}
+	got2 := mustRead(t, filepath.Join(agent, "connections", "catalog.md"))
+	if string(got2) != want {
+		t.Fatalf("a refused overwrite must not change the existing file: %q", got2)
+	}
+}
+
+// TestConnectionAddWithoutContextOmitsBody proves the body is omitted
+// entirely, not emitted empty, when no --context is given.
+func TestConnectionAddWithoutContextOmitsBody(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"connection", "add", agent, "catalog", "--url", "https://example.com/mcp"}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("add exit %d: %s", code, stderr.String())
+	}
+	got := mustRead(t, filepath.Join(agent, "connections", "catalog.md"))
+	want := "---\ntype: mcp\ntransport: streamable-http\nurl: https://example.com/mcp\n---\n"
+	if string(got) != want {
+		t.Fatalf("connections/catalog.md =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// TestConnectionAddPackageFlagFailsUnsupported proves add accepts
+// --package/--capability but fails honestly rather than silently ignoring
+// them or half-implementing the installed target form.
+func TestConnectionAddPackageFlagFailsUnsupported(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"connection", "add", agent, "github",
+		"--package", "github-mcp-server", "--capability", "github"}, nil, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("expected failure: installed targets are not supported yet")
+	}
+	if !strings.Contains(stderr.String(), "installed package targets are not supported yet; only remote streamable-http targets are available") {
+		t.Fatalf("expected the exact honest diagnostic, got: %s", stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(agent, "connections", "github.md")); !os.IsNotExist(err) {
+		t.Fatal("an unsupported add must not create a file")
+	}
+}
+
+// TestConnectionAddRejectsInvalidURL and other offline validation failures
+// must never create a file.
+func TestConnectionAddRejectsInvalidURL(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"connection", "add", agent, "catalog", "--url", "http://example.com/mcp"}, nil, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("expected failure: plain http is never accepted")
+	}
+	if _, err := os.Stat(filepath.Join(agent, "connections")); !os.IsNotExist(err) {
+		t.Fatal("a failed add must not create connections/")
+	}
+}
+
+// TestConnectionStatusReportsConfiguredAndMalformed proves status lists
+// healthy connections with their declared target and context presence, and
+// reports a malformed connection with authored-path diagnostics and a
+// nonzero result.
+func TestConnectionStatusReportsConfiguredAndMalformed(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	writeFile(t, agent, "connections/catalog.md",
+		[]byte("---\ntype: mcp\ntransport: streamable-http\nurl: https://example.com/mcp\n---\n\nGuidance.\n"), 0o644)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"connection", "status", agent}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("status exit %d: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "catalog") || !strings.Contains(out, "configured") ||
+		!strings.Contains(out, "runtime=unchecked") || !strings.Contains(out, "context present") {
+		t.Fatalf("status output = %q", out)
+	}
+
+	// A second, malformed connection must be reported with its authored
+	// path and make the result nonzero, without suppressing the first.
+	writeFile(t, agent, "connections/broken.md", []byte("no frontmatter\n"), 0o644)
+	stdout.Reset()
+	stderr.Reset()
+	code = run([]string{"connection", "status", agent}, nil, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("a malformed connection must make status nonzero")
+	}
+	if !strings.Contains(stdout.String(), "catalog") {
+		t.Fatalf("the healthy connection must still be reported: %s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "connections/broken.md") || !strings.Contains(stderr.String(), "connection.frontmatter.missing") {
+		t.Fatalf("expected an authored-path diagnostic for the malformed connection: %s", stderr.String())
+	}
+}
+
+// TestConnectionStatusByName proves the optional NAME argument filters to
+// one connection and fails when it does not exist.
+func TestConnectionStatusByName(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	writeFile(t, agent, "connections/catalog.md",
+		[]byte("---\ntype: mcp\ntransport: streamable-http\nurl: https://example.com/mcp\n---\n"), 0o644)
+	writeFile(t, agent, "connections/search.md",
+		[]byte("---\ntype: mcp\ntransport: streamable-http\nurl: https://search.example.com/mcp\n---\n"), 0o644)
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"connection", "status", agent, "catalog"}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("status exit %d: %s", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "search") {
+		t.Fatalf("expected only the named connection: %s", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"connection", "status", agent, "missing"}, nil, &stdout, &stderr); code == 0 {
+		t.Fatal("a nonexistent name must fail")
+	}
+}
+
+// TestConnectionRemoveDeletesExactFileAndErrorsOnAbsent proves remove
+// deletes exactly the named real file and fails without mutation when it is
+// missing.
+func TestConnectionRemoveDeletesExactFileAndErrorsOnAbsent(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	writeFile(t, agent, "connections/catalog.md",
+		[]byte("---\ntype: mcp\ntransport: streamable-http\nurl: https://example.com/mcp\n---\n"), 0o644)
+	writeFile(t, agent, "connections/search.md",
+		[]byte("---\ntype: mcp\ntransport: streamable-http\nurl: https://search.example.com/mcp\n---\n"), 0o644)
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"connection", "remove", agent, "catalog"}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("remove exit %d: %s", code, stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(agent, "connections", "catalog.md")); !os.IsNotExist(err) {
+		t.Fatal("expected connections/catalog.md to be removed")
+	}
+	if _, err := os.Stat(filepath.Join(agent, "connections", "search.md")); err != nil {
+		t.Fatal("remove must delete exactly the named file, not its siblings")
+	}
+	if !strings.Contains(stdout.String(), "run tenon apply") {
+		t.Fatalf("expected a directive to run tenon apply: %s", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"connection", "remove", agent, "catalog"}, nil, &stdout, &stderr); code == 0 {
+		t.Fatal("removing an absent connection must fail")
+	}
+}
+
+// TestConnectionFullJourneyAddApplyClaude proves the literal author journey:
+// add, then apply claude, produces the exact .mcp.json entry and the
+// generated instructions connections section.
+func TestConnectionFullJourneyAddApplyClaude(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+
+	var addOut, addErr bytes.Buffer
+	if code := run([]string{"connection", "add", agent, "catalog",
+		"--url", "https://example.com/mcp", "--context", "Use for the catalog."}, nil, &addOut, &addErr); code != 0 {
+		t.Fatalf("add exit: %s", addErr.String())
+	}
+
+	var applyOut, applyErr bytes.Buffer
+	if code := run([]string{"apply", agent, "--harness", "claude"}, nil, &applyOut, &applyErr); code != 0 {
+		t.Fatalf("apply exit: %s\n%s", applyOut.String(), applyErr.String())
+	}
+
+	mcpJSON := string(mustRead(t, filepath.Join(agent, ".mcp.json")))
+	if !strings.Contains(mcpJSON, `"catalog"`) || !strings.Contains(mcpJSON, `"type": "http"`) ||
+		!strings.Contains(mcpJSON, `"url": "https://example.com/mcp"`) {
+		t.Fatalf(".mcp.json missing the connection entry: %s", mcpJSON)
+	}
+	if strings.Contains(mcpJSON, "headers") {
+		t.Fatalf(".mcp.json must never carry a headers field for a connection: %s", mcpJSON)
+	}
+	claudeMD := string(mustRead(t, filepath.Join(agent, "CLAUDE.md")))
+	if !strings.Contains(claudeMD, "## Native MCP connections") || !strings.Contains(claudeMD, "### catalog") ||
+		!strings.Contains(claudeMD, "Use for the catalog.") {
+		t.Fatalf("CLAUDE.md missing the connections section: %s", claudeMD)
+	}
+	if !strings.Contains(claudeMD, "owns native MCP startup") {
+		t.Fatalf("CLAUDE.md missing the boundary sentence: %s", claudeMD)
+	}
+}
+
+// TestConnectionValidateApplyParityOnConnectionError proves validate reports
+// the same connection diagnostics as apply, without mutating the workspace.
+func TestConnectionValidateApplyParityOnConnectionError(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	writeFile(t, agent, "connections/catalog.md", []byte("no frontmatter\n"), 0o644)
+
+	var validateOut, applyOut, stderr bytes.Buffer
+	validateCode := run([]string{"validate", agent, "--harness", "claude", "--diagnostics", "jsonl"}, nil, &validateOut, &stderr)
+	applyCode := run([]string{"apply", agent, "--harness", "claude", "--diagnostics", "jsonl"}, nil, &applyOut, &stderr)
+	if validateCode == 0 || applyCode == 0 {
+		t.Fatalf("both must fail: validate=%d apply=%d", validateCode, applyCode)
+	}
+	if validateOut.String() != applyOut.String() {
+		t.Fatalf("validate and apply must report identical diagnostics:\n%s\n%s",
+			validateOut.String(), applyOut.String())
+	}
+	validateDiags := parseDiagLines(t, validateOut.String())
+	if len(filterDiags(validateDiags, "connection.frontmatter.missing")) == 0 {
+		t.Fatalf("expected connection.frontmatter.missing, got %q", validateOut.String())
+	}
+	if _, err := os.Stat(filepath.Join(agent, "CLAUDE.md")); !os.IsNotExist(err) {
+		t.Fatal("a failing apply must not mutate the workspace")
 	}
 }

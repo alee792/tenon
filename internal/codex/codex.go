@@ -31,7 +31,7 @@ func (Driver) Generate(p *agentproject.Project, target apply.Target, diags *diag
 				"declared headers for server %q are not emitted into Codex project configuration, which tenon generates without header support; the server may fail to authenticate", s.Name)
 		}
 	}
-	config := mcpConfig(target.Executable, p.Root, target.Workspace, resolved)
+	config := mcpConfig(target.Executable, p.Root, target.Workspace, resolved, p.Connections)
 	if len(config) > generated.MaxMCPConfigBytes {
 		diags.Errorf("plugin.mcp.bounds.exceeded", "plugins",
 			"the generated .codex/config.toml may contain at most %d bytes; the accepted plugin MCP servers render %d",
@@ -41,7 +41,7 @@ func (Driver) Generate(p *agentproject.Project, target apply.Target, diags *diag
 	if p.Instructions != nil {
 		files = append(files, apply.GeneratedFile{
 			Path:    "AGENTS.md",
-			Content: generated.Instructions(p.Instructions.Body),
+			Content: generated.Instructions(p.Instructions.Body, p.Connections),
 		})
 	}
 	for _, s := range p.Skills {
@@ -89,13 +89,15 @@ func (Driver) Generate(p *agentproject.Project, target apply.Target, diags *diag
 // mcpConfig renders .codex/config.toml: Codex's project configuration
 // carrying the tenon-owned managed stdio server, launched from the resolved
 // tenon executable against the absolute agent source and workspace, followed
-// by every accepted plugin server in lexical order. The managed server alone
-// is required and pre-approved, because tenon validates and audits every call
-// that crosses its own boundary; every other generated entry is optional to
-// start and keeps Codex's native per-server prompt approval. It is
-// model-facing configuration, so it carries no fingerprint, version, or other
-// setup metadata beyond the paths the servers themselves need.
-func mcpConfig(executable, source, workspace string, servers []agentproject.ResolvedServer) []byte {
+// by every accepted plugin server in lexical order, followed by every
+// standalone connection in lexical order. The managed server alone is
+// required and pre-approved, because tenon validates and audits every call
+// that crosses its own boundary; every other generated entry — including
+// every connection, which is startup-optional — is optional to start and
+// keeps Codex's native per-server prompt approval. It is model-facing
+// configuration, so it carries no fingerprint, version, or other setup
+// metadata beyond the paths the servers themselves need.
+func mcpConfig(executable, source, workspace string, servers []agentproject.ResolvedServer, connections []agentproject.Connection) []byte {
 	var b strings.Builder
 	b.WriteString(generated.TOMLHeader + "\n")
 	b.WriteString("[mcp_servers.managed]\n")
@@ -126,6 +128,20 @@ func mcpConfig(executable, source, workspace string, servers []agentproject.Reso
 				b.WriteString("env = " + tomlInlineTable(s.Env) + "\n")
 			}
 		}
+		b.WriteString("required = false\n")
+		b.WriteString("default_tools_approval_mode = \"prompt\"\n")
+	}
+
+	// connections already arrive sorted by name from agentproject.Load; the
+	// driver re-sorts defensively so its own lexical-order contract never
+	// depends on the caller.
+	sortedConnections := slices.Clone(connections)
+	slices.SortFunc(sortedConnections, func(a, c agentproject.Connection) int {
+		return strings.Compare(a.Name, c.Name)
+	})
+	for _, c := range sortedConnections {
+		b.WriteString("\n[mcp_servers." + c.Name + "]\n")
+		b.WriteString("url = " + generated.TOMLString(c.URL) + "\n")
 		b.WriteString("required = false\n")
 		b.WriteString("default_tools_approval_mode = \"prompt\"\n")
 	}

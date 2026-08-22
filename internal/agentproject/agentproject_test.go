@@ -172,7 +172,7 @@ func TestLoadRejectsOversizedInstructions(t *testing.T) {
 
 func TestLoadRefusesUnimplementedComponents(t *testing.T) {
 	root := writeAgent(t, "agent", validInstructions)
-	if err := os.Mkdir(filepath.Join(root, "connections"), 0o755); err != nil {
+	if err := os.Mkdir(filepath.Join(root, "schedules"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	p, diags, err := Load(root)
@@ -183,6 +183,26 @@ func TestLoadRefusesUnimplementedComponents(t *testing.T) {
 		t.Fatal("expected refusal: authored behavior must never be silently dropped")
 	}
 	requireErrorID(t, diags, "component.unsupported")
+}
+
+// TestLoadAllowsEmptyConnections proves connections/ is now an implemented,
+// optional component: an empty connections/ directory produces no
+// diagnostics.
+func TestLoadAllowsEmptyConnections(t *testing.T) {
+	root := writeAgent(t, "agent", validInstructions)
+	if err := os.Mkdir(filepath.Join(root, "connections"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p, diags, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diags.HasErrors() {
+		t.Fatalf("empty connections/ must be valid: %v", diags.All())
+	}
+	if p == nil || len(p.Connections) != 0 {
+		t.Fatalf("expected zero connections, got %v", p)
+	}
 }
 
 // TestLoadAllowsEmptyPlugins proves plugins/ is now an implemented,

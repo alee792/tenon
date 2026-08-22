@@ -23,8 +23,9 @@ func (Driver) Harness() string { return "claude" }
 // inserted ownership marker line. A vendor surface Claude does not document
 // honoring is copied unchanged and warned.
 func (Driver) Generate(p *agentproject.Project, target apply.Target, diags *diagnostics.List) []apply.GeneratedFile {
+	connections := acceptedConnections(p, diags)
 	config := mcpConfig(target.Executable, p.Root, target.Workspace,
-		acceptedServers(p, target, diags))
+		acceptedServers(p, target, diags), connections)
 	if len(config) > generated.MaxMCPConfigBytes {
 		diags.Errorf("plugin.mcp.bounds.exceeded", "plugins",
 			"the generated .mcp.json may contain at most %d bytes; the accepted plugin MCP servers render %d",
@@ -34,7 +35,7 @@ func (Driver) Generate(p *agentproject.Project, target apply.Target, diags *diag
 	if p.Instructions != nil {
 		files = append(files, apply.GeneratedFile{
 			Path:    "CLAUDE.md",
-			Content: generated.Instructions(p.Instructions.Body),
+			Content: generated.Instructions(p.Instructions.Body, connections),
 		})
 	}
 	for _, s := range p.Skills {
@@ -94,14 +95,42 @@ func acceptedServers(p *agentproject.Project, target apply.Target, diags *diagno
 	return out
 }
 
+// claudeReservedConnectionNames are native Claude project surface names a
+// standalone connection may never claim (ADR 0016): tenon cannot preflight
+// harness-owned higher-precedence configuration, so the collision is
+// reported here, at generation, for this harness alone.
+var claudeReservedConnectionNames = map[string]bool{
+	"workspace":        true,
+	"claude-in-chrome": true,
+	"computer-use":     true,
+}
+
+// acceptedConnections drops every connection whose name collides with a name
+// Claude's native project surface reserves, reporting an error rather than
+// silently renaming or shadowing it (ADR 0016). Connections arrive already
+// sorted by name from agentproject.Load, so the accepted subset stays sorted.
+func acceptedConnections(p *agentproject.Project, diags *diagnostics.List) []agentproject.Connection {
+	var out []agentproject.Connection
+	for _, c := range p.Connections {
+		if claudeReservedConnectionNames[c.Name] {
+			diags.Errorf("connection.name.reserved", c.SourcePath,
+				"the connection name %q is reserved by the selected harness (claude)'s native project surface", c.Name)
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
 // mcpConfig renders .mcp.json: Claude's project MCP configuration carrying
 // the tenon-owned managed stdio server, launched from the resolved tenon
-// executable against the absolute agent source and workspace, plus every
-// accepted plugin server. It is model-facing configuration, so it carries no
-// fingerprint, version, or other setup metadata beyond the paths the servers
-// themselves need. Keys are ordered by encoding/json's sorted map
+// executable against the absolute agent source and workspace, every accepted
+// plugin server, and every accepted standalone connection as a native http
+// entry with no headers field. It is model-facing configuration, so it
+// carries no fingerprint, version, or other setup metadata beyond the paths
+// the servers themselves need. Keys are ordered by encoding/json's sorted map
 // marshalling, so identical input always renders identical bytes.
-func mcpConfig(executable, source, workspace string, servers []agentproject.ResolvedServer) []byte {
+func mcpConfig(executable, source, workspace string, servers []agentproject.ResolvedServer, connections []agentproject.Connection) []byte {
 	entries := map[string]any{"managed": map[string]any{
 		"type":    "stdio",
 		"command": executable,
@@ -109,6 +138,9 @@ func mcpConfig(executable, source, workspace string, servers []agentproject.Reso
 	}}
 	for _, s := range servers {
 		entries[s.Name] = serverEntry(s)
+	}
+	for _, c := range connections {
+		entries[c.Name] = map[string]any{"type": "http", "url": c.URL}
 	}
 	// A fixed map of strings, string slices, and string maps always encodes.
 	content, _ := json.MarshalIndent(map[string]any{"mcpServers": entries}, "", "  ")

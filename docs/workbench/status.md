@@ -95,6 +95,21 @@ with a warning rather than risk ambient substitution; Codex renders remote
 servers without headers and warns about the drop; and the 8 MiB rendered
 configuration ceiling fails before mutation.
 
+Remote connections, per ADR 0016 (installed-package target still gated): a
+`connections/<name>.md` with closed `type: mcp` frontmatter and an
+HTTPS-only `streamable-http` target generates a native http server entry
+into both harnesses without contacting anything, and its optional context
+renders once into a bounded "Native MCP connections" instructions section
+that states the harness owns MCP startup, trust, and effects. Names
+collide-check against `managed`, other connections, and plugin servers
+before mutation; Claude-reserved names fail for Claude only; and
+`tenon connection add/status/remove` author the files offline, never
+overwriting and directing the author to reapply. The installed
+`package`/`capability` target is honestly gated (connection.target.unsupported)
+until the integration store wires in. Known refinement: `connection add`
+currently validates the whole project for its collision check rather than a
+connections-and-plugins-scoped load.
+
 
 ## Gaps
 
