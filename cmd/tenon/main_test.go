@@ -2115,3 +2115,46 @@ func TestInstalledConnectionFakeAmbientValueNeverLeaks(t *testing.T) {
 		t.Fatalf("config.toml must forward the required ambient name by name only for codex: %s", codexConfig)
 	}
 }
+
+// TestRunReportsNotYetImplemented proves the run command validates flags and
+// then reports the clear not-yet-implemented error for a real harness, since
+// the protocol drivers land in a later slice.
+func TestRunReportsNotYetImplemented(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	ws := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"run", agent, "--workspace", ws, "--harness", "claude"}, nil, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("run exit = %d, want 1\nstderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "headless harness driving is not yet implemented for claude") {
+		t.Fatalf("want not-implemented error, got: %s", stderr.String())
+	}
+}
+
+// TestRunFlagValidation proves the run command rejects malformed invocations
+// before doing any work.
+func TestRunFlagValidation(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	ws := t.TempDir()
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"missing workspace", []string{"run", agent, "--harness", "claude"}},
+		{"bad harness", []string{"run", agent, "--workspace", ws, "--harness", "gpt"}},
+		{"bad input", []string{"run", agent, "--workspace", ws, "--harness", "claude", "--input", "yaml"}},
+		{"zero timeout", []string{"run", agent, "--workspace", ws, "--harness", "claude", "--timeout", "0"}},
+		{"over-max timeout", []string{"run", agent, "--workspace", ws, "--harness", "claude", "--timeout", "31m"}},
+		{"no agent", []string{"run", "--workspace", ws, "--harness", "claude"}},
+		{"two agents", []string{"run", agent, agent, "--workspace", ws, "--harness", "claude"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := run(tc.args, nil, &stdout, &stderr); code != 2 {
+				t.Fatalf("exit = %d, want 2\nstderr: %s", code, stderr.String())
+			}
+		})
+	}
+}

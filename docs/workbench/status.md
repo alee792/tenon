@@ -139,6 +139,21 @@ handoff. Two honest limitations are recorded in the manifest, not hidden: the
 native harness runtime is not yet bundled (expected on the base image), and
 the tool execution closure is staged whole rather than minimized.
 
+Headless dispatch core, per acceptance item 7 (proven credential-free with a
+behavioral harness stub): `tenon run` reads bounded JSONL input, durably
+accepts and FIFO-queues one turn at a time per conversation on the
+dispatchstate store while still accepting input during an active turn,
+deduplicates input IDs against the live queue and retained outcomes, maps
+each turn to a resumable native session (capturing and replaying the session
+id; task mode always opens fresh), streams a typed JSONL event surface, and
+marks unproven work uncertain on restart — never re-executed. A stale or
+missing generated setup fails closed before serving, process failure is
+distinct from a failed model turn, and a task turn deadline aborts and
+records uncertainty. The harness driver seam (Driver/Session) is defined; the
+real Claude and Codex protocol drivers are the next slice, so `tenon run`
+against a real harness reports "not yet implemented" until then — the
+orchestration itself is fully proven.
+
 ## Gaps
 
 The complete [product specification](../product-spec.md) acceptance list, to

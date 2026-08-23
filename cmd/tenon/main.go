@@ -22,7 +22,9 @@ import (
 	"github.com/alee792/tenon/internal/claude"
 	"github.com/alee792/tenon/internal/codex"
 	"github.com/alee792/tenon/internal/diagnostics"
+	"github.com/alee792/tenon/internal/dispatch"
 	"github.com/alee792/tenon/internal/friction"
+	"github.com/alee792/tenon/internal/harness"
 	"github.com/alee792/tenon/internal/integration"
 	"github.com/alee792/tenon/internal/mcp"
 	"github.com/alee792/tenon/internal/toolruntime"
@@ -37,6 +39,7 @@ const usage = `usage:
   tenon validate AGENT --harness <claude|codex> [--diagnostics <prose|jsonl>]
   tenon fingerprint show AGENT [--diagnostics <prose|jsonl>]
   tenon mcp serve AGENT --harness <claude|codex> [--workspace DIR]
+  tenon run AGENT --workspace DIR --harness <claude|codex> [--conversation ID] [--input jsonl] [--timeout DUR] [--turn-timeout DUR]
   tenon stage AGENT --harness <claude|codex> --output DIR
   tenon stage verify --artifact PATH [--prefix DIR]
   tenon connection add AGENT NAME --url HTTPS_URL [--context TEXT]
@@ -73,6 +76,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return 2
 		}
 		return runMCPServe(args[2:], stdin, stdout, stderr)
+	case "run":
+		return runRun(args[1:], stdin, stdout, stderr)
 	case "stage":
 		return runStage(args[1:], stdout, stderr)
 	case "connection":
@@ -563,6 +568,104 @@ func runMCPServe(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	if err := mcp.Serve(context.Background(), stdin, stdout, stderr, cfg); err != nil {
 		fmt.Fprintln(stderr, "tenon mcp serve:", err)
+		return 1
+	}
+	return 0
+}
+
+// maxRunTimeout bounds the whole-process deadline a caller may request.
+const maxRunTimeout = 30 * time.Minute
+
+// newHarnessDriver resolves the headless driver for a harness. The real Claude
+// and Codex protocol drivers land in a later slice; until then this fails with
+// a clear, stable error while the dispatcher itself is proven with a fake
+// driver in its own tests.
+func newHarnessDriver(name string) (harness.Driver, error) {
+	switch name {
+	case "claude", "codex":
+		return nil, fmt.Errorf("headless harness driving is not yet implemented for %s", name)
+	default:
+		return nil, fmt.Errorf("--harness must be exactly claude or codex")
+	}
+}
+
+// runRun dispatches headless turns for one conversation: it reads bounded JSONL
+// input on stdin and writes the ordered wire event stream to stdout. It bounds
+// the whole process with --timeout and each task turn with --turn-timeout.
+func runRun(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("run", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	harnessName := fs.String("harness", "", "target harness: claude or codex")
+	workspace := fs.String("workspace", "", "workspace directory (required)")
+	conversation := fs.String("conversation", "", "conversation id (defaults to local)")
+	input := fs.String("input", "jsonl", "input format: jsonl")
+	timeout := fs.Duration("timeout", 2*time.Minute, "whole-process deadline")
+	turnTimeout := fs.Duration("turn-timeout", 0, "per-turn deadline (task mode; 0 disables)")
+
+	positional, ok := parsePositional(fs, args)
+	if !ok || len(positional) != 1 {
+		fmt.Fprintf(stderr, "tenon run: exactly one AGENT directory is required\n%s", usage)
+		return 2
+	}
+	agent := positional[0]
+
+	switch *harnessName {
+	case "claude", "codex":
+	default:
+		fmt.Fprintln(stderr, "tenon run: --harness must be exactly claude or codex")
+		return 2
+	}
+	if *workspace == "" {
+		fmt.Fprintln(stderr, "tenon run: --workspace is required")
+		return 2
+	}
+	if *input != "jsonl" {
+		fmt.Fprintln(stderr, "tenon run: --input must be jsonl")
+		return 2
+	}
+	if *timeout <= 0 || *timeout > maxRunTimeout {
+		fmt.Fprintf(stderr, "tenon run: --timeout must be greater than 0 and at most %s\n", maxRunTimeout)
+		return 2
+	}
+	if *turnTimeout < 0 {
+		fmt.Fprintln(stderr, "tenon run: --turn-timeout must not be negative")
+		return 2
+	}
+
+	// The real drivers do not exist yet; fail with a clear, stable message
+	// before loading anything, so the not-yet-implemented boundary is legible.
+	driver, err := newHarnessDriver(*harnessName)
+	if err != nil {
+		fmt.Fprintln(stderr, "tenon run:", err)
+		return 1
+	}
+
+	// Unreachable until a real driver exists, but the wiring is complete: load
+	// the project and dispatch under the whole-process deadline.
+	p, diags, err := agentproject.Load(agent)
+	if err != nil {
+		fmt.Fprintln(stderr, "tenon run:", err)
+		return 1
+	}
+	if p == nil || diags.HasErrors() {
+		_ = diags.WriteProse(stderr)
+		fmt.Fprintln(stderr, "tenon run: the agent project is invalid; run tenon apply")
+		return 1
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	if err := dispatch.Run(ctx, dispatch.Options{
+		Project:      p,
+		Driver:       driver,
+		Workspace:    *workspace,
+		Harness:      *harnessName,
+		Conversation: *conversation,
+		Mode:         dispatch.Interactive,
+		In:           stdin,
+		Out:          stdout,
+		TurnTimeout:  *turnTimeout,
+	}); err != nil {
+		fmt.Fprintln(stderr, "tenon run:", err)
 		return 1
 	}
 	return 0
