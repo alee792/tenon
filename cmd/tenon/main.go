@@ -35,6 +35,7 @@ const prepareBudget = 5 * time.Minute
 const usage = `usage:
   tenon apply AGENT --harness <claude|codex> [--workspace DIR] [--diagnostics <prose|jsonl>]
   tenon validate AGENT --harness <claude|codex> [--diagnostics <prose|jsonl>]
+  tenon fingerprint show AGENT [--diagnostics <prose|jsonl>]
   tenon mcp serve AGENT --harness <claude|codex> [--workspace DIR]
   tenon stage AGENT --harness <claude|codex> --output DIR
   tenon stage verify --artifact PATH [--prefix DIR]
@@ -60,6 +61,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runApply(args[1:], stdout, stderr)
 	case "validate":
 		return runValidate(args[1:], stdout, stderr)
+	case "fingerprint":
+		return runFingerprint(args[1:], stdout, stderr)
 	case "mcp":
 		if len(args) < 2 || args[1] != "serve" {
 			fmt.Fprintf(stderr, "tenon mcp: the only subcommand is serve\n%s", usage)
@@ -280,6 +283,90 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "managed tools: %s via MCP; native harness tools remain unmanaged\n",
 		strings.Join(managedTools(p), ", "))
 	fmt.Fprintf(stdout, "start %s normally in %s\n", driver.Harness(), workspace)
+	return 0
+}
+
+// runFingerprint dispatches the "tenon fingerprint" subcommands.
+func runFingerprint(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 || args[0] != "show" {
+		fmt.Fprintf(stderr, "tenon fingerprint: the only subcommand is show\n%s", usage)
+		return 2
+	}
+	return runFingerprintShow(args[1:], stdout, stderr)
+}
+
+// fingerprintEntryJSON is the jsonl rendering of one
+// agentproject.FingerprintEntry.
+type fingerprintEntryJSON struct {
+	Path       string `json:"path"`
+	Hash       string `json:"hash"`
+	Executable bool   `json:"executable"`
+}
+
+// fingerprintRollupJSON is the jsonl rendering of the final rolled-up
+// fingerprint line.
+type fingerprintRollupJSON struct {
+	Fingerprint string `json:"fingerprint"`
+}
+
+// runFingerprintShow prints every authored file that feeds AGENT's
+// fingerprint — its path, its own content hash, and its executable bit —
+// sorted the same way the rollup sorts them, then the rolled-up fingerprint
+// itself. It never recomputes a hash: agentproject.Load already built the
+// per-file list, and this only renders what Load returned.
+func runFingerprintShow(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("fingerprint show", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	diagMode := fs.String("diagnostics", "prose", "diagnostic rendering: prose or jsonl")
+	positional, ok := parsePositional(fs, args)
+	if !ok || len(positional) != 1 {
+		fmt.Fprintf(stderr, "tenon fingerprint show: usage: tenon fingerprint show AGENT [--diagnostics <prose|jsonl>]\n")
+		return 2
+	}
+	agent := positional[0]
+	jsonl := false
+	switch *diagMode {
+	case "prose":
+	case "jsonl":
+		jsonl = true
+	default:
+		fmt.Fprintf(stderr, "tenon fingerprint show: --diagnostics must be prose or jsonl\n")
+		return 2
+	}
+
+	p, diags, err := agentproject.Load(agent)
+	if err != nil {
+		fmt.Fprintln(stderr, "tenon fingerprint show:", err)
+		return 1
+	}
+	render(diags, jsonl, stdout, stderr)
+	if p == nil || diags.HasErrors() {
+		return 1
+	}
+
+	if jsonl {
+		enc := json.NewEncoder(stdout)
+		for _, e := range p.FingerprintEntries {
+			if err := enc.Encode(fingerprintEntryJSON{Path: e.Path, Hash: e.Hash, Executable: e.Executable}); err != nil {
+				fmt.Fprintln(stderr, "tenon fingerprint show:", err)
+				return 1
+			}
+		}
+		if err := enc.Encode(fingerprintRollupJSON{Fingerprint: p.Fingerprint}); err != nil {
+			fmt.Fprintln(stderr, "tenon fingerprint show:", err)
+			return 1
+		}
+		return 0
+	}
+
+	for _, e := range p.FingerprintEntries {
+		bit := "-"
+		if e.Executable {
+			bit = "x"
+		}
+		fmt.Fprintf(stdout, "%s %s %s\n", e.Path, e.Hash, bit)
+	}
+	fmt.Fprintf(stdout, "fingerprint: %s\n", p.Fingerprint)
 	return 0
 }
 
