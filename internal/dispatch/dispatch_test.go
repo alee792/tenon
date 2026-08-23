@@ -580,3 +580,50 @@ func equal(a, b []string) bool {
 	}
 	return true
 }
+
+// TestManifestIdentityOnEveryEvent proves the provenance join key: when a
+// supplied manifest gates the run, every emitted wire event carries its
+// identity, and an unsupplied manifest leaves the field empty.
+func TestManifestIdentityOnEveryEvent(t *testing.T) {
+	p, ws := appliedWorkspace(t)
+	fake := &harness.FakeDriver{Default: harness.FakeTurn{Result: harness.TurnResult{Status: harness.StatusCompleted}}}
+
+	var out bytes.Buffer
+	opts := options(p, ws, lines(`{"input_id":"a","text":"1"}`), &out)
+	opts.Driver = fake
+	opts.Manifest = "sha256:deadbeef"
+	if err := Run(context.Background(), opts); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	events := decodeEvents(t, out.Bytes())
+	if len(events) == 0 {
+		t.Fatal("expected wire events")
+	}
+	for _, e := range events {
+		if e.Manifest != "sha256:deadbeef" {
+			t.Fatalf("event %s missing manifest identity: %+v", e.Type, e)
+		}
+		// The source fingerprint is unconditional on every event, so the stream
+		// joins to its exact source configuration even without a manifest.
+		if e.Fingerprint != p.Fingerprint {
+			t.Fatalf("event %s missing source fingerprint: got %q want %q", e.Type, e.Fingerprint, p.Fingerprint)
+		}
+	}
+
+	// With no manifest, the field is empty and omitted from the wire JSON.
+	var out2 bytes.Buffer
+	opts2 := options(p, ws, lines(`{"input_id":"b","text":"2"}`), &out2)
+	opts2.Driver = &harness.FakeDriver{Default: harness.FakeTurn{Result: harness.TurnResult{Status: harness.StatusCompleted}}}
+	if err := Run(context.Background(), opts2); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if strings.Contains(out2.String(), "manifest") {
+		t.Fatalf("an unsupplied manifest must not appear on the wire: %s", out2.String())
+	}
+	// The source fingerprint is still present with no manifest supplied.
+	for _, e := range decodeEvents(t, out2.Bytes()) {
+		if e.Fingerprint != p.Fingerprint {
+			t.Fatalf("event %s missing source fingerprint without a manifest: %+v", e.Type, e)
+		}
+	}
+}

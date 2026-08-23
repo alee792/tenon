@@ -1,6 +1,6 @@
 # Working status
 
-- Updated: 2026-08-22
+- Updated: 2026-08-23
 
 ## Implemented
 
@@ -191,12 +191,38 @@ an unlocked trigger racing the clock on the dispatch file; all three are
 fixed with regression tests, plus a bounded drain and cross-process trigger
 lock.
 
-## Gaps
+Agent manifest, per the spec's "Agent manifest" section (acceptance item 11):
+an optional `--manifest` supplied to validate/apply/run/serve/schedule pins the
+runtime closure the directory cannot express — source fingerprint, tenon
+version, and per-harness harness version, integration-package identities, and
+tool-runtime versions. When supplied it is verified before apply mutates and
+before every tenon-owned process open, failing closed naming the exact drifted
+pin; `tenon manifest write` records the current closure byte-identically and
+can mint the self-proving manifest for an instructions-free root; an unsupplied
+manifest changes nothing. The apply record and every dispatch/schedule
+lifecycle event carry the source fingerprint (always) and the manifest identity
+(when supplied), so outside observation joins to the exact configuration —
+while the manifest identity is structurally barred from every model-facing
+generated file (the driver interface cannot see it). Two review sub-agents
+gated the merge: the model pin is a recorded-but-unverified field whose
+emission into harness configuration is deliberately deferred (documented, not
+overclaimed); `tenon run` verifies the manifest at session start rather than
+per turn (the recurring `schedule run` path re-verifies each occurrence); and
+the reviewers' must-fixes — the source fingerprint now on every dispatch event,
+and `manifest write` self-proving an instructions-free root — landed with
+regression tests, alongside duplicate-package rejection and a zero-harness
+verify guard.
 
-The complete [product specification](../product-spec.md) acceptance list, to
-be built in journey order — apply and the five-minute journey first, then
-authored tools, connections, headless dispatch, schedules, staging — each
-slice credential-free tested:
+## Acceptance
+
+All twelve items of the [product specification](../product-spec.md)
+acceptance list are met, each credential-free tested (fake harness processes,
+no live model calls). The headless-driving items (7, 8) are additionally
+validated live against the real Claude harness on the author's machine — a
+turn round-trips, sessions resume with true context continuity, and a schedule
+trigger deduplicates without re-running; the real Codex driver's handshake and
+credential-safe error path are live-validated, its successful-turn path pending
+a local auth fix.
 
 1. One authored project compiles deterministically for both harnesses, and
    apply produces native, discoverable files while refusing conflicts and
@@ -243,5 +269,26 @@ slice credential-free tested:
     and its structured diagnostics carry stable identifiers and authored
     paths that match apply's own failures.
 
-The list is the proof skeleton, not the whole contract: every stated behavior
+## Known limitations and deferred work
+
+Recorded here rather than hidden, per spec principle 8:
+
+- **Model pin.** The manifest schema carries an optional model field, but this
+  build does not emit it into harness configuration and does not resolve or
+  verify it (the harness owns model selection). Model emission is deferred.
+- **`tenon run` manifest scope.** A supplied manifest is verified at the run
+  session's start, not re-verified per turn within that session; the recurring
+  `schedule run` path does re-verify each occurrence.
+- **Staging.** The native harness runtime is not yet bundled into the staged
+  tree (expected on the base image), and the tool execution closure is staged
+  whole rather than minimized. Both are recorded in the staging artifact.
+- **Real harness drivers.** Validated by pure-function unit tests plus manual
+  `//go:build harness` integration tests; CI does not run them, so CI green
+  means "dispatcher and drivers correct as specified," not "verified against
+  today's Claude/Codex."
+- **Not in scope (no ADR):** evaluations, scoring, transcript retention,
+  selection among revisions, lineage, a marketplace, network acquisition; the
+  conversational channel product stays in the prototype.
+
+The acceptance list is the proof skeleton, not the whole contract: every stated behavior
 in the specification binds.

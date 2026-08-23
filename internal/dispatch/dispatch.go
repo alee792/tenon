@@ -56,6 +56,10 @@ type Options struct {
 	Harness string
 	// Conversation is the caller-owned conversation id; empty means "local".
 	Conversation string
+	// Manifest is the supplied agent manifest's identity, stamped on every
+	// emitted wire event as a provenance join key. Empty when no manifest was
+	// supplied, in which case events carry no manifest field.
+	Manifest string
 	// Mode selects interactive or task session discipline.
 	Mode Mode
 	// In carries bounded JSONL input, one {input_id,text} object per line.
@@ -76,6 +80,8 @@ type dispatcher struct {
 	workspace    string
 	harness      string
 	conversation string
+	fingerprint  string
+	manifest     string
 	mode         Mode
 	turnTimeout  time.Duration
 
@@ -155,6 +161,8 @@ func Run(ctx context.Context, opts Options) error {
 		workspace:    opts.Workspace,
 		harness:      opts.Harness,
 		conversation: conversation,
+		fingerprint:  opts.Project.Fingerprint,
+		manifest:     opts.Manifest,
 		mode:         opts.Mode,
 		turnTimeout:  opts.TurnTimeout,
 		enc:          json.NewEncoder(opts.Out),

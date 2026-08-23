@@ -41,13 +41,14 @@ import (
 const prepareBudget = 5 * time.Minute
 
 const usage = `usage:
-  tenon apply AGENT --harness <claude|codex> [--workspace DIR] [--diagnostics <prose|jsonl>]
-  tenon validate AGENT --harness <claude|codex> [--diagnostics <prose|jsonl>]
+  tenon apply AGENT --harness <claude|codex> [--workspace DIR] [--manifest PATH] [--diagnostics <prose|jsonl>]
+  tenon validate AGENT --harness <claude|codex> [--manifest PATH] [--diagnostics <prose|jsonl>]
   tenon fingerprint show AGENT [--diagnostics <prose|jsonl>]
-  tenon mcp serve AGENT --harness <claude|codex> [--workspace DIR]
-  tenon run AGENT --workspace DIR --harness <claude|codex> [--conversation ID] [--input jsonl] [--timeout DUR] [--turn-timeout DUR]
-  tenon schedule trigger AGENT NAME --workspace DIR --harness <claude|codex> --input-id ID [--turn-timeout DUR] [--timeout DUR]
-  tenon schedule run AGENT --workspace DIR --harness <claude|codex> [--turn-timeout DUR] [--max-active-turns N]
+  tenon manifest write AGENT --harness <claude|codex> [--output PATH] [--manifest PATH]
+  tenon mcp serve AGENT --harness <claude|codex> [--workspace DIR] [--manifest PATH]
+  tenon run AGENT --workspace DIR --harness <claude|codex> [--conversation ID] [--input jsonl] [--manifest PATH] [--timeout DUR] [--turn-timeout DUR]
+  tenon schedule trigger AGENT NAME --workspace DIR --harness <claude|codex> --input-id ID [--manifest PATH] [--turn-timeout DUR] [--timeout DUR]
+  tenon schedule run AGENT --workspace DIR --harness <claude|codex> [--manifest PATH] [--turn-timeout DUR] [--max-active-turns N]
   tenon stage AGENT --harness <claude|codex> --output DIR
   tenon stage verify --artifact PATH [--prefix DIR]
   tenon connection add AGENT NAME --url HTTPS_URL [--context TEXT]
@@ -78,6 +79,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return 2
 		}
 		return runFingerprintShow(args[2:], stdout, stderr)
+	case "manifest":
+		return runManifest(args[1:], stdout, stderr)
 	case "mcp":
 		if len(args) < 2 || args[1] != "serve" {
 			fmt.Fprintf(stderr, "tenon mcp: the only subcommand is serve\n%s", usage)
@@ -102,11 +105,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 // commonFlags parses the shared AGENT positional and flag set. It returns
 // the agent path, the selected driver, and the diagnostics mode.
-func commonFlags(name string, args []string, stderr io.Writer, withWorkspace bool) (agent string, workspace string, driver apply.Driver, jsonl bool, ok bool) {
+func commonFlags(name string, args []string, stderr io.Writer, withWorkspace bool) (agent string, workspace string, driver apply.Driver, jsonl bool, manifestPath string, ok bool) {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	harness := fs.String("harness", "", "target harness: claude or codex")
 	mode := fs.String("diagnostics", "prose", "diagnostic rendering: prose or jsonl")
+	manifest := fs.String("manifest", "", "optional supplied agent manifest to verify")
 	var ws *string
 	if withWorkspace {
 		ws = fs.String("workspace", "", "workspace directory (defaults to the agent directory)")
@@ -122,18 +126,18 @@ func commonFlags(name string, args []string, stderr io.Writer, withWorkspace boo
 			continue
 		}
 		if err := fs.Parse(rest); err != nil {
-			return "", "", nil, false, false
+			return "", "", nil, false, "", false
 		}
 		next := fs.Args()
 		if len(next) == len(rest) {
 			fmt.Fprintf(stderr, "tenon %s: unexpected argument %q\n", name, rest[0])
-			return "", "", nil, false, false
+			return "", "", nil, false, "", false
 		}
 		rest = next
 	}
 	if len(positional) != 1 {
 		fmt.Fprintf(stderr, "tenon %s: exactly one AGENT directory is required\n%s", name, usage)
-		return "", "", nil, false, false
+		return "", "", nil, false, "", false
 	}
 	agent = positional[0]
 
@@ -144,7 +148,7 @@ func commonFlags(name string, args []string, stderr io.Writer, withWorkspace boo
 		driver = codex.Driver{}
 	default:
 		fmt.Fprintf(stderr, "tenon %s: --harness must be exactly claude or codex\n", name)
-		return "", "", nil, false, false
+		return "", "", nil, false, "", false
 	}
 	switch *mode {
 	case "prose":
@@ -152,13 +156,13 @@ func commonFlags(name string, args []string, stderr io.Writer, withWorkspace boo
 		jsonl = true
 	default:
 		fmt.Fprintf(stderr, "tenon %s: --diagnostics must be prose or jsonl\n", name)
-		return "", "", nil, false, false
+		return "", "", nil, false, "", false
 	}
 	workspace = agent
 	if withWorkspace && *ws != "" {
 		workspace = *ws
 	}
-	return agent, workspace, driver, jsonl, true
+	return agent, workspace, driver, jsonl, *manifest, true
 }
 
 func render(diags *diagnostics.List, jsonl bool, stdout, stderr io.Writer) {
@@ -223,14 +227,27 @@ func resolveExecutable() (string, error) {
 }
 
 func runValidate(args []string, stdout, stderr io.Writer) int {
-	agent, _, driver, jsonl, ok := commonFlags("validate", args, stderr, false)
+	agent, _, driver, jsonl, manifestPath, ok := commonFlags("validate", args, stderr, false)
 	if !ok {
 		return 2
 	}
-	p, diags, err := agentproject.Load(agent)
+	supplied, err := readSuppliedManifest(manifestPath)
 	if err != nil {
 		fmt.Fprintln(stderr, "tenon validate:", err)
 		return 1
+	}
+	p, diags, err := agentproject.LoadWithManifest(agent, expectedFingerprint(supplied))
+	if err != nil {
+		fmt.Fprintln(stderr, "tenon validate:", err)
+		return 1
+	}
+	// When a manifest is supplied, validate reports the same closure drift apply
+	// would, before any generation, so validate and apply fail identically.
+	if p != nil && !diags.HasErrors() && supplied != nil {
+		if err := verifyManifestDiag(p, driver.Harness(), resolveIntegrationStoreBase(), supplied, diags); err != nil {
+			fmt.Fprintln(stderr, "tenon validate:", err)
+			return 1
+		}
 	}
 	if p != nil && !diags.HasErrors() {
 		// Validate resolves exactly what apply would — the same executable
@@ -284,11 +301,16 @@ func runValidate(args []string, stdout, stderr io.Writer) int {
 }
 
 func runApply(args []string, stdout, stderr io.Writer) int {
-	agent, workspace, driver, jsonl, ok := commonFlags("apply", args, stderr, true)
+	agent, workspace, driver, jsonl, manifestPath, ok := commonFlags("apply", args, stderr, true)
 	if !ok {
 		return 2
 	}
-	p, diags, err := agentproject.Load(agent)
+	supplied, err := readSuppliedManifest(manifestPath)
+	if err != nil {
+		fmt.Fprintln(stderr, "tenon apply:", err)
+		return 1
+	}
+	p, diags, err := agentproject.LoadWithManifest(agent, expectedFingerprint(supplied))
 	if err != nil {
 		fmt.Fprintln(stderr, "tenon apply:", err)
 		return 1
@@ -296,6 +318,20 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 	if p == nil || diags.HasErrors() {
 		render(diags, jsonl, stdout, stderr)
 		return 1
+	}
+	storeBase := resolveIntegrationStoreBase()
+	// A supplied manifest is verified BEFORE any workspace mutation — before
+	// tools are prepared and before generation — so drift writes nothing: no
+	// .tenon, no generated files.
+	if supplied != nil {
+		if err := verifyManifestDiag(p, driver.Harness(), storeBase, supplied, diags); err != nil {
+			fmt.Fprintln(stderr, "tenon apply:", err)
+			return 1
+		}
+		if diags.HasErrors() {
+			render(diags, jsonl, stdout, stderr)
+			return 1
+		}
 	}
 	executable, err := resolveExecutable()
 	if err != nil {
@@ -313,8 +349,9 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 	result, applyDiags, err := apply.ApplyWithTarget(p, apply.Target{
 		Workspace:        workspace,
 		Executable:       executable,
-		IntegrationStore: resolveIntegrationStoreBase(),
+		IntegrationStore: storeBase,
 		TenonVersion:     mcp.Version,
+		ManifestIdentity: manifestIdentity(supplied),
 	}, driver)
 	for _, d := range applyDiags.All() {
 		diags.Add(d)
@@ -521,11 +558,16 @@ func (c toolCaller) Call(name string, arguments json.RawMessage) (json.RawMessag
 // generated setup this agent source applied: a harness starting a stale
 // managed server would otherwise serve an agent nobody applied.
 func runMCPServe(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	agent, workspace, driver, _, ok := commonFlags("mcp serve", args, stderr, true)
+	agent, workspace, driver, _, manifestPath, ok := commonFlags("mcp serve", args, stderr, true)
 	if !ok {
 		return 2
 	}
-	p, diags, err := agentproject.Load(agent)
+	supplied, err := readSuppliedManifest(manifestPath)
+	if err != nil {
+		fmt.Fprintln(stderr, "tenon mcp serve:", err)
+		return 1
+	}
+	p, diags, err := agentproject.LoadWithManifest(agent, expectedFingerprint(supplied))
 	if err != nil {
 		fmt.Fprintln(stderr, "tenon mcp serve:", err)
 		return 1
@@ -540,6 +582,11 @@ func runMCPServe(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if err := apply.Verify(p, workspace, driver.Harness()); err != nil {
+		fmt.Fprintln(stderr, "tenon mcp serve:", err)
+		return 1
+	}
+	// A supplied manifest gates this process open: on drift, open nothing.
+	if err := checkManifest(p, driver.Harness(), resolveIntegrationStoreBase(), supplied); err != nil {
 		fmt.Fprintln(stderr, "tenon mcp serve:", err)
 		return 1
 	}
@@ -613,6 +660,7 @@ func runRun(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	input := fs.String("input", "jsonl", "input format: jsonl")
 	timeout := fs.Duration("timeout", 2*time.Minute, "whole-process deadline")
 	turnTimeout := fs.Duration("turn-timeout", 0, "per-turn deadline (task mode; 0 disables)")
+	manifestPath := fs.String("manifest", "", "optional supplied agent manifest to verify")
 
 	positional, ok := parsePositional(fs, args)
 	if !ok || len(positional) != 1 {
@@ -650,8 +698,13 @@ func runRun(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	supplied, err := readSuppliedManifest(*manifestPath)
+	if err != nil {
+		fmt.Fprintln(stderr, "tenon run:", err)
+		return 1
+	}
 	// Load the project and dispatch under the whole-process deadline.
-	p, diags, err := agentproject.Load(agent)
+	p, diags, err := agentproject.LoadWithManifest(agent, expectedFingerprint(supplied))
 	if err != nil {
 		fmt.Fprintln(stderr, "tenon run:", err)
 		return 1
@@ -659,6 +712,11 @@ func runRun(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if p == nil || diags.HasErrors() {
 		_ = diags.WriteProse(stderr)
 		fmt.Fprintln(stderr, "tenon run: the agent project is invalid; run tenon apply")
+		return 1
+	}
+	// A supplied manifest gates the process open: on drift, open nothing.
+	if err := checkManifest(p, *harnessName, resolveIntegrationStoreBase(), supplied); err != nil {
+		fmt.Fprintln(stderr, "tenon run:", err)
 		return 1
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
@@ -673,6 +731,7 @@ func runRun(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		In:           stdin,
 		Out:          stdout,
 		TurnTimeout:  *turnTimeout,
+		Manifest:     manifestIdentity(supplied),
 	}); err != nil {
 		fmt.Fprintln(stderr, "tenon run:", err)
 		return 1
@@ -700,8 +759,8 @@ func runSchedule(args []string, stdout, stderr io.Writer) int {
 // loadScheduleProject loads and validates the agent project and finds the named
 // schedule, or reports why it could not. Both schedule subcommands require a
 // valid project; trigger additionally requires the schedule to exist.
-func loadScheduleProject(agent, cmdName string, stderr io.Writer) (*agentproject.Project, bool) {
-	p, diags, err := agentproject.Load(agent)
+func loadScheduleProject(agent, cmdName, expectedFingerprint string, stderr io.Writer) (*agentproject.Project, bool) {
+	p, diags, err := agentproject.LoadWithManifest(agent, expectedFingerprint)
 	if err != nil {
 		fmt.Fprintf(stderr, "tenon %s: %v\n", cmdName, err)
 		return nil, false
@@ -727,6 +786,7 @@ func runScheduleTrigger(args []string, stdout, stderr io.Writer) int {
 	inputID := fs.String("input-id", "", "caller-owned stable occurrence id (required)")
 	turnTimeout := fs.Duration("turn-timeout", 90*time.Second, "per-turn deadline (0 disables)")
 	timeout := fs.Duration("timeout", 2*time.Minute, "whole-process deadline")
+	manifestPath := fs.String("manifest", "", "optional supplied agent manifest to verify")
 
 	positional, ok := parsePositional(fs, args)
 	if !ok || len(positional) != 2 {
@@ -758,7 +818,12 @@ func runScheduleTrigger(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	p, ok := loadScheduleProject(agent, "schedule trigger", stderr)
+	supplied, err := readSuppliedManifest(*manifestPath)
+	if err != nil {
+		fmt.Fprintln(stderr, "tenon schedule trigger:", err)
+		return 1
+	}
+	p, ok := loadScheduleProject(agent, "schedule trigger", expectedFingerprint(supplied), stderr)
 	if !ok {
 		return 1
 	}
@@ -798,6 +863,12 @@ func runScheduleTrigger(args []string, stdout, stderr io.Writer) int {
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
+	// A supplied manifest gates this process open before any harness
+	// invocation, matching run and mcp serve: on drift, open nothing.
+	if err := checkManifest(p, *harnessName, resolveIntegrationStoreBase(), supplied); err != nil {
+		fmt.Fprintln(stderr, "tenon schedule trigger:", err)
+		return 1
+	}
 	if err := driver.Verify(ctx); err != nil {
 		fmt.Fprintf(stderr, "tenon schedule trigger: the %s harness could not be verified: %v\n", *harnessName, err)
 		return 1
@@ -811,6 +882,7 @@ func runScheduleTrigger(args []string, stdout, stderr io.Writer) int {
 		Conversation: schedule.ConversationID(name),
 		Mode:         dispatch.Task,
 		TurnTimeout:  *turnTimeout,
+		Manifest:     manifestIdentity(supplied),
 	}, *inputID, target.Prompt)
 	if err != nil {
 		fmt.Fprintln(stderr, "tenon schedule trigger:", err)
@@ -844,6 +916,7 @@ func runScheduleRun(args []string, stdout, stderr io.Writer) int {
 	workspace := fs.String("workspace", "", "workspace directory (required)")
 	turnTimeout := fs.Duration("turn-timeout", 90*time.Second, "per-turn deadline (0 disables)")
 	maxActive := fs.Int("max-active-turns", schedule.DefaultMaxActive, "concurrent occurrences across distinct schedules")
+	manifestPath := fs.String("manifest", "", "optional supplied agent manifest to verify")
 
 	positional, ok := parsePositional(fs, args)
 	if !ok || len(positional) != 1 {
@@ -874,7 +947,12 @@ func runScheduleRun(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	p, ok := loadScheduleProject(agent, "schedule run", stderr)
+	supplied, err := readSuppliedManifest(*manifestPath)
+	if err != nil {
+		fmt.Fprintln(stderr, "tenon schedule run:", err)
+		return 1
+	}
+	p, ok := loadScheduleProject(agent, "schedule run", expectedFingerprint(supplied), stderr)
 	if !ok {
 		return 1
 	}
@@ -887,7 +965,8 @@ func runScheduleRun(args []string, stdout, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	if err := schedule.Run(ctx, schedule.Options{
+	storeBase := resolveIntegrationStoreBase()
+	opts := schedule.Options{
 		Project:     p,
 		Driver:      driver,
 		Workspace:   *workspace,
@@ -895,7 +974,16 @@ func runScheduleRun(args []string, stdout, stderr io.Writer) int {
 		TurnTimeout: *turnTimeout,
 		MaxActive:   *maxActive,
 		Out:         stdout,
-	}); err != nil {
+		Manifest:    manifestIdentity(supplied),
+	}
+	// A supplied manifest is re-verified before each occurrence opens a harness
+	// process; drift fails the occurrence closed and ends admission.
+	if supplied != nil {
+		opts.VerifyOccurrence = func() error {
+			return checkManifest(p, *harnessName, storeBase, supplied)
+		}
+	}
+	if err := schedule.Run(ctx, opts); err != nil {
 		fmt.Fprintln(stderr, "tenon schedule run:", err)
 		return 1
 	}

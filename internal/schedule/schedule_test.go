@@ -2,6 +2,7 @@ package schedule
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -345,5 +346,29 @@ func TestNextWakeSkipsNeverFiringSchedule(t *testing.T) {
 	}
 	if _, ok := only.nextWake(now); ok {
 		t.Fatal("an all-impossible set must report no wake so the loop blocks on ctx")
+	}
+}
+
+// TestVerifyOccurrenceDriftFailsClosedWithoutOpening proves a supplied manifest
+// re-verified per occurrence: on drift the occurrence opens no harness, is
+// reported uncertain, and admission ends.
+func TestVerifyOccurrenceDriftFailsClosedWithoutOpening(t *testing.T) {
+	p, ws := appliedScheduleWorkspace(t, map[string]string{"every": "* * * * *"})
+	driver := &harness.FakeDriver{Default: harness.FakeTurn{Result: harness.TurnResult{Status: harness.StatusCompleted}}}
+	out := &syncBuffer{}
+	r := newTestRunner(t, p, ws, driver, out, time.Second)
+	r.opts.VerifyOccurrence = func() error { return errors.New("manifest drift") }
+
+	r.evaluate(minute(10, 5))
+	r.wg.Wait()
+
+	if n := len(driver.Opens()); n != 0 {
+		t.Fatalf("occurrence manifest drift must open no harness, got %d opens", n)
+	}
+	if got := out.String(); !strings.Contains(got, "status=uncertain") {
+		t.Fatalf("drift must report the occurrence uncertain: %s", got)
+	}
+	if !r.stopAdmit.Load() {
+		t.Fatal("occurrence drift must end admission")
 	}
 }

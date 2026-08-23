@@ -50,6 +50,12 @@ type Target struct {
 	// checks compatibility against. Drivers stay pure by receiving it here
 	// rather than reading the single version constant themselves.
 	TenonVersion string
+	// ManifestIdentity is the supplied agent manifest's stable identity
+	// (manifest.Manifest.Identity), recorded in the apply record as a
+	// provenance join key so observation made outside tenon can be joined to
+	// the exact pinned closure that produced it. Empty when no manifest was
+	// supplied; it is never rendered into model-facing content.
+	ManifestIdentity string
 }
 
 // Driver is the seam between the portable project and one native harness.
@@ -80,8 +86,12 @@ type Record struct {
 	// the apply. Its absence from a record written before this field
 	// existed decodes to the same empty value, so no schema bump is
 	// required.
-	GitCommit string               `json:"git_commit,omitempty"`
-	Files     map[string]OwnedFile `json:"files"`
+	GitCommit string `json:"git_commit,omitempty"`
+	// Manifest is the supplied manifest's identity, a provenance join key
+	// present only when a manifest was supplied to apply. It is omitted
+	// otherwise so an unsupplied manifest leaves the record byte-identical.
+	Manifest string               `json:"manifest,omitempty"`
+	Files    map[string]OwnedFile `json:"files"`
 }
 
 // OwnedFile is the recorded state of one owned generated file: content hash
@@ -187,6 +197,7 @@ func ApplyWithTarget(p *agentproject.Project, target Target, driver Driver) (*Re
 		Harness:     driver.Harness(),
 		Fingerprint: p.Fingerprint,
 		GitCommit:   CleanHeadCommit(p.Root),
+		Manifest:    target.ManifestIdentity,
 		Files:       map[string]OwnedFile{},
 	}
 	for _, f := range files {

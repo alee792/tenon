@@ -32,12 +32,21 @@ type event struct {
 	Type          string `json:"type"`
 	Harness       string `json:"harness"`
 	Conversation  string `json:"conversation"`
-	InputID       string `json:"input_id,omitempty"`
-	SessionID     string `json:"session_id,omitempty"`
-	Status        string `json:"status,omitempty"`
-	Reason        string `json:"reason,omitempty"`
-	Delta         string `json:"delta,omitempty"`
-	Bytes         int    `json:"bytes,omitempty"`
+	// Fingerprint is the agent's source fingerprint, present on every event so
+	// observation of the stream joins to the exact source configuration that
+	// produced it even when no manifest is supplied (product spec, "Agent
+	// manifest": every dispatch lifecycle event carries the source fingerprint).
+	Fingerprint string `json:"fingerprint"`
+	// Manifest is the supplied agent manifest's identity, a provenance join
+	// key present on every event only when a manifest was supplied. It carries
+	// no pin or fingerprint value and is omitted when no manifest is supplied.
+	Manifest  string `json:"manifest,omitempty"`
+	InputID   string `json:"input_id,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
+	Status    string `json:"status,omitempty"`
+	Reason    string `json:"reason,omitempty"`
+	Delta     string `json:"delta,omitempty"`
+	Bytes     int    `json:"bytes,omitempty"`
 }
 
 // emit stamps an event with the schema version, the next monotonic sequence,
@@ -50,5 +59,7 @@ func (d *dispatcher) emit(e event) error {
 	e.Sequence = d.seq
 	e.Harness = d.harness
 	e.Conversation = d.conversation
+	e.Fingerprint = d.fingerprint
+	e.Manifest = d.manifest
 	return d.enc.Encode(e)
 }

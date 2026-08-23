@@ -89,6 +89,16 @@ type Options struct {
 	Out io.Writer
 	// Clock is the time source; nil uses the wall clock.
 	Clock Clock
+	// Manifest is the supplied agent manifest's identity, threaded onto each
+	// occurrence's dispatch for provenance. Empty when no manifest gates the
+	// run.
+	Manifest string
+	// VerifyOccurrence, when non-nil, re-verifies the supplied agent manifest
+	// against the freshly resolved closure before each occurrence opens a
+	// harness process. A non-nil result is drift or an unresolvable closure:
+	// the occurrence opens nothing, is recorded uncertain, and admission ends
+	// (fail closed). Nil means no manifest gate.
+	VerifyOccurrence func() error
 }
 
 // lockPath returns the exclusive-ownership lock path for a workspace, agent,
@@ -344,6 +354,17 @@ func (r *runner) dispatch(s agentproject.Schedule, occ string) {
 			r.fail(err)
 			return
 		}
+		// A supplied manifest is verified before this occurrence opens any
+		// harness process; drift fails closed — the occurrence opens nothing,
+		// is reported uncertain, and admission ends.
+		if r.opts.VerifyOccurrence != nil {
+			if err := r.opts.VerifyOccurrence(); err != nil {
+				r.clearInflight(s.Name)
+				_ = r.emitOccurrence(s.Name, occ, string(dispatchstate.Uncertain), boundReason(err.Error()))
+				r.fail(err)
+				return
+			}
+		}
 		// Occurrences run under a context independent of any stop signal so an
 		// admitted occurrence drains rather than being cancelled; its turn
 		// deadline still bounds it.
@@ -372,6 +393,7 @@ func (r *runner) taskOptions(s agentproject.Schedule) dispatch.Options {
 		Conversation: ConversationID(s.Name),
 		Mode:         dispatch.Task,
 		TurnTimeout:  r.turnTimeout,
+		Manifest:     r.opts.Manifest,
 	}
 }
 
@@ -424,6 +446,13 @@ func (r *runner) emitOccurrence(name, occ, status, reason string) error {
 	line := fmt.Sprintf("schedule=%q occurrence=%s status=%s", name, occ, status)
 	if reason != "" {
 		line += fmt.Sprintf(" reason=%q", reason)
+	}
+	// Every scheduled-dispatch lifecycle event carries the source fingerprint
+	// (and the manifest identity when one gates the run) so occurrence output
+	// joins to the exact configuration that produced it.
+	line += fmt.Sprintf(" fingerprint=%q", r.opts.Project.Fingerprint)
+	if r.opts.Manifest != "" {
+		line += fmt.Sprintf(" manifest=%q", r.opts.Manifest)
 	}
 	return r.writeLine(line)
 }
