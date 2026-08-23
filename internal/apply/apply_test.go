@@ -3,6 +3,7 @@ package apply
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -78,6 +79,34 @@ func TestApplyWritesFilesAndOwnerOnlyRecord(t *testing.T) {
 	if !ok || !strings.HasPrefix(owned.Hash, "sha256:") || owned.Executable {
 		t.Fatalf("recorded owned state = %+v, %v", owned, ok)
 	}
+}
+
+// runGit runs one git command in dir, failing the test on any error. It is
+// the test fixture's own use of git as a subprocess, distinct from the
+// production cleanHeadCommit helper it is exercising.
+func runGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, out)
+	}
+	return string(out)
+}
+
+// initCleanGitRepo creates a git repository at dir with one committed file
+// and returns its HEAD commit SHA.
+func initCleanGitRepo(t *testing.T, dir string) string {
+	t.Helper()
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "user.name", "Tenon Test")
+	if err := os.WriteFile(filepath.Join(dir, "instructions.md"), []byte("agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, dir, "add", "instructions.md")
+	runGit(t, dir, "commit", "-m", "initial")
+	return strings.TrimSpace(runGit(t, dir, "rev-parse", "HEAD"))
 }
 
 func readTestRecord(t *testing.T, ws string) *Record {
@@ -483,4 +512,92 @@ func TestVerifyFailsClosedOnDrift(t *testing.T) {
 			t.Fatalf("corrupt record error = %v", err)
 		}
 	})
+}
+
+// TestApplyRecordsGitCommitForCleanSource proves a source directory that is a
+// clean git working tree gets its HEAD commit SHA recorded.
+func TestApplyRecordsGitCommitForCleanSource(t *testing.T) {
+	source := t.TempDir()
+	want := initCleanGitRepo(t, source)
+
+	ws := t.TempDir()
+	p := project(t)
+	p.Root = source
+	driver := fakeDriver{files: []GeneratedFile{{Path: "CLAUDE.md", Content: []byte("generated\n")}}}
+	if _, diags, err := Apply(p, ws, testExecutable, driver); err != nil || diags.HasErrors() {
+		t.Fatalf("apply failed: %v %v", err, diags.All())
+	}
+	got := readTestRecord(t, ws).GitCommit
+	if got != want {
+		t.Fatalf("git commit = %q, want %q", got, want)
+	}
+}
+
+// TestApplyOmitsGitCommitForDirtySource proves an uncommitted change in the
+// source directory suppresses the recorded commit rather than failing apply.
+func TestApplyOmitsGitCommitForDirtySource(t *testing.T) {
+	source := t.TempDir()
+	initCleanGitRepo(t, source)
+	if err := os.WriteFile(filepath.Join(source, "instructions.md"), []byte("edited\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ws := t.TempDir()
+	p := project(t)
+	p.Root = source
+	driver := fakeDriver{files: []GeneratedFile{{Path: "CLAUDE.md", Content: []byte("generated\n")}}}
+	if _, diags, err := Apply(p, ws, testExecutable, driver); err != nil || diags.HasErrors() {
+		t.Fatalf("apply failed: %v %v", err, diags.All())
+	}
+	if got := readTestRecord(t, ws).GitCommit; got != "" {
+		t.Fatalf("git commit = %q, want empty for a dirty source tree", got)
+	}
+}
+
+// TestApplyOmitsGitCommitForNonGitSource proves a source directory outside
+// any git repository leaves the field empty rather than erroring apply.
+func TestApplyOmitsGitCommitForNonGitSource(t *testing.T) {
+	ws := t.TempDir()
+	p := project(t) // p.Root is a plain t.TempDir(), never a git repository
+	driver := fakeDriver{files: []GeneratedFile{{Path: "CLAUDE.md", Content: []byte("generated\n")}}}
+	if _, diags, err := Apply(p, ws, testExecutable, driver); err != nil || diags.HasErrors() {
+		t.Fatalf("apply failed: %v %v", err, diags.All())
+	}
+	if got := readTestRecord(t, ws).GitCommit; got != "" {
+		t.Fatalf("git commit = %q, want empty for a non-git source", got)
+	}
+}
+
+// TestReadRecordAcceptsPreGitCommitRecords proves an apply record written
+// before GitCommit existed still decodes, with the field simply empty: a
+// missing JSON field decodes to its zero value, so this required no schema
+// bump.
+func TestReadRecordAcceptsPreGitCommitRecords(t *testing.T) {
+	ws := t.TempDir()
+	recordPath := RecordPath(ws, "fake")
+	if err := os.MkdirAll(filepath.Dir(recordPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	legacy := []byte(`{
+  "schema": 1,
+  "agent": "agent",
+  "source": "/some/source",
+  "harness": "fake",
+  "fingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "files": {"CLAUDE.md": {"hash": "sha256:abc", "executable": false}}
+}
+`)
+	if err := os.WriteFile(recordPath, legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record, err := readRecord(recordPath)
+	if err != nil {
+		t.Fatalf("readRecord failed on a pre-GitCommit record: %v", err)
+	}
+	if record.GitCommit != "" {
+		t.Fatalf("git commit = %q, want empty for a record with no git_commit field", record.GitCommit)
+	}
+	if record.Schema != 1 || record.Agent != "agent" {
+		t.Fatalf("record = %+v, want the legacy fields to still decode", record)
+	}
 }
