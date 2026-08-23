@@ -147,6 +147,30 @@ func render(diags *diagnostics.List, jsonl bool, stdout, stderr io.Writer) {
 	_ = diags.WriteProse(stderr)
 }
 
+// validateResult is the jsonl-mode result summary for a successful validate.
+type validateResult struct {
+	Agent       string `json:"agent"`
+	Fingerprint string `json:"fingerprint"`
+}
+
+// applyResult is the jsonl-mode result summary for a successful apply. Field
+// names follow apply.Record's existing json tags (snake_case).
+type applyResult struct {
+	Agent        string   `json:"agent"`
+	Harness      string   `json:"harness"`
+	Workspace    string   `json:"workspace"`
+	Fingerprint  string   `json:"fingerprint"`
+	Written      []string `json:"written"`
+	Removed      []string `json:"removed"`
+	ManagedTools []string `json:"managed_tools"`
+}
+
+// writeResult emits one jsonl-mode result summary as a single JSON object
+// followed by a newline, matching WriteJSONL's per-line encoding.
+func writeResult(stdout io.Writer, v any) {
+	_ = json.NewEncoder(stdout).Encode(v)
+}
+
 // resolveExecutable returns the absolute, symlink-free path of the running
 // tenon binary. Generated managed-server configuration launches tenon from
 // it, so an unresolvable or non-regular executable is an environment failure
@@ -221,7 +245,11 @@ func runValidate(args []string, stdout, stderr io.Writer) int {
 	if p == nil || diags.HasErrors() {
 		return 1
 	}
-	fmt.Fprintf(stdout, "valid: agent %s (fingerprint %s)\n", p.Name, p.Fingerprint)
+	if jsonl {
+		writeResult(stdout, validateResult{Agent: p.Name, Fingerprint: p.Fingerprint})
+	} else {
+		fmt.Fprintf(stdout, "valid: agent %s (fingerprint %s)\n", p.Name, p.Fingerprint)
+	}
 	return 0
 }
 
@@ -268,6 +296,18 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 	}
 	if result == nil || diags.HasErrors() {
 		return 1
+	}
+	if jsonl {
+		writeResult(stdout, applyResult{
+			Agent:        p.Name,
+			Harness:      driver.Harness(),
+			Workspace:    workspace,
+			Fingerprint:  result.Fingerprint,
+			Written:      result.Written,
+			Removed:      result.Removed,
+			ManagedTools: managedTools(p),
+		})
+		return 0
 	}
 	fmt.Fprintf(stdout, "applied: agent %s for %s in %s (fingerprint %s)\n",
 		p.Name, driver.Harness(), workspace, result.Fingerprint)
