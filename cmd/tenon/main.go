@@ -35,6 +35,7 @@ const prepareBudget = 5 * time.Minute
 const usage = `usage:
   tenon apply AGENT --harness <claude|codex> [--workspace DIR] [--diagnostics <prose|jsonl>]
   tenon validate AGENT --harness <claude|codex> [--diagnostics <prose|jsonl>]
+  tenon fingerprint show AGENT [--diagnostics <prose|jsonl>]
   tenon mcp serve AGENT --harness <claude|codex> [--workspace DIR]
   tenon stage AGENT --harness <claude|codex> --output DIR
   tenon stage verify --artifact PATH [--prefix DIR]
@@ -60,6 +61,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runApply(args[1:], stdout, stderr)
 	case "validate":
 		return runValidate(args[1:], stdout, stderr)
+	case "fingerprint":
+		if len(args) < 2 || args[1] != "show" {
+			fmt.Fprintf(stderr, "tenon fingerprint: the only subcommand is show\n%s", usage)
+			return 2
+		}
+		return runFingerprintShow(args[2:], stdout, stderr)
 	case "mcp":
 		if len(args) < 2 || args[1] != "serve" {
 			fmt.Fprintf(stderr, "tenon mcp: the only subcommand is serve\n%s", usage)
@@ -147,6 +154,35 @@ func render(diags *diagnostics.List, jsonl bool, stdout, stderr io.Writer) {
 	_ = diags.WriteProse(stderr)
 }
 
+// validateResult is the jsonl-mode result summary for a successful validate.
+type validateResult struct {
+	Agent       string `json:"agent"`
+	Fingerprint string `json:"fingerprint"`
+}
+
+// applyResult is the jsonl-mode result summary for a successful apply. Field
+// names follow apply.Record's existing json tags (snake_case). ManagedTools
+// names only the tools exposed through tenon's managed MCP boundary — native
+// harness tools are never included and always remain unmanaged, regardless
+// of this list's contents.
+type applyResult struct {
+	Agent        string   `json:"agent"`
+	Harness      string   `json:"harness"`
+	Workspace    string   `json:"workspace"`
+	Fingerprint  string   `json:"fingerprint"`
+	Written      []string `json:"written"`
+	Removed      []string `json:"removed"`
+	ManagedTools []string `json:"managed_tools"`
+}
+
+// writeResult emits one jsonl-mode result summary as a single JSON object
+// followed by a newline, matching WriteJSONL's per-line encoding. The
+// caller must report a returned error rather than discard it: a broken
+// pipe or write failure here means the promised result was never sent.
+func writeResult(stdout io.Writer, v any) error {
+	return json.NewEncoder(stdout).Encode(v)
+}
+
 // resolveExecutable returns the absolute, symlink-free path of the running
 // tenon binary. Generated managed-server configuration launches tenon from
 // it, so an unresolvable or non-regular executable is an environment failure
@@ -221,7 +257,14 @@ func runValidate(args []string, stdout, stderr io.Writer) int {
 	if p == nil || diags.HasErrors() {
 		return 1
 	}
-	fmt.Fprintf(stdout, "valid: agent %s (fingerprint %s)\n", p.Name, p.Fingerprint)
+	if jsonl {
+		if err := writeResult(stdout, validateResult{Agent: p.Name, Fingerprint: p.Fingerprint}); err != nil {
+			fmt.Fprintln(stderr, "tenon validate:", err)
+			return 1
+		}
+	} else {
+		fmt.Fprintf(stdout, "valid: agent %s (fingerprint %s)\n", p.Name, p.Fingerprint)
+	}
 	return 0
 }
 
@@ -269,6 +312,22 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 	if result == nil || diags.HasErrors() {
 		return 1
 	}
+	if jsonl {
+		res := applyResult{
+			Agent:        p.Name,
+			Harness:      driver.Harness(),
+			Workspace:    workspace,
+			Fingerprint:  result.Fingerprint,
+			Written:      result.Written,
+			Removed:      result.Removed,
+			ManagedTools: managedTools(p),
+		}
+		if err := writeResult(stdout, res); err != nil {
+			fmt.Fprintln(stderr, "tenon apply:", err)
+			return 1
+		}
+		return 0
+	}
 	fmt.Fprintf(stdout, "applied: agent %s for %s in %s (fingerprint %s)\n",
 		p.Name, driver.Harness(), workspace, result.Fingerprint)
 	for _, f := range result.Written {
@@ -280,6 +339,91 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "managed tools: %s via MCP; native harness tools remain unmanaged\n",
 		strings.Join(managedTools(p), ", "))
 	fmt.Fprintf(stdout, "start %s normally in %s\n", driver.Harness(), workspace)
+	return 0
+}
+
+// fingerprintRollupJSON is the jsonl rendering of the final rolled-up
+// fingerprint line.
+type fingerprintRollupJSON struct {
+	Fingerprint string `json:"fingerprint"`
+}
+
+// runFingerprintShow prints every authored file that feeds AGENT's
+// fingerprint — its path, its own content hash, and its executable bit —
+// sorted the same way the rollup sorts them, then the rolled-up fingerprint
+// itself. It never recomputes a hash: agentproject.Load already built the
+// per-file list, and this only renders what Load returned. Tool preparation
+// runs first, exactly as validate and apply require it, so a project whose
+// tools cannot be built never reports a fingerprint as though it were clean.
+func runFingerprintShow(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("fingerprint show", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	diagMode := fs.String("diagnostics", "prose", "diagnostic rendering: prose or jsonl")
+	positional, ok := parsePositional(fs, args)
+	if !ok || len(positional) != 1 {
+		fmt.Fprintf(stderr, "tenon fingerprint show: usage: tenon fingerprint show AGENT [--diagnostics <prose|jsonl>]\n")
+		return 2
+	}
+	agent := positional[0]
+	jsonl := false
+	switch *diagMode {
+	case "prose":
+	case "jsonl":
+		jsonl = true
+	default:
+		fmt.Fprintf(stderr, "tenon fingerprint show: --diagnostics must be prose or jsonl\n")
+		return 2
+	}
+
+	p, diags, err := agentproject.Load(agent)
+	if err != nil {
+		fmt.Fprintln(stderr, "tenon fingerprint show:", err)
+		return 1
+	}
+	if p != nil && !diags.HasErrors() {
+		workspace, err := filepath.Abs(agent)
+		if err != nil {
+			fmt.Fprintln(stderr, "tenon fingerprint show:", err)
+			return 1
+		}
+		cache := ""
+		if len(p.Tools) > 0 {
+			cache, err = os.MkdirTemp("", "tenon-tools-")
+			if err != nil {
+				fmt.Fprintln(stderr, "tenon fingerprint show:", err)
+				return 1
+			}
+			defer os.RemoveAll(cache)
+		}
+		prepareTools(p, workspace, cache, diags)
+	}
+	render(diags, jsonl, stdout, stderr)
+	if p == nil || diags.HasErrors() {
+		return 1
+	}
+
+	if jsonl {
+		for _, e := range p.FingerprintEntries {
+			if err := writeResult(stdout, e); err != nil {
+				fmt.Fprintln(stderr, "tenon fingerprint show:", err)
+				return 1
+			}
+		}
+		if err := writeResult(stdout, fingerprintRollupJSON{Fingerprint: p.Fingerprint}); err != nil {
+			fmt.Fprintln(stderr, "tenon fingerprint show:", err)
+			return 1
+		}
+		return 0
+	}
+
+	for _, e := range p.FingerprintEntries {
+		bit := "-"
+		if e.Executable {
+			bit = "x"
+		}
+		fmt.Fprintf(stdout, "%s %s %s\n", e.Path, e.Hash, bit)
+	}
+	fmt.Fprintf(stdout, "fingerprint: %s\n", p.Fingerprint)
 	return 0
 }
 

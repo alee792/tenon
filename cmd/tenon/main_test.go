@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -138,6 +139,270 @@ func TestJSONLDiagnosticsAreParseable(t *testing.T) {
 	}
 	if !sawMissingFrontmatter {
 		t.Fatalf("expected instructions.frontmatter.missing at instructions.md, got %v", lines)
+	}
+}
+
+// TestFingerprintShowListsFilesAndMatchesRollup proves the literal deliverable
+// of issue #1: every authored file feeding the fingerprint is listed with its
+// own hash and executable bit, sorted by path, followed by the same rolled-up
+// fingerprint validate reports for the identical project.
+func TestFingerprintShowListsFilesAndMatchesRollup(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	writeFile(t, agent, "harnesses/claude/.claude/hooks/pre.sh", []byte("#!/bin/sh\n"), 0o755)
+	writeFile(t, agent, "harnesses/claude/.claude/settings.json", []byte(`{"a":1}`), 0o644)
+
+	var validateOut, stderr bytes.Buffer
+	if code := run([]string{"validate", agent, "--harness", "claude"}, nil, &validateOut, &stderr); code != 0 {
+		t.Fatalf("validate exit %d: %s", code, stderr.String())
+	}
+	i := strings.Index(validateOut.String(), "fingerprint ")
+	if i < 0 {
+		t.Fatalf("validate output missing fingerprint: %s", validateOut.String())
+	}
+	wantFingerprint := strings.TrimSuffix(validateOut.String()[i+len("fingerprint "):], ")\n")
+
+	var stdout bytes.Buffer
+	stderr.Reset()
+	if code := run([]string{"fingerprint", "show", agent}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("fingerprint show exit %d: %s", code, stderr.String())
+	}
+	lines := strings.Split(strings.TrimRight(stdout.String(), "\n"), "\n")
+	if len(lines) < 4 {
+		t.Fatalf("expected at least 3 file lines plus the rollup, got %v", lines)
+	}
+
+	var paths []string
+	byPath := make(map[string][2]string) // path -> [hash, mode]
+	for _, line := range lines[:len(lines)-1] {
+		fields := strings.Fields(line)
+		if len(fields) != 3 {
+			t.Fatalf("malformed file line %q", line)
+		}
+		paths = append(paths, fields[0])
+		byPath[fields[0]] = [2]string{fields[1], fields[2]}
+	}
+	if !slices.IsSorted(paths) {
+		t.Fatalf("file lines must be sorted by path: %v", paths)
+	}
+	if _, ok := byPath["instructions.md"]; !ok {
+		t.Fatalf("instructions.md must be listed: %v", paths)
+	}
+	hook, ok := byPath["harnesses/claude/.claude/hooks/pre.sh"]
+	if !ok || hook[1] != "x" {
+		t.Fatalf("executable file must be listed with mode x: %v", byPath)
+	}
+	settings, ok := byPath["harnesses/claude/.claude/settings.json"]
+	if !ok || settings[1] != "-" {
+		t.Fatalf("non-executable file must be listed with mode -: %v", byPath)
+	}
+	if !strings.HasPrefix(hook[0], "sha256:") || !strings.HasPrefix(settings[0], "sha256:") {
+		t.Fatalf("every file hash must carry the sha256: prefix: %v", byPath)
+	}
+
+	last := lines[len(lines)-1]
+	if !strings.HasPrefix(last, "fingerprint: ") {
+		t.Fatalf("last line must be the rolled-up fingerprint, got %q", last)
+	}
+	gotFingerprint := strings.TrimPrefix(last, "fingerprint: ")
+	if gotFingerprint != wantFingerprint {
+		t.Fatalf("fingerprint show rollup = %q, want %q (from validate)", gotFingerprint, wantFingerprint)
+	}
+}
+
+// TestFingerprintShowJSONLIsParseable proves the --diagnostics jsonl mode
+// renders one JSON object per file plus a final rollup object, all machine
+// parseable.
+func TestFingerprintShowJSONLIsParseable(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"fingerprint", "show", agent, "--diagnostics", "jsonl"}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("fingerprint show exit %d: %s", code, stderr.String())
+	}
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("expected at least one file object and the rollup: %v", lines)
+	}
+	for _, line := range lines[:len(lines)-1] {
+		var e struct {
+			Path       string `json:"path"`
+			Hash       string `json:"hash"`
+			Executable bool   `json:"executable"`
+		}
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			t.Fatalf("line %q is not one JSON fingerprint entry: %v", line, err)
+		}
+		if e.Path == "" || !strings.HasPrefix(e.Hash, "sha256:") {
+			t.Fatalf("entry must carry path and a sha256: hash: %q", line)
+		}
+	}
+	var rollup struct {
+		Fingerprint string `json:"fingerprint"`
+	}
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &rollup); err != nil {
+		t.Fatalf("last line is not the JSON rollup: %v", err)
+	}
+	if !strings.HasPrefix(rollup.Fingerprint, "sha256:") {
+		t.Fatalf("rollup fingerprint must carry the sha256: prefix: %q", rollup.Fingerprint)
+	}
+}
+
+// TestFingerprintShowFailsClosedOnInvalidProject proves fingerprint show
+// reports the same stable diagnostics as validate/apply and prints no file
+// list or fingerprint for a project that fails to load.
+func TestFingerprintShowFailsClosedOnInvalidProject(t *testing.T) {
+	agent := writeAgent(t, "my-agent", "no frontmatter\n")
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"fingerprint", "show", agent, "--diagnostics", "jsonl"}, nil, &stdout, &stderr); code == 0 {
+		t.Fatal("expected failure for an invalid project")
+	}
+	if strings.Contains(stdout.String(), "\"fingerprint\"") {
+		t.Fatalf("an invalid project must not print a fingerprint: %s", stdout.String())
+	}
+	var d struct {
+		ID string `json:"id"`
+	}
+	firstLine := strings.SplitN(stdout.String(), "\n", 2)[0]
+	if err := json.Unmarshal([]byte(firstLine), &d); err != nil || d.ID == "" {
+		t.Fatalf("expected a stable diagnostic on stdout, got %q", stdout.String())
+	}
+}
+
+// TestFingerprintSubcommandRejectsUnknownVerbs proves fingerprint dispatches
+// only its documented subcommand, the same convention mcp uses.
+func TestFingerprintSubcommandRejectsUnknownVerbs(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"fingerprint"}, nil, &stdout, &stderr); code == 0 {
+		t.Fatal("bare fingerprint must fail")
+	}
+	if code := run([]string{"fingerprint", "diff"}, nil, &stdout, &stderr); code == 0 {
+		t.Fatal("an unknown fingerprint subcommand must fail")
+	}
+}
+
+// TestProseResultSummaryUnchanged proves the additive jsonl branch left the
+// default prose result summary byte-identical: same validate and apply
+// success lines as before, with no --diagnostics flag at all.
+func TestProseResultSummaryUnchanged(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"validate", agent, "--harness", "claude"}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("validate exit %d: %s", code, stderr.String())
+	}
+	wantValidate := fmt.Sprintf("valid: agent my-agent (fingerprint %s)\n", fingerprintOf(t, agent))
+	if stdout.String() != wantValidate {
+		t.Fatalf("prose validate summary =\n%q\nwant\n%q", stdout.String(), wantValidate)
+	}
+
+	ws := t.TempDir()
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("apply exit %d: %s", code, stderr.String())
+	}
+	fingerprint := fingerprintOf(t, agent)
+	wantApply := fmt.Sprintf("applied: agent my-agent for claude in %s (fingerprint %s)\n", ws, fingerprint) +
+		"  wrote .mcp.json\n" +
+		"  wrote CLAUDE.md\n" +
+		"managed tools: echo via MCP; native harness tools remain unmanaged\n" +
+		fmt.Sprintf("start claude normally in %s\n", ws)
+	if stdout.String() != wantApply {
+		t.Fatalf("prose apply summary =\n%q\nwant\n%q", stdout.String(), wantApply)
+	}
+}
+
+// fingerprintOf reruns validate in jsonl mode purely to read back the
+// project's fingerprint, without asserting on its own output.
+func fingerprintOf(t *testing.T, agent string) string {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"validate", agent, "--harness", "claude", "--diagnostics", "jsonl"}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("validate exit %d: %s", code, stderr.String())
+	}
+	var got validateResultForTest
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &got); err != nil {
+		t.Fatalf("result summary is not valid JSON: %v (%q)", err, stdout.String())
+	}
+	return got.Fingerprint
+}
+
+type validateResultForTest struct {
+	Agent       string `json:"agent"`
+	Fingerprint string `json:"fingerprint"`
+}
+
+// TestJSONLResultSummaryValidate proves a successful validate in jsonl mode
+// emits one parseable JSON result object naming the agent and fingerprint,
+// with no prose line at all.
+func TestJSONLResultSummaryValidate(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"validate", agent, "--harness", "claude", "--diagnostics", "jsonl"}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("validate exit %d: %s", code, stderr.String())
+	}
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("expected exactly one jsonl result line, got %q", stdout.String())
+	}
+	var got validateResultForTest
+	if err := json.Unmarshal([]byte(lines[0]), &got); err != nil {
+		t.Fatalf("result line %q is not valid JSON: %v", lines[0], err)
+	}
+	if got.Agent != "my-agent" || got.Fingerprint == "" {
+		t.Fatalf("result = %+v, want agent %q and a non-empty fingerprint", got, "my-agent")
+	}
+	if strings.Contains(stdout.String(), "valid: agent") {
+		t.Fatalf("jsonl mode must not also emit the prose line: %q", stdout.String())
+	}
+}
+
+type applyResultForTest struct {
+	Agent        string   `json:"agent"`
+	Harness      string   `json:"harness"`
+	Workspace    string   `json:"workspace"`
+	Fingerprint  string   `json:"fingerprint"`
+	Written      []string `json:"written"`
+	Removed      []string `json:"removed"`
+	ManagedTools []string `json:"managed_tools"`
+}
+
+// TestJSONLResultSummaryApply proves a successful apply in jsonl mode emits
+// one parseable JSON result object carrying the agent, harness, workspace,
+// fingerprint, written/removed file lists, and managed tools, with no prose
+// output at all.
+func TestJSONLResultSummaryApply(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	ws := t.TempDir()
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--diagnostics", "jsonl"}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("apply exit %d: %s", code, stderr.String())
+	}
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("expected exactly one jsonl result line, got %q", stdout.String())
+	}
+	var got applyResultForTest
+	if err := json.Unmarshal([]byte(lines[0]), &got); err != nil {
+		t.Fatalf("result line %q is not valid JSON: %v", lines[0], err)
+	}
+	if got.Agent != "my-agent" || got.Harness != "claude" || got.Workspace != ws || got.Fingerprint == "" {
+		t.Fatalf("result = %+v, want agent=my-agent harness=claude workspace=%s and a non-empty fingerprint", got, ws)
+	}
+	if !slices.Contains(got.Written, ".mcp.json") || !slices.Contains(got.Written, "CLAUDE.md") {
+		t.Fatalf("result.written = %v, want .mcp.json and CLAUDE.md", got.Written)
+	}
+	if len(got.Removed) != 0 {
+		t.Fatalf("result.removed = %v, want none on a first apply", got.Removed)
+	}
+	if !slices.Equal(got.ManagedTools, []string{"echo"}) {
+		t.Fatalf("result.managed_tools = %v, want [echo]", got.ManagedTools)
+	}
+	if strings.Contains(stdout.String(), "applied: agent") {
+		t.Fatalf("jsonl mode must not also emit the prose lines: %q", stdout.String())
 	}
 }
 

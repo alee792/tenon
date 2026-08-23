@@ -1,8 +1,11 @@
 package agentproject
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -260,9 +263,66 @@ func TestFingerprintTracksContent(t *testing.T) {
 
 func TestFingerprintTracksExecutableBit(t *testing.T) {
 	content := []byte("#!/bin/sh\necho run\n")
-	plain := fingerprint([]sourceInput{{Path: "skills/run.sh", Content: content, Executable: false}})
-	executable := fingerprint([]sourceInput{{Path: "skills/run.sh", Content: content, Executable: true}})
+	_, plain := computeFingerprint([]sourceInput{{Path: "skills/run.sh", Content: content, Executable: false}})
+	_, executable := computeFingerprint([]sourceInput{{Path: "skills/run.sh", Content: content, Executable: true}})
 	if plain == executable {
 		t.Fatal("flipping only the executable bit must change the fingerprint")
+	}
+}
+
+// TestFingerprintEntriesMatchRollup proves the per-file list tenon
+// fingerprint show renders is exactly what feeds the rolled-up fingerprint:
+// sorted by path, each entry's own content hash, and executable intent
+// preserved, with instructions.md always present as an entry.
+func TestFingerprintEntriesMatchRollup(t *testing.T) {
+	root := writeAgent(t, "agent", validInstructions)
+	writeHarnessFile(t, root, "harnesses/claude/.claude/hooks/pre.sh", []byte("#!/bin/sh\n"), 0o755)
+	writeHarnessFile(t, root, "harnesses/claude/.claude/settings.json", []byte(`{"a":1}`), 0o644)
+
+	p, diags, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p == nil || diags.HasErrors() {
+		t.Fatalf("unexpected diagnostics: %v", diags.All())
+	}
+
+	var paths []string
+	for _, e := range p.FingerprintEntries {
+		paths = append(paths, e.Path)
+	}
+	if !slices.IsSorted(paths) {
+		t.Fatalf("fingerprint entries must be sorted by path: %v", paths)
+	}
+
+	byPath := make(map[string]FingerprintEntry, len(p.FingerprintEntries))
+	for _, e := range p.FingerprintEntries {
+		byPath[e.Path] = e
+	}
+
+	instr, ok := byPath["instructions.md"]
+	if !ok {
+		t.Fatalf("instructions.md must be a fingerprint entry: %v", paths)
+	}
+	if instr.Executable {
+		t.Fatalf("instructions.md must never be executable: %+v", instr)
+	}
+	wantInstrHash := fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(validInstructions)))
+	if instr.Hash != wantInstrHash {
+		t.Fatalf("instructions.md hash = %s, want %s", instr.Hash, wantInstrHash)
+	}
+
+	hook, ok := byPath["harnesses/claude/.claude/hooks/pre.sh"]
+	if !ok || !hook.Executable {
+		t.Fatalf("executable harness file must be a fingerprint entry carrying its bit: %+v", hook)
+	}
+	wantHookHash := fmt.Sprintf("sha256:%x", sha256.Sum256([]byte("#!/bin/sh\n")))
+	if hook.Hash != wantHookHash {
+		t.Fatalf("hook hash = %s, want %s", hook.Hash, wantHookHash)
+	}
+
+	settings, ok := byPath["harnesses/claude/.claude/settings.json"]
+	if !ok || settings.Executable {
+		t.Fatalf("non-executable harness file must not carry the bit: %+v", settings)
 	}
 }

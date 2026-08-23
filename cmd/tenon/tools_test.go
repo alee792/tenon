@@ -268,6 +268,28 @@ func TestBrokenToolFailsValidateAndApplyIdentically(t *testing.T) {
 	}
 }
 
+// TestBrokenToolFailsFingerprintShowToo proves fingerprint show runs the same
+// tool preparation gate as validate and apply: a project whose tool does not
+// compile never reports a fingerprint, matching validate/apply's own
+// tool.prepare.failed diagnostic instead of silently succeeding.
+func TestBrokenToolFailsFingerprintShowToo(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	writeGoTool(t, agent, brokenGoToolFile)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"fingerprint", "show", agent, "--diagnostics", "jsonl"}, nil, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("a tool that does not compile must fail fingerprint show: %q", stdout.String())
+	}
+	diags := filterDiags(parseDiagLines(t, stdout.String()), "tool.prepare.failed")
+	if len(diags) != 1 || diags[0].Path != "tools" {
+		t.Fatalf("expected one tool.prepare.failed at tools, got %q", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "\"fingerprint\"") {
+		t.Fatalf("a project whose tools fail to build must not report a fingerprint: %s", stdout.String())
+	}
+}
+
 // TestToolAndSubagentNamesMayNotCollide proves the collision fails validation
 // before any preparation, naming both authored paths.
 func TestToolAndSubagentNamesMayNotCollide(t *testing.T) {
