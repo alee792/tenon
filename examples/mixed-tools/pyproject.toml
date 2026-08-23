@@ -1,0 +1,8 @@
+[project]
+name = "mixed-tools"
+version = "0.1.0"
+description = "Demo agent exposing a Python text tool through tenon's managed MCP boundary."
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2",
+]

@@ -1,2 +1,5 @@
 dist/
 .claude/worktrees/
+
+# Local tenon build artifact (see examples/*/README.md: `go build -o ./tenon`)
+/tenon
