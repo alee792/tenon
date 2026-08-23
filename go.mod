@@ -4,12 +4,22 @@ go 1.26.5
 
 // Dependencies are rare and justified inline here, not by ADR: state what
 // the module is for and why the standard library cannot cover it.
-//
-// go.yaml.in/yaml/v3: authored frontmatter must be parsed by a real YAML
-// engine — vendor fields (e.g. Claude's hooks) carry arbitrary YAML that
-// tenon preserves without interpreting, and a hand-rolled parser would
-// either misparse them or grow into an unvetted YAML implementation on the
-// untrusted-input path. internal/frontmatter is its only importer and
-// enforces the closed subset (single doc, mapping root, string keys, no
-// aliases/anchors/duplicates); swapping engines behind that wrapper is fine.
-require go.yaml.in/yaml/v3 v3.0.5
+require (
+	// github.com/robfig/cron/v3: schedule admission needs cron next-occurrence
+	// evaluation over ranges, steps, and lists, and the day-of-month/
+	// day-of-week OR-semantics is subtle and security-relevant to what a
+	// foreground clock admits — a hand-rolled evaluator on that admission path
+	// would be an unvetted reimplementation of that subtlety. The standard
+	// library has no cron parser. Scoped to schedule evaluation behind
+	// internal/cron, which is its only importer; swapping engines behind that
+	// wrapper is fine.
+	github.com/robfig/cron/v3 v3.0.1
+	// go.yaml.in/yaml/v3: authored frontmatter must be parsed by a real YAML
+	// engine — vendor fields (e.g. Claude's hooks) carry arbitrary YAML that
+	// tenon preserves without interpreting, and a hand-rolled parser would
+	// either misparse them or grow into an unvetted YAML implementation on the
+	// untrusted-input path. internal/frontmatter is its only importer and
+	// enforces the closed subset (single doc, mapping root, string keys, no
+	// aliases/anchors/duplicates); swapping engines behind that wrapper is fine.
+	go.yaml.in/yaml/v3 v3.0.5
+)

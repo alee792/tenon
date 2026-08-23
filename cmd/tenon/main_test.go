@@ -83,7 +83,12 @@ func TestFiveMinuteJourney(t *testing.T) {
 // either command on a failing project.
 func TestValidateReportsApplyFailuresWithoutMutating(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
+	// A schedule with a malformed cron fails validate and apply identically.
 	if err := os.Mkdir(filepath.Join(agent, "schedules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agent, "schedules", "bad.md"),
+		[]byte("---\ncron: not a cron\n---\n\nDo the thing.\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 

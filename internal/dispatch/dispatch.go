@@ -500,6 +500,12 @@ func boundReason(s string) string {
 	if len(s) > dispatchstate.MaxReasonBytes {
 		s = s[:dispatchstate.MaxReasonBytes]
 	}
+	// A byte-length cap can slice mid-rune, and the source (a harness error
+	// string) may itself be invalid UTF-8. The durable store rejects invalid
+	// UTF-8, and a rejected reason would escalate one occurrence's classified
+	// outcome into a durable-state failure that halts the whole clock, so
+	// drop any invalid sequence here.
+	s = strings.ToValidUTF8(s, "")
 	if s == "" {
 		return "process_failed"
 	}

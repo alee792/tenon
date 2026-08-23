@@ -10,10 +10,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -23,12 +25,14 @@ import (
 	"github.com/alee792/tenon/internal/codex"
 	"github.com/alee792/tenon/internal/diagnostics"
 	"github.com/alee792/tenon/internal/dispatch"
+	"github.com/alee792/tenon/internal/dispatchstate"
 	"github.com/alee792/tenon/internal/friction"
 	"github.com/alee792/tenon/internal/harness"
 	claudeharness "github.com/alee792/tenon/internal/harness/claude"
 	codexharness "github.com/alee792/tenon/internal/harness/codex"
 	"github.com/alee792/tenon/internal/integration"
 	"github.com/alee792/tenon/internal/mcp"
+	"github.com/alee792/tenon/internal/schedule"
 	"github.com/alee792/tenon/internal/toolruntime"
 )
 
@@ -42,6 +46,8 @@ const usage = `usage:
   tenon fingerprint show AGENT [--diagnostics <prose|jsonl>]
   tenon mcp serve AGENT --harness <claude|codex> [--workspace DIR]
   tenon run AGENT --workspace DIR --harness <claude|codex> [--conversation ID] [--input jsonl] [--timeout DUR] [--turn-timeout DUR]
+  tenon schedule trigger AGENT NAME --workspace DIR --harness <claude|codex> --input-id ID [--turn-timeout DUR] [--timeout DUR]
+  tenon schedule run AGENT --workspace DIR --harness <claude|codex> [--turn-timeout DUR] [--max-active-turns N]
   tenon stage AGENT --harness <claude|codex> --output DIR
   tenon stage verify --artifact PATH [--prefix DIR]
   tenon connection add AGENT NAME --url HTTPS_URL [--context TEXT]
@@ -80,6 +86,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runMCPServe(args[2:], stdin, stdout, stderr)
 	case "run":
 		return runRun(args[1:], stdin, stdout, stderr)
+	case "schedule":
+		return runSchedule(args[1:], stdout, stderr)
 	case "stage":
 		return runStage(args[1:], stdout, stderr)
 	case "connection":
@@ -667,6 +675,228 @@ func runRun(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		TurnTimeout:  *turnTimeout,
 	}); err != nil {
 		fmt.Fprintln(stderr, "tenon run:", err)
+		return 1
+	}
+	return 0
+}
+
+// runSchedule dispatches the "tenon schedule" subcommands (ADR 0008, ADR 0011).
+func runSchedule(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintf(stderr, "tenon schedule: a subcommand is required (trigger, run)\n%s", usage)
+		return 2
+	}
+	switch args[0] {
+	case "trigger":
+		return runScheduleTrigger(args[1:], stdout, stderr)
+	case "run":
+		return runScheduleRun(args[1:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "tenon schedule: unknown subcommand %q\n%s", args[0], usage)
+		return 2
+	}
+}
+
+// loadScheduleProject loads and validates the agent project and finds the named
+// schedule, or reports why it could not. Both schedule subcommands require a
+// valid project; trigger additionally requires the schedule to exist.
+func loadScheduleProject(agent, cmdName string, stderr io.Writer) (*agentproject.Project, bool) {
+	p, diags, err := agentproject.Load(agent)
+	if err != nil {
+		fmt.Fprintf(stderr, "tenon %s: %v\n", cmdName, err)
+		return nil, false
+	}
+	if p == nil || diags.HasErrors() {
+		_ = diags.WriteProse(stderr)
+		fmt.Fprintf(stderr, "tenon %s: the agent project is invalid; run tenon apply\n", cmdName)
+		return nil, false
+	}
+	return p, true
+}
+
+// runScheduleTrigger dispatches one occurrence of a named schedule under a
+// caller-owned stable occurrence id. It requires current generated setup, opens
+// a fresh native session for a fresh occurrence, deduplicates a repeated id
+// without opening a harness, and writes exactly one bounded lifecycle line that
+// never contains model text. Any non-completed terminal status exits nonzero.
+func runScheduleTrigger(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("schedule trigger", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	harnessName := fs.String("harness", "", "target harness: claude or codex")
+	workspace := fs.String("workspace", "", "workspace directory (required)")
+	inputID := fs.String("input-id", "", "caller-owned stable occurrence id (required)")
+	turnTimeout := fs.Duration("turn-timeout", 90*time.Second, "per-turn deadline (0 disables)")
+	timeout := fs.Duration("timeout", 2*time.Minute, "whole-process deadline")
+
+	positional, ok := parsePositional(fs, args)
+	if !ok || len(positional) != 2 {
+		fmt.Fprintf(stderr, "tenon schedule trigger: usage: tenon schedule trigger AGENT NAME --workspace DIR --harness <claude|codex> --input-id ID\n")
+		return 2
+	}
+	agent, name := positional[0], positional[1]
+
+	switch *harnessName {
+	case "claude", "codex":
+	default:
+		fmt.Fprintln(stderr, "tenon schedule trigger: --harness must be exactly claude or codex")
+		return 2
+	}
+	if *workspace == "" {
+		fmt.Fprintln(stderr, "tenon schedule trigger: --workspace is required")
+		return 2
+	}
+	if *inputID == "" {
+		fmt.Fprintln(stderr, "tenon schedule trigger: --input-id is required")
+		return 2
+	}
+	if *turnTimeout < 0 {
+		fmt.Fprintln(stderr, "tenon schedule trigger: --turn-timeout must not be negative")
+		return 2
+	}
+	if *timeout <= 0 || *timeout > maxRunTimeout {
+		fmt.Fprintf(stderr, "tenon schedule trigger: --timeout must be greater than 0 and at most %s\n", maxRunTimeout)
+		return 2
+	}
+
+	p, ok := loadScheduleProject(agent, "schedule trigger", stderr)
+	if !ok {
+		return 1
+	}
+	var target *agentproject.Schedule
+	for i := range p.Schedules {
+		if p.Schedules[i].Name == name {
+			target = &p.Schedules[i]
+			break
+		}
+	}
+	if target == nil {
+		fmt.Fprintf(stderr, "tenon schedule trigger: no schedule named %q in this agent\n", name)
+		return 1
+	}
+
+	driver, err := newHarnessDriver(*harnessName)
+	if err != nil {
+		fmt.Fprintln(stderr, "tenon schedule trigger:", err)
+		return 1
+	}
+	// Triggering requires the workspace to carry the applied setup: fail closed
+	// on stale or missing generated setup rather than dispatch against drift.
+	if err := apply.Verify(p, *workspace, *harnessName); err != nil {
+		fmt.Fprintln(stderr, "tenon schedule trigger:", err)
+		return 1
+	}
+	// Take the same exclusive lock the clock uses so a trigger never races a
+	// running clock or a concurrent trigger for the same setup — both would
+	// rewrite the single dispatch file under last-writer-wins. Fail closed if
+	// held; the caller can retry.
+	release, err := schedule.Lock(*workspace, p.Name, *harnessName)
+	if err != nil {
+		fmt.Fprintln(stderr, "tenon schedule trigger:", err)
+		return 1
+	}
+	defer release()
+
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	if err := driver.Verify(ctx); err != nil {
+		fmt.Fprintf(stderr, "tenon schedule trigger: the %s harness could not be verified: %v\n", *harnessName, err)
+		return 1
+	}
+
+	outcome, err := dispatch.RunTask(ctx, dispatch.Options{
+		Project:      p,
+		Driver:       driver,
+		Workspace:    *workspace,
+		Harness:      *harnessName,
+		Conversation: schedule.ConversationID(name),
+		Mode:         dispatch.Task,
+		TurnTimeout:  *turnTimeout,
+	}, *inputID, target.Prompt)
+	if err != nil {
+		fmt.Fprintln(stderr, "tenon schedule trigger:", err)
+		return 1
+	}
+
+	line := fmt.Sprintf("schedule=%q input_id=%q status=%s duplicate=%t",
+		name, *inputID, string(outcome.Status), outcome.Duplicate)
+	if outcome.SessionID != "" {
+		line += fmt.Sprintf(" session_id=%q", outcome.SessionID)
+	}
+	if outcome.Reason != "" {
+		line += fmt.Sprintf(" reason=%q", outcome.Reason)
+	}
+	fmt.Fprintln(stdout, line)
+
+	if outcome.Status != dispatchstate.Completed {
+		return 1
+	}
+	return 0
+}
+
+// runScheduleRun runs the foreground UTC clock for an agent's schedules. It
+// holds exclusive local ownership, requires current generated setup, and drains
+// in-flight occurrences on a stop signal. Lifecycle output goes to stdout and
+// never contains model text.
+func runScheduleRun(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("schedule run", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	harnessName := fs.String("harness", "", "target harness: claude or codex")
+	workspace := fs.String("workspace", "", "workspace directory (required)")
+	turnTimeout := fs.Duration("turn-timeout", 90*time.Second, "per-turn deadline (0 disables)")
+	maxActive := fs.Int("max-active-turns", schedule.DefaultMaxActive, "concurrent occurrences across distinct schedules")
+
+	positional, ok := parsePositional(fs, args)
+	if !ok || len(positional) != 1 {
+		fmt.Fprintf(stderr, "tenon schedule run: exactly one AGENT directory is required\n%s", usage)
+		return 2
+	}
+	agent := positional[0]
+
+	switch *harnessName {
+	case "claude", "codex":
+	default:
+		fmt.Fprintln(stderr, "tenon schedule run: --harness must be exactly claude or codex")
+		return 2
+	}
+	if *workspace == "" {
+		fmt.Fprintln(stderr, "tenon schedule run: --workspace is required")
+		return 2
+	}
+	if *turnTimeout <= 0 {
+		// The clock drains in-flight occurrences on shutdown, and the turn
+		// deadline is their only bound; require a positive one so a hung turn
+		// cannot block shutdown forever.
+		fmt.Fprintln(stderr, "tenon schedule run: --turn-timeout must be positive")
+		return 2
+	}
+	if *maxActive < schedule.MinMaxActive || *maxActive > schedule.MaxMaxActive {
+		fmt.Fprintf(stderr, "tenon schedule run: --max-active-turns must be between %d and %d\n", schedule.MinMaxActive, schedule.MaxMaxActive)
+		return 2
+	}
+
+	p, ok := loadScheduleProject(agent, "schedule run", stderr)
+	if !ok {
+		return 1
+	}
+	driver, err := newHarnessDriver(*harnessName)
+	if err != nil {
+		fmt.Fprintln(stderr, "tenon schedule run:", err)
+		return 1
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	if err := schedule.Run(ctx, schedule.Options{
+		Project:     p,
+		Driver:      driver,
+		Workspace:   *workspace,
+		Harness:     *harnessName,
+		TurnTimeout: *turnTimeout,
+		MaxActive:   *maxActive,
+		Out:         stdout,
+	}); err != nil {
+		fmt.Fprintln(stderr, "tenon schedule run:", err)
 		return 1
 	}
 	return 0

@@ -173,7 +173,11 @@ func TestLoadRejectsOversizedInstructions(t *testing.T) {
 	requireErrorID(t, diags, "instructions.too-large")
 }
 
-func TestLoadRefusesUnimplementedComponents(t *testing.T) {
+// TestLoadAllowsEmptySchedules proves schedules/ is now an implemented,
+// optional component (ADR 0008): an empty schedules/ directory produces no
+// diagnostics and starts no clock. Every recognized component is implemented,
+// so there is no longer an unimplemented component to refuse.
+func TestLoadAllowsEmptySchedules(t *testing.T) {
 	root := writeAgent(t, "agent", validInstructions)
 	if err := os.Mkdir(filepath.Join(root, "schedules"), 0o755); err != nil {
 		t.Fatal(err)
@@ -182,10 +186,12 @@ func TestLoadRefusesUnimplementedComponents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p != nil {
-		t.Fatal("expected refusal: authored behavior must never be silently dropped")
+	if p == nil || diags.HasErrors() {
+		t.Fatalf("an empty schedules/ must be valid: p=%v diags=%v", p, diags.All())
 	}
-	requireErrorID(t, diags, "component.unsupported")
+	if len(p.Schedules) != 0 {
+		t.Fatalf("expected no schedules, got %d", len(p.Schedules))
+	}
 }
 
 // TestLoadAllowsEmptyConnections proves connections/ is now an implemented,

@@ -49,6 +49,9 @@ type Project struct {
 	// Connections are the validated standalone native MCP connections
 	// (ADR 0016), sorted by name.
 	Connections []Connection
+	// Schedules are the validated root schedules/ entries (ADR 0008), sorted
+	// by name. Apply validates and fingerprints them but starts no clock.
+	Schedules []Schedule
 	// HarnessFiles are the validated harness-specific files, keyed by
 	// harness name ("claude", "codex") and sorted by RelPath within each.
 	HarnessFiles map[string][]HarnessFile
@@ -77,12 +80,12 @@ type Instructions struct {
 	Body string
 }
 
-// componentDirs are the recognized authored component directories. Until a
-// component is implemented, its presence fails validation: silently dropping
-// authored behavior would pretend the compiled agent is complete.
-var componentDirs = []string{
-	"schedules",
-}
+// componentDirs are recognized authored component directories that are not yet
+// implemented. Until a component is implemented, its presence fails validation:
+// silently dropping authored behavior would pretend the compiled agent is
+// complete. Every recognized component is now implemented, so this list is
+// empty; it stays as the seam for the next unimplemented component.
+var componentDirs = []string{}
 
 // Load validates the agent project at dir. Contract violations are reported
 // on the diagnostics list; the returned error is reserved for environment
@@ -151,6 +154,9 @@ func Load(dir string) (*Project, *diagnostics.List, error) {
 	connections, connectionInputs := loadConnections(root, pluginServers, diags)
 	p.Connections = connections
 
+	schedules, scheduleInputs := loadSchedules(root, diags)
+	p.Schedules = schedules
+
 	checkNameCollisions(tools, subagents, diags)
 
 	inputs := []sourceInput{
@@ -163,6 +169,7 @@ func Load(dir string) (*Project, *diagnostics.List, error) {
 	inputs = append(inputs, toolInputs...)
 	inputs = append(inputs, harnessInputs...)
 	inputs = append(inputs, connectionInputs...)
+	inputs = append(inputs, scheduleInputs...)
 	p.FingerprintEntries, p.Fingerprint = computeFingerprint(inputs)
 	if diags.HasErrors() {
 		return nil, diags, nil

@@ -172,6 +172,25 @@ key into an error frame is why the reason field is a fixed-vocabulary
 classifier, never raw harness text. The dispatcher no longer double-emits the
 session event — the driver, which alone learns the real session id, owns it.
 
+Schedules, per ADRs 0008/0011 (acceptance item 8): `schedules/NESTED/NAME.md`
+declares one five-field `cron` and a task-prompt body; apply validates and
+fingerprints them under ADR 0013's ceilings and starts no clock. `tenon
+schedule trigger` dispatches one caller-identified occurrence through the
+task path — fresh native session, dedup returning the retained outcome
+without opening a harness, turn-deadline→uncertain — validated live against
+real Claude (a repeated input id returned duplicate with no new turn). `tenon
+schedule run` is a foreground UTC clock: current-minute-only admission with a
+watermark blocking repeats and backward clock movement, no backfill, per-
+schedule no-overlap, bounded concurrency across schedules, an exclusive local
+lock, and graceful drain. cron next-occurrence evaluation uses robfig/cron/v3
+behind internal/cron (its only importer), justified inline in go.mod. Two
+read-only review sub-agents gated the merge and caught three real defects the
+green suite missed — a never-firing cron (Feb 31) spinning the clock
+un-interruptibly, a mid-rune reason truncation that could halt the clock, and
+an unlocked trigger racing the clock on the dispatch file; all three are
+fixed with regression tests, plus a bounded drain and cross-process trigger
+lock.
+
 ## Gaps
 
 The complete [product specification](../product-spec.md) acceptance list, to
