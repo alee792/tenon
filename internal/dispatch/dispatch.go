@@ -309,17 +309,11 @@ func (d *dispatcher) startNextTurn(ctx context.Context) (bool, error) {
 		return false, d.processFailed(head.InputID, err)
 	}
 
-	sessionType := typeSessionStarted
-	sessionID := ""
-	if req.ResumeID != "" {
-		sessionType = typeSessionResumed
-		sessionID = req.ResumeID
-	}
-	if err := d.emit(event{Type: sessionType, InputID: head.InputID, SessionID: sessionID}); err != nil {
-		cancel()
-		session.Close()
-		return false, err
-	}
+	// The driver is authoritative for session.started/resumed: only it learns
+	// the real native session id (from the harness's first streamed frame), so
+	// it emits that event through the turn's event stream. The dispatcher does
+	// not emit its own session event, which would duplicate the driver's and
+	// carry no id on a fresh start.
 	if err := d.emit(event{Type: typeTurnStarted, InputID: head.InputID}); err != nil {
 		cancel()
 		session.Close()

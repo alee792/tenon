@@ -2116,10 +2116,10 @@ func TestInstalledConnectionFakeAmbientValueNeverLeaks(t *testing.T) {
 	}
 }
 
-// TestRunReportsNotYetImplemented proves the run command validates flags and
-// then reports the clear not-yet-implemented error for a real harness, since
-// the protocol drivers land in a later slice.
-func TestRunReportsNotYetImplemented(t *testing.T) {
+// TestRunConstructsRealDriver proves the run command constructs the real Claude
+// driver and dispatches, so it now fails closed against an unapplied workspace
+// rather than reporting a not-yet-implemented error.
+func TestRunConstructsRealDriver(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
 	ws := t.TempDir()
 	var stdout, stderr bytes.Buffer
@@ -2127,8 +2127,11 @@ func TestRunReportsNotYetImplemented(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("run exit = %d, want 1\nstderr: %s", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "headless harness driving is not yet implemented for claude") {
-		t.Fatalf("want not-implemented error, got: %s", stderr.String())
+	if strings.Contains(stderr.String(), "not yet implemented") {
+		t.Fatalf("the real driver is wired; there must be no not-implemented error: %s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "carries no claude apply record") {
+		t.Fatalf("want a fail-closed unapplied-workspace error, got: %s", stderr.String())
 	}
 }
 

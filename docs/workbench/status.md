@@ -154,6 +154,24 @@ real Claude and Codex protocol drivers are the next slice, so `tenon run`
 against a real harness reports "not yet implemented" until then — the
 orchestration itself is fully proven.
 
+Real harness drivers (completing acceptance item 7 end to end): the Claude
+(`claude -p` stream-json) and Codex (`codex app-server` JSON-RPC) drivers
+implement the harness seam and were built against frames captured from the
+live binaries. Pure mapping functions are unit-tested; each driver also has a
+`//go:build harness` real-binary integration test kept out of CI. Validated
+live on this machine: a real Claude turn round-trips through `tenon run`
+(session captured, output streamed, terminal), and two inputs in one run
+prove FIFO, acceptance while a turn is active, session resume, and genuine
+context continuity (turn two recalled a word from turn one). Codex's
+handshake, thread start, session capture, and — critically — its
+credential-safe failure classification are validated live: a real 401 maps to
+`reason=authentication` with the key echoed in the error frame appearing
+nowhere. Codex's successful-turn path is unvalidated pending a local auth fix
+(a stored key returns 401); the driver is complete. A live 401 that leaked a
+key into an error frame is why the reason field is a fixed-vocabulary
+classifier, never raw harness text. The dispatcher no longer double-emits the
+session event — the driver, which alone learns the real session id, owns it.
+
 ## Gaps
 
 The complete [product specification](../product-spec.md) acceptance list, to

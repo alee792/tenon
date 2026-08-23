@@ -25,6 +25,8 @@ import (
 	"github.com/alee792/tenon/internal/dispatch"
 	"github.com/alee792/tenon/internal/friction"
 	"github.com/alee792/tenon/internal/harness"
+	claudeharness "github.com/alee792/tenon/internal/harness/claude"
+	codexharness "github.com/alee792/tenon/internal/harness/codex"
 	"github.com/alee792/tenon/internal/integration"
 	"github.com/alee792/tenon/internal/mcp"
 	"github.com/alee792/tenon/internal/toolruntime"
@@ -576,14 +578,16 @@ func runMCPServe(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 // maxRunTimeout bounds the whole-process deadline a caller may request.
 const maxRunTimeout = 30 * time.Minute
 
-// newHarnessDriver resolves the headless driver for a harness. The real Claude
-// and Codex protocol drivers land in a later slice; until then this fails with
-// a clear, stable error while the dispatcher itself is proven with a fake
-// driver in its own tests.
+// newHarnessDriver resolves the headless driver for a harness: the real Claude
+// Code and Codex protocol drivers, each launching its native executable behind
+// the harness.Driver seam. Codex reports tenon's version to its app-server on
+// initialize.
 func newHarnessDriver(name string) (harness.Driver, error) {
 	switch name {
-	case "claude", "codex":
-		return nil, fmt.Errorf("headless harness driving is not yet implemented for %s", name)
+	case "claude":
+		return claudeharness.NewDriver("claude"), nil
+	case "codex":
+		return codexharness.NewDriver("codex", mcp.Version), nil
 	default:
 		return nil, fmt.Errorf("--harness must be exactly claude or codex")
 	}
@@ -632,16 +636,13 @@ func runRun(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	// The real drivers do not exist yet; fail with a clear, stable message
-	// before loading anything, so the not-yet-implemented boundary is legible.
 	driver, err := newHarnessDriver(*harnessName)
 	if err != nil {
 		fmt.Fprintln(stderr, "tenon run:", err)
 		return 1
 	}
 
-	// Unreachable until a real driver exists, but the wiring is complete: load
-	// the project and dispatch under the whole-process deadline.
+	// Load the project and dispatch under the whole-process deadline.
 	p, diags, err := agentproject.Load(agent)
 	if err != nil {
 		fmt.Fprintln(stderr, "tenon run:", err)
