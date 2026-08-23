@@ -54,6 +54,18 @@ type Project struct {
 	HarnessFiles map[string][]HarnessFile
 	// Fingerprint is "sha256:<hex>" over every authored input.
 	Fingerprint string
+	// FingerprintEntries is every authored input's own contribution to
+	// Fingerprint, sorted by path exactly as the rollup sorts them.
+	FingerprintEntries []FingerprintEntry
+}
+
+// FingerprintEntry is one authored input's own contribution to the project
+// fingerprint: its authored path, its own content hash ("sha256:<hex>"), and
+// whether the authored file carries the executable bit.
+type FingerprintEntry struct {
+	Path       string
+	Hash       string
+	Executable bool
 }
 
 // Instructions is a parsed root instructions.md.
@@ -151,7 +163,7 @@ func Load(dir string) (*Project, *diagnostics.List, error) {
 	inputs = append(inputs, toolInputs...)
 	inputs = append(inputs, harnessInputs...)
 	inputs = append(inputs, connectionInputs...)
-	p.Fingerprint = fingerprint(inputs)
+	p.FingerprintEntries, p.Fingerprint = computeFingerprint(inputs)
 	if diags.HasErrors() {
 		return nil, diags, nil
 	}
@@ -307,15 +319,18 @@ type sourceInput struct {
 	Executable bool
 }
 
-// fingerprint hashes every authored input into one stable identity, sorted
-// by path and covering each input's path, content length, content hash, and
-// executable intent ("x" or "-").
-func fingerprint(inputs []sourceInput) string {
+// computeFingerprint hashes every authored input into one stable identity,
+// sorted by path and covering each input's path, content length, content
+// hash, and executable intent ("x" or "-"). It also returns each sorted
+// input's own contribution, for tenon fingerprint show; the rollup algorithm
+// itself is unchanged by having a caller for the per-file detail.
+func computeFingerprint(inputs []sourceInput) ([]FingerprintEntry, string) {
 	inputs = slices.Clone(inputs)
 	slices.SortFunc(inputs, func(a, b sourceInput) int {
 		return strings.Compare(a.Path, b.Path)
 	})
 	h := sha256.New()
+	entries := make([]FingerprintEntry, 0, len(inputs))
 	for _, in := range inputs {
 		mode := "-"
 		if in.Executable {
@@ -323,6 +338,18 @@ func fingerprint(inputs []sourceInput) string {
 		}
 		contentHash := sha256.Sum256(in.Content)
 		fmt.Fprintf(h, "%s\n%d\n%x\n%s\n", in.Path, len(in.Content), contentHash, mode)
+		entries = append(entries, FingerprintEntry{
+			Path:       in.Path,
+			Hash:       fmt.Sprintf("sha256:%x", contentHash),
+			Executable: in.Executable,
+		})
 	}
-	return fmt.Sprintf("sha256:%x", h.Sum(nil))
+	return entries, fmt.Sprintf("sha256:%x", h.Sum(nil))
+}
+
+// fingerprint returns only the rolled-up identity, for callers that do not
+// need each input's own contribution.
+func fingerprint(inputs []sourceInput) string {
+	_, sum := computeFingerprint(inputs)
+	return sum
 }
