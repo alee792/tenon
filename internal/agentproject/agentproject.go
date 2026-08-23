@@ -63,9 +63,9 @@ type Project struct {
 // fingerprint: its authored path, its own content hash ("sha256:<hex>"), and
 // whether the authored file carries the executable bit.
 type FingerprintEntry struct {
-	Path       string
-	Hash       string
-	Executable bool
+	Path       string `json:"path"`
+	Hash       string `json:"hash"`
+	Executable bool   `json:"executable"`
 }
 
 // Instructions is a parsed root instructions.md.
@@ -345,11 +345,4 @@ func computeFingerprint(inputs []sourceInput) ([]FingerprintEntry, string) {
 		})
 	}
 	return entries, fmt.Sprintf("sha256:%x", h.Sum(nil))
-}
-
-// fingerprint returns only the rolled-up identity, for callers that do not
-// need each input's own contribution.
-func fingerprint(inputs []sourceInput) string {
-	_, sum := computeFingerprint(inputs)
-	return sum
 }

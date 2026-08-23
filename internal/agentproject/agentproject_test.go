@@ -263,8 +263,8 @@ func TestFingerprintTracksContent(t *testing.T) {
 
 func TestFingerprintTracksExecutableBit(t *testing.T) {
 	content := []byte("#!/bin/sh\necho run\n")
-	plain := fingerprint([]sourceInput{{Path: "skills/run.sh", Content: content, Executable: false}})
-	executable := fingerprint([]sourceInput{{Path: "skills/run.sh", Content: content, Executable: true}})
+	_, plain := computeFingerprint([]sourceInput{{Path: "skills/run.sh", Content: content, Executable: false}})
+	_, executable := computeFingerprint([]sourceInput{{Path: "skills/run.sh", Content: content, Executable: true}})
 	if plain == executable {
 		t.Fatal("flipping only the executable bit must change the fingerprint")
 	}

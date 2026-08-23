@@ -7,6 +7,7 @@
 package apply
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/alee792/tenon/internal/agentproject"
 	"github.com/alee792/tenon/internal/diagnostics"
@@ -184,7 +186,7 @@ func ApplyWithTarget(p *agentproject.Project, target Target, driver Driver) (*Re
 		Source:      p.Root,
 		Harness:     driver.Harness(),
 		Fingerprint: p.Fingerprint,
-		GitCommit:   cleanHeadCommit(p.Root),
+		GitCommit:   CleanHeadCommit(p.Root),
 		Files:       map[string]OwnedFile{},
 	}
 	for _, f := range files {
@@ -385,18 +387,27 @@ func hashBytes(b []byte) string {
 	return fmt.Sprintf("sha256:%x", sha256.Sum256(b))
 }
 
-// cleanHeadCommit returns the HEAD commit SHA for dir, but only when dir sits
-// inside a git repository with an empty `git status --porcelain`. Every
-// failure to establish that — git not installed, dir outside any repository,
-// a dirty tree, a repository with no commits yet — is an ordinary miss
-// reported as "", never an error: apply must behave identically for agent
-// sources that are not git repositories.
-func cleanHeadCommit(dir string) string {
-	status, err := exec.Command("git", "-C", dir, "status", "--porcelain").Output()
+// gitQueryBudget bounds each best-effort git query in CleanHeadCommit: a
+// stale lock, a prompting credential helper, or a hung filesystem must not
+// block apply indefinitely.
+const gitQueryBudget = 5 * time.Second
+
+// CleanHeadCommit returns the HEAD commit SHA for dir, but only when dir
+// sits inside a git repository whose dir subtree (never the rest of a
+// larger repository dir may be part of) reports an empty
+// `git status --porcelain`. Every failure to establish that — git not
+// installed, dir outside any repository, a dirty dir subtree, a repository
+// with no commits yet, or a query that exceeds gitQueryBudget — is an
+// ordinary miss reported as "", never an error: apply must behave
+// identically for agent sources that are not git repositories.
+func CleanHeadCommit(dir string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), gitQueryBudget)
+	defer cancel()
+	status, err := exec.CommandContext(ctx, "git", "-C", dir, "status", "--porcelain", "--", ".").Output()
 	if err != nil || len(strings.TrimSpace(string(status))) != 0 {
 		return ""
 	}
-	head, err := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output()
+	head, err := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "HEAD").Output()
 	if err != nil {
 		return ""
 	}

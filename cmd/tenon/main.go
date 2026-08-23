@@ -62,7 +62,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "validate":
 		return runValidate(args[1:], stdout, stderr)
 	case "fingerprint":
-		return runFingerprint(args[1:], stdout, stderr)
+		if len(args) < 2 || args[1] != "show" {
+			fmt.Fprintf(stderr, "tenon fingerprint: the only subcommand is show\n%s", usage)
+			return 2
+		}
+		return runFingerprintShow(args[2:], stdout, stderr)
 	case "mcp":
 		if len(args) < 2 || args[1] != "serve" {
 			fmt.Fprintf(stderr, "tenon mcp: the only subcommand is serve\n%s", usage)
@@ -157,7 +161,10 @@ type validateResult struct {
 }
 
 // applyResult is the jsonl-mode result summary for a successful apply. Field
-// names follow apply.Record's existing json tags (snake_case).
+// names follow apply.Record's existing json tags (snake_case). ManagedTools
+// names only the tools exposed through tenon's managed MCP boundary — native
+// harness tools are never included and always remain unmanaged, regardless
+// of this list's contents.
 type applyResult struct {
 	Agent        string   `json:"agent"`
 	Harness      string   `json:"harness"`
@@ -169,9 +176,11 @@ type applyResult struct {
 }
 
 // writeResult emits one jsonl-mode result summary as a single JSON object
-// followed by a newline, matching WriteJSONL's per-line encoding.
-func writeResult(stdout io.Writer, v any) {
-	_ = json.NewEncoder(stdout).Encode(v)
+// followed by a newline, matching WriteJSONL's per-line encoding. The
+// caller must report a returned error rather than discard it: a broken
+// pipe or write failure here means the promised result was never sent.
+func writeResult(stdout io.Writer, v any) error {
+	return json.NewEncoder(stdout).Encode(v)
 }
 
 // resolveExecutable returns the absolute, symlink-free path of the running
@@ -249,7 +258,10 @@ func runValidate(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if jsonl {
-		writeResult(stdout, validateResult{Agent: p.Name, Fingerprint: p.Fingerprint})
+		if err := writeResult(stdout, validateResult{Agent: p.Name, Fingerprint: p.Fingerprint}); err != nil {
+			fmt.Fprintln(stderr, "tenon validate:", err)
+			return 1
+		}
 	} else {
 		fmt.Fprintf(stdout, "valid: agent %s (fingerprint %s)\n", p.Name, p.Fingerprint)
 	}
@@ -301,7 +313,7 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if jsonl {
-		writeResult(stdout, applyResult{
+		res := applyResult{
 			Agent:        p.Name,
 			Harness:      driver.Harness(),
 			Workspace:    workspace,
@@ -309,7 +321,11 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 			Written:      result.Written,
 			Removed:      result.Removed,
 			ManagedTools: managedTools(p),
-		})
+		}
+		if err := writeResult(stdout, res); err != nil {
+			fmt.Fprintln(stderr, "tenon apply:", err)
+			return 1
+		}
 		return 0
 	}
 	fmt.Fprintf(stdout, "applied: agent %s for %s in %s (fingerprint %s)\n",
@@ -326,23 +342,6 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// runFingerprint dispatches the "tenon fingerprint" subcommands.
-func runFingerprint(args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 || args[0] != "show" {
-		fmt.Fprintf(stderr, "tenon fingerprint: the only subcommand is show\n%s", usage)
-		return 2
-	}
-	return runFingerprintShow(args[1:], stdout, stderr)
-}
-
-// fingerprintEntryJSON is the jsonl rendering of one
-// agentproject.FingerprintEntry.
-type fingerprintEntryJSON struct {
-	Path       string `json:"path"`
-	Hash       string `json:"hash"`
-	Executable bool   `json:"executable"`
-}
-
 // fingerprintRollupJSON is the jsonl rendering of the final rolled-up
 // fingerprint line.
 type fingerprintRollupJSON struct {
@@ -353,7 +352,9 @@ type fingerprintRollupJSON struct {
 // fingerprint — its path, its own content hash, and its executable bit —
 // sorted the same way the rollup sorts them, then the rolled-up fingerprint
 // itself. It never recomputes a hash: agentproject.Load already built the
-// per-file list, and this only renders what Load returned.
+// per-file list, and this only renders what Load returned. Tool preparation
+// runs first, exactly as validate and apply require it, so a project whose
+// tools cannot be built never reports a fingerprint as though it were clean.
 func runFingerprintShow(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("fingerprint show", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -379,20 +380,36 @@ func runFingerprintShow(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "tenon fingerprint show:", err)
 		return 1
 	}
+	if p != nil && !diags.HasErrors() {
+		workspace, err := filepath.Abs(agent)
+		if err != nil {
+			fmt.Fprintln(stderr, "tenon fingerprint show:", err)
+			return 1
+		}
+		cache := ""
+		if len(p.Tools) > 0 {
+			cache, err = os.MkdirTemp("", "tenon-tools-")
+			if err != nil {
+				fmt.Fprintln(stderr, "tenon fingerprint show:", err)
+				return 1
+			}
+			defer os.RemoveAll(cache)
+		}
+		prepareTools(p, workspace, cache, diags)
+	}
 	render(diags, jsonl, stdout, stderr)
 	if p == nil || diags.HasErrors() {
 		return 1
 	}
 
 	if jsonl {
-		enc := json.NewEncoder(stdout)
 		for _, e := range p.FingerprintEntries {
-			if err := enc.Encode(fingerprintEntryJSON{Path: e.Path, Hash: e.Hash, Executable: e.Executable}); err != nil {
+			if err := writeResult(stdout, e); err != nil {
 				fmt.Fprintln(stderr, "tenon fingerprint show:", err)
 				return 1
 			}
 		}
-		if err := enc.Encode(fingerprintRollupJSON{Fingerprint: p.Fingerprint}); err != nil {
+		if err := writeResult(stdout, fingerprintRollupJSON{Fingerprint: p.Fingerprint}); err != nil {
 			fmt.Fprintln(stderr, "tenon fingerprint show:", err)
 			return 1
 		}

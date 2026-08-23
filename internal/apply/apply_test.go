@@ -83,7 +83,7 @@ func TestApplyWritesFilesAndOwnerOnlyRecord(t *testing.T) {
 
 // runGit runs one git command in dir, failing the test on any error. It is
 // the test fixture's own use of git as a subprocess, distinct from the
-// production cleanHeadCommit helper it is exercising.
+// production CleanHeadCommit helper it is exercising.
 func runGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
@@ -530,6 +530,56 @@ func TestApplyRecordsGitCommitForCleanSource(t *testing.T) {
 	got := readTestRecord(t, ws).GitCommit
 	if got != want {
 		t.Fatalf("git commit = %q, want %q", got, want)
+	}
+}
+
+// TestApplyRecordsGitCommitDespiteUnrelatedDirtySibling proves the recorded
+// commit reflects only the agent's own subtree: an uncommitted edit
+// elsewhere in a larger repository must not blank GitCommit for an agent
+// directory that is itself fully committed and clean.
+func TestApplyRecordsGitCommitDespiteUnrelatedDirtySibling(t *testing.T) {
+	// One repository rooted at repo, with the agent living in a subtree
+	// (agents/foo) alongside an unrelated sibling (other-service): the
+	// scenario CleanHeadCommit's pathspec exists to handle correctly.
+	repo := t.TempDir()
+	runGit(t, repo, "init")
+	runGit(t, repo, "config", "user.email", "test@example.com")
+	runGit(t, repo, "config", "user.name", "Tenon Test")
+
+	agentDir := filepath.Join(repo, "agents", "foo")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "instructions.md"), []byte("agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	otherDir := filepath.Join(repo, "other-service")
+	if err := os.MkdirAll(otherDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(otherDir, "bar.go"), []byte("package other\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repo, "add", "agents/foo/instructions.md", "other-service/bar.go")
+	runGit(t, repo, "commit", "-m", "initial")
+	want := strings.TrimSpace(runGit(t, repo, "rev-parse", "HEAD"))
+
+	// An unrelated, uncommitted edit elsewhere in the same repository —
+	// agents/foo itself remains fully committed and clean.
+	if err := os.WriteFile(filepath.Join(otherDir, "bar.go"), []byte("package other\n\nvar x int\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ws := t.TempDir()
+	p := project(t)
+	p.Root = agentDir
+	driver := fakeDriver{files: []GeneratedFile{{Path: "CLAUDE.md", Content: []byte("generated\n")}}}
+	if _, diags, err := Apply(p, ws, testExecutable, driver); err != nil || diags.HasErrors() {
+		t.Fatalf("apply failed: %v %v", err, diags.All())
+	}
+	got := readTestRecord(t, ws).GitCommit
+	if got != want {
+		t.Fatalf("git commit = %q, want %q despite an unrelated dirty sibling directory", got, want)
 	}
 }
 

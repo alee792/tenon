@@ -263,6 +263,21 @@ harness or an improvement loop correcting its own files cannot reliably
 parse prose. The binding requirements are parity with apply, stability of
 the identifiers, and machine readability — not the flag or the framing.
 
+On success, in the same machine-readable mode, both commands emit one
+further JSON object after any diagnostic lines: a result summary carrying
+the agent name and source fingerprint (apply's also carries the harness,
+workspace, and the written/removed/managed-tool lists). This object is
+shaped differently from a diagnostic line — it has no `id`, `path`, or
+`rule` field — so a consumer parsing the diagnostic stream must expect it
+as the stream's final, distinct line rather than mistake it for a
+malformed diagnostic. `tenon fingerprint show AGENT` runs the identical
+tool-preparation gate as validate and apply — a project whose tools cannot
+be built never reports a fingerprint — and in its own machine-readable
+mode emits the same per-file entries that feed the rollup (path, content
+hash, executable bit) followed by one closing object carrying the
+rolled-up fingerprint, in the same "stream of objects, closing summary
+line" shape.
+
 ## Agent manifest
 
 An optional bounded agent manifest (`manifest.json` in the reference

@@ -51,6 +51,7 @@ func generateIntegration(p *agentproject.Project, driver apply.Driver, finalAgen
 		Source:      finalAgentSource,
 		Harness:     driver.Harness(),
 		Fingerprint: p.Fingerprint,
+		GitCommit:   apply.CleanHeadCommit(p.Root),
 		Files:       map[string]apply.OwnedFile{},
 	}
 	for _, f := range files {
