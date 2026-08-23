@@ -11,8 +11,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/alee792/tenon/internal/agentproject"
 	"github.com/alee792/tenon/internal/diagnostics"
@@ -64,12 +66,20 @@ type Driver interface {
 // fingerprint, and the owned state of every generated file. It deliberately
 // carries no timestamps so identical applies are byte-identical.
 type Record struct {
-	Schema      int                  `json:"schema"`
-	Agent       string               `json:"agent"`
-	Source      string               `json:"source"`
-	Harness     string               `json:"harness"`
-	Fingerprint string               `json:"fingerprint"`
-	Files       map[string]OwnedFile `json:"files"`
+	Schema      int    `json:"schema"`
+	Agent       string `json:"agent"`
+	Source      string `json:"source"`
+	Harness     string `json:"harness"`
+	Fingerprint string `json:"fingerprint"`
+	// GitCommit is the source directory's HEAD commit SHA, recorded only
+	// when the source sits inside a git repository with a clean working
+	// tree at apply time. It is best-effort: a missing git, a non-repo
+	// source, or a dirty tree all leave it empty rather than fail or warn
+	// the apply. Its absence from a record written before this field
+	// existed decodes to the same empty value, so no schema bump is
+	// required.
+	GitCommit string               `json:"git_commit,omitempty"`
+	Files     map[string]OwnedFile `json:"files"`
 }
 
 // OwnedFile is the recorded state of one owned generated file: content hash
@@ -174,6 +184,7 @@ func ApplyWithTarget(p *agentproject.Project, target Target, driver Driver) (*Re
 		Source:      p.Root,
 		Harness:     driver.Harness(),
 		Fingerprint: p.Fingerprint,
+		GitCommit:   cleanHeadCommit(p.Root),
 		Files:       map[string]OwnedFile{},
 	}
 	for _, f := range files {
@@ -372,6 +383,24 @@ func readRecord(path string) (*Record, error) {
 
 func hashBytes(b []byte) string {
 	return fmt.Sprintf("sha256:%x", sha256.Sum256(b))
+}
+
+// cleanHeadCommit returns the HEAD commit SHA for dir, but only when dir sits
+// inside a git repository with an empty `git status --porcelain`. Every
+// failure to establish that — git not installed, dir outside any repository,
+// a dirty tree, a repository with no commits yet — is an ordinary miss
+// reported as "", never an error: apply must behave identically for agent
+// sources that are not git repositories.
+func cleanHeadCommit(dir string) string {
+	status, err := exec.Command("git", "-C", dir, "status", "--porcelain").Output()
+	if err != nil || len(strings.TrimSpace(string(status))) != 0 {
+		return ""
+	}
+	head, err := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(head))
 }
 
 // writeAtomic writes content to a same-directory temporary file and renames
