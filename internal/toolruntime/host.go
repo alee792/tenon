@@ -99,6 +99,10 @@ func startHost(language string, cmd *exec.Cmd) (*host, error) {
 	if err != nil {
 		return nil, fmt.Errorf("the %s language host could not be started", language)
 	}
+	// The host leads its own process group so a deadline or session end can
+	// terminate the whole tree, not just a wrapper that has already exec'd a
+	// child holding the stdout pipe open.
+	isolateProcessGroup(cmd)
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("the %s language host could not be started", language)
 	}
@@ -260,9 +264,7 @@ func (h *host) terminate(cause error) error {
 	h.state.Unlock()
 
 	_ = h.stdin.Close()
-	if h.cmd.Process != nil {
-		_ = h.cmd.Process.Kill()
-	}
+	killProcessGroup(h.cmd)
 	return recorded
 }
 
@@ -292,9 +294,7 @@ func (h *host) close() {
 	select {
 	case <-done:
 	case <-time.After(closeGrace):
-		if h.cmd.Process != nil {
-			_ = h.cmd.Process.Kill()
-		}
+		killProcessGroup(h.cmd)
 		<-done
 	}
 }
