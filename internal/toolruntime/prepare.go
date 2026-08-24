@@ -41,9 +41,12 @@ var (
 )
 
 // environmentAllowlist is every inherited variable a language toolchain may
-// see. Anything else is dropped.
+// see. Anything else is dropped. The CA entries let a toolchain find the
+// operator's certificate authority in a proxied or custom-CA environment:
+// SSL_CERT_FILE/SSL_CERT_DIR for the OpenSSL-based tools, and DENO_CERT for
+// Deno, which reads its CA from that variable rather than the SSL_CERT_* pair.
 var environmentAllowlist = []string{
-	"PATH", "HOME", "TMPDIR", "LANG", "SSL_CERT_FILE", "SSL_CERT_DIR", "GOROOT", "GOPATH",
+	"PATH", "HOME", "TMPDIR", "LANG", "SSL_CERT_FILE", "SSL_CERT_DIR", "DENO_CERT", "GOROOT", "GOPATH",
 }
 
 // Prepare materializes and inspects the tool runtime for cfg. It is safe to
