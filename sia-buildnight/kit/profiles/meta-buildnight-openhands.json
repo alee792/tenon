@@ -1,0 +1,7 @@
+{
+  "profile_id": "meta-buildnight-openhands",
+  "name": "Build Night meta/feedback agent (OpenHands — file-based guidance)",
+  "agent_impl": "openhands",
+  "model": "HANDOFF-meta-model-id",
+  "provider_id": "HANDOFF-provider-id"
+}

@@ -21,7 +21,12 @@
 4. **Launch** the command from `HANDOFF.md`.
    - **Mode A**: a single `sia run`; the feedback agent follows the selection
      protocol in `target_agent.py`'s module docstring to hill-climb from the
-     incumbent. Requires a capable meta model — set it in `kit/profiles/`.
+     incumbent. Pick the meta profile by the impl dial (fill model/provider from
+     the setup kit first):
+     - `--meta-agent-profile meta-buildnight-openhands` — OpenHands impl; explores
+       the working dir, so it also uses `GUIDANCE.md` + a `ledger.jsonl` (richer).
+     - `--meta-agent-profile meta-buildnight` — claude impl; relies on the
+       docstring floor. Use a capable model either way.
    - **Mode A+fork**: `git apply fork/orchestrator_incumbent_seed.patch` in the
      SIA checkout first, then the same `sia run`. Deterministic — no reliance on
      the model obeying the docstring.
