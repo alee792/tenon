@@ -64,18 +64,27 @@ def test_best_gen_in_run(tmp_path):
 
 
 # -- triage.recommend decision table --------------------------------------- #
-def test_triage_cheap_parallel_is_posture_b_beam():
+def test_triage_submittable_mode_is_never_b():
+    # Cheap + parallel + re-seed allowed: still submit Mode A, but flag offline scouting.
     rec = triage.recommend(triage.Probe(
-        eval_seconds=10, noise_std=0.001, parallel_ok=True, minutes_left=90))
-    assert rec.posture == "B"
-    assert rec.selector == "beam-hill-climb"
-    assert rec.beam_width >= 3
+        eval_seconds=10, noise_std=0.001, parallel_ok=True, minutes_left=90,
+        reseed_allowed=True))
+    assert rec.mode == "A"          # B is never a submittable recommendation
+    assert rec.scout_offline is True
+
+
+def test_triage_forkable_is_deterministic_mode():
+    rec = triage.recommend(triage.Probe(
+        eval_seconds=300, noise_std=0.001, parallel_ok=False, minutes_left=90,
+        forkable=True))
+    assert rec.mode == "A+fork"
+    assert "git apply" in rec.command("tasks/x")
 
 
 def test_triage_expensive_noisy_is_annealed():
     rec = triage.recommend(triage.Probe(
         eval_seconds=300, noise_std=0.05, parallel_ok=False, minutes_left=90))
-    assert rec.posture == "A"
+    assert rec.mode == "A"
     assert rec.selector == "annealed"
     assert rec.noise_margin > 0.05  # widened past one sigma
 
@@ -83,8 +92,9 @@ def test_triage_expensive_noisy_is_annealed():
 def test_triage_expensive_lownoise_is_greedy():
     rec = triage.recommend(triage.Probe(
         eval_seconds=300, noise_std=0.001, parallel_ok=False, minutes_left=30))
-    assert rec.posture == "A"
+    assert rec.mode == "A"
     assert rec.selector == "greedy"
+    assert rec.scout_offline is False  # re-seed not allowed → no offline scouting
 
 
 def test_triage_bandit_layers_when_many_gens():
@@ -99,4 +109,4 @@ def test_render_handoff_fills_all_placeholders():
     rec = triage.recommend(probe)
     out = triage.render_handoff(probe, rec, "tasks/mychallenge", tmpl)
     assert "{{" not in out  # every placeholder replaced
-    assert "Posture" in out
+    assert "Mode" in out

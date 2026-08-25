@@ -7,14 +7,15 @@ sheet the build agent works from at 5:50._
 - eval time per candidate: **{{EVAL_SECONDS}}s**
 - score noise (std): **{{NOISE_STD}}**
 - parallel runs allowed: **{{PARALLEL}}**
+- repo forkable & submittable: **{{FORKABLE}}**
 - affordable generations in time budget: **{{AFFORDABLE_GENS}}**
 
 ## Decision
-- **Posture {{POSTURE}}**  (A = in-loop guidance, B = outer driver)
-- **Selector: {{SELECTOR}}**
+- **Mode {{MODE}}**  (A = in-loop docstring protocol, A+fork = deterministic incumbent seeding)
+- **Selector: {{SELECTOR}}**  (greedy | annealed)
 - **Strategy bandit layered: {{BANDIT}}**
-- beam width: **{{BEAM_WIDTH}}**
-- noise margin: **{{NOISE_MARGIN}}**
+- **noise margin: {{NOISE_MARGIN}}**
+- **also scout offline (Mode B): {{SCOUT_OFFLINE}}**  (never submitted — folds wins into the seed)
 
 ### Why
 {{RATIONALE}}
@@ -25,6 +26,6 @@ sheet the build agent works from at 5:50._
 ```
 
 ## Fallback
-If the loop stalls (no accepted improvement for ~3 generations), switch to the
-triage second choice: Posture A `annealed` if we were greedy, or drop the beam
-width if we were on Posture B. Keep the incumbent; never restart from scratch.
+If the loop stalls (no accepted improvement for ~3 generations), switch the
+selector (greedy→annealed) or, if the strategy bandit is on, force its top
+untried hypothesis family. Keep the incumbent; never restart from scratch.

@@ -1,17 +1,84 @@
-"""Build Night seed target agent — modular and instrumented.
+r"""
+================================================================================
+PROTOCOL FOR THE IMPROVING AGENT — READ THIS ENTIRE DOCSTRING, EVERY GENERATION
+================================================================================
+You are SIA's feedback agent. SIA embeds this file *verbatim* in your prompt
+every generation, so this docstring — not any side file — is the binding
+contract. A separate GUIDANCE.md would be invisible to you; this is not.
 
-This is the seed SIA's meta/feedback agent studies and iteratively edits. It is
-deliberately structured into small, single-responsibility stages so the feedback
-agent can change ONE stage without breaking unrelated behavior:
+WHY THIS EXISTS
+SIA hands you the PREVIOUS generation's agent and asks you to improve it. But
+the previous generation may have REGRESSED. If you always build on it, one bad
+edit poisons every generation after. Your job each generation is to branch from
+the best agent so far (the "incumbent"), not blindly from the last one — turning
+SIA's linear chain into a hill climb that never steps down.
+
+THE SELECTION PROTOCOL (do these in order, every generation)
+  1. FIND THE INCUMBENT.
+     a. First look at the EXECUTION LOGS you were given: the diagnostic block
+        (stdout `=== DIAGNOSTIC SUMMARY ===` and the file
+        `agent_execution/execution_q-diagnostic.json`) contains an
+        `incumbent` field computed deterministically at runtime — use it when
+        present. It names the best prior generation and its score.
+     b. If it is absent (the run was sandboxed and could not see siblings),
+        READ `context.md` in the run directory: SIA writes every generation's
+        score there. The incumbent is the generation with the highest score.
+  2. CHOOSE YOUR SEED CODE.
+     If the generation you were handed scored BELOW the incumbent, do NOT edit
+     the code you were given. Instead read the incumbent generation's file,
+     `<run_dir>/gen_<M>/target_agent.py`, and improve THAT. If the handed
+     generation IS the incumbent, continue from it. Never build on a regression.
+  3. CHANGE ONE HYPOTHESIS.
+     Pick exactly one edit family (see HYPOTHESIS FAMILIES). Keep the edit local
+     to a single stage function (`load_dataset`, `plan`, `solve_one`,
+     `format_submission`) so unrelated behavior cannot break.
+  4. PRESERVE THE LOAD-BEARING PARTS. These make the next generation able to
+     diagnose and select; deleting them blinds the loop:
+       - the CLI contract: `--dataset_dir` / `--working_dir`;
+       - `from sia_history import surface_incumbent` and the `TrajectoryLogger`
+         calls — keep the instrumentation and the incumbent surfacing intact;
+       - this docstring: keep it at the top of the file, updated but intact.
+  5. RECORD IT IN `improvement.md` (the ONE persistent ledger you are allowed to
+     write — SIA reads prior `improvement.md` files and folds their insights
+     into `context.md`). Use exactly this block so the history is machine- and
+     judge-readable:
+
+         ## Generation <N>
+         - incumbent_gen: <M>
+         - incumbent_score: <S>
+         - seed_gen: <the gen whose code you actually edited>
+         - hypothesis: <one of the HYPOTHESIS FAMILIES>
+         - edit_summary: <one sentence: what you changed and where>
+         - predicted_effect: <why it should raise the score>
+
+HYPOTHESIS FAMILIES (change exactly one per generation)
+  harden-output-parsing   make answer extraction / format_submission robust to
+                          malformed model output
+  self-consistency-voting sample solve_one k times, take a majority / best
+  retry-on-malformed      detect a bad sample result and retry it once
+  restructure-prompt      rewrite the task-model prompt in solve_one
+  decompose-reasoning     split solve_one into explicit sub-steps
+  improve-retrieval       better select / order the context given to solve_one
+  add-verification        a check pass that validates answers before writing
+
+NEVER
+  - Never hard-code answers or fit to specific samples. The score gain must come
+    from a general capability improvement produced by this loop.
+  - Never touch evaluate.py, the dataset, or the ground truth.
+  - Never delete or weaken the logging or the incumbent surfacing.
+
+--------------------------------------------------------------------------------
+IMPLEMENTATION NOTES (for the human wiring this up on the night)
+This seed is deliberately split into small single-responsibility stages so the
+feedback agent can change ONE stage without breaking the rest:
 
     load_dataset -> plan -> solve_one(sample) -> format_submission -> write
 
 Only the task-shaped glue marked `# HANDOFF:` is filled in on the night, from the
-revealed task.md / evaluate.py / dataset. Everything else — the CLI contract, the
-structured logging, the incumbent/ledger awareness — is generic and stays intact.
-
-Runtime deps (anthropic etc.) belong here, never in the algorithms/ library.
-Declare them in this directory's requirements.txt so SIA installs them.
+revealed task.md / evaluate.py / dataset. Runtime deps (anthropic, …) go in this
+directory's requirements.txt so SIA installs them; the pure-stdlib helpers
+(`sia_history`, `observability`) are re-copied pristine into every generation, so
+the feedback agent cannot corrupt them.
 """
 
 from __future__ import annotations
@@ -21,7 +88,8 @@ import json
 import os
 from pathlib import Path
 
-from observability import TrajectoryLogger  # copied alongside this file each gen
+from observability import TrajectoryLogger  # pristine, re-copied each generation
+from sia_history import surface_incumbent   # deterministic incumbent computation
 
 # HANDOFF: set from the setup-kit credentials / provider. Left importable-safe.
 MODEL = os.getenv("TASK_MODEL", "claude-haiku-4-5-20251001")
@@ -45,8 +113,8 @@ def solve_one(client, sample: dict) -> dict:
     """Solve a single sample. Returns {"answer": ..., "confidence": float}.
 
     HANDOFF: fill the prompt and parsing for the revealed task. This is the
-    primary surface the SIA loop will iterate on (prompting, voting, retries,
-    verification — see kit/guidance/GUIDANCE.md hypothesis classes).
+    primary surface the SIA loop iterates on (prompting, voting, retries,
+    verification — see the HYPOTHESIS FAMILIES in the module docstring).
     """
     # HANDOFF: replace with the real task prompt + output parsing.
     prompt = f"Solve the following.\n\n{json.dumps(sample)[:4000]}\n\nAnswer:"
@@ -106,6 +174,13 @@ def main() -> None:
     args = ap.parse_args()
 
     log = TrajectoryLogger(args.working_dir)
+
+    # Deterministic: compute the incumbent from prior generations' results.json
+    # (when this run can see sibling gen dirs) so the feedback agent is handed
+    # the best-so-far generation instead of having to derive it. Returns None
+    # under sandboxing / at gen 1; that path is handled by the protocol above.
+    incumbent = surface_incumbent(args.working_dir)
+
     samples = load_dataset(args.dataset_dir)
     plan(samples)
 
@@ -120,7 +195,7 @@ def main() -> None:
 
     submission = format_submission(results)
     (Path(args.working_dir) / SUBMISSION_FILENAME).write_text(submission, encoding="utf-8")
-    log.finalize()  # writes diagnostic + prints summary to stdout tail
+    log.finalize(extra={"incumbent": incumbent})  # diagnostic + incumbent, always visible
 
 
 if __name__ == "__main__":

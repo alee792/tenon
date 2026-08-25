@@ -110,13 +110,23 @@ class TrajectoryLogger:
             ),
         }
 
-    def finalize(self) -> dict:
+    def finalize(self, extra: dict | None = None) -> dict:
         """Write the diagnostic to the sort-first file AND print it to stdout so
-        it reaches both always-visible feedback channels. Returns the summary."""
+        it reaches both always-visible feedback channels. Returns the summary.
+
+        ``extra`` merges deterministic, non-per-sample facts into the diagnostic —
+        notably ``{"incumbent": {...}}`` from ``sia_history.surface_incumbent``,
+        so the feedback agent is handed the best-so-far generation and its score
+        instead of having to derive them. ``incumbent`` may be None (sandboxed or
+        gen 1); we surface that explicitly so the protocol's fallback is obvious.
+        """
         s = self.summary()
+        if extra:
+            s.update(extra)
         (self.dir / DIAGNOSTIC_FILENAME).write_text(
             json.dumps(s, indent=2), encoding="utf-8"
         )
+        incumbent = (extra or {}).get("incumbent") if extra else None
         # stdout tail — keep it compact (<= 10 lines) and last.
         print("=== DIAGNOSTIC SUMMARY ===")
         print(f"samples={s['total_samples']} failed={s['failed']} "
@@ -124,6 +134,11 @@ class TrajectoryLogger:
         print(f"failures_by_stage={s['failures_by_stage']}")
         print(f"failures_by_error_class={s['failures_by_error_class']}")
         print(f"worst_stage={s['worst_stage']} mean_confidence={s['mean_confidence']}")
+        if incumbent:
+            print(f"INCUMBENT: gen={incumbent.get('gen')} score={incumbent.get('score')} "
+                  f"(branch the next edit from gen_{incumbent.get('gen')} if it beats this run)")
+        else:
+            print("INCUMBENT: none visible here — read context.md for prior scores")
         print(f"HINT: {s['hint']}")
         print("=== END DIAGNOSTIC SUMMARY ===")
         return s

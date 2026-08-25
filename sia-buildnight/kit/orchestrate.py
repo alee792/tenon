@@ -1,4 +1,4 @@
-"""Outer driver — Posture B.
+"""Outer driver — Mode B (offline scouting only; never the submission).
 
 Wraps repeated `sia run` invocations with an incumbent-and-ledger loop SIA
 itself lacks: seed each round from the best-so-far agent, evaluate a beam of
@@ -9,8 +9,9 @@ directories. The selection logic (`evaluate_round`) is pure and unit-tested
 against a fake `sia run`; the subprocess launcher is isolated in `run_sia` so
 tests monkeypatch it exactly as SIA's own tests do.
 
-Use only if the challenge leads confirm re-seeding a new run from an evolved
-agent is allowed (PLAN.md §8). Otherwise use Posture A (guidance-driven).
+Use only for offline scouting, and only if the challenge leads confirm
+re-seeding a new run from an evolved agent is allowed (PLAN.md §8). The submitted
+artifact is always a stock/forked `sia run` (Mode A / A+fork), never this driver.
 """
 
 from __future__ import annotations
@@ -145,7 +146,7 @@ def drive(args) -> None:
 
 
 def build_argparser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(description="SIA Build Night outer driver (Posture B)")
+    ap = argparse.ArgumentParser(description="SIA Build Night outer driver (Mode B — offline scouting)")
     ap.add_argument("--task_dir", required=True)
     ap.add_argument("--workspace", default="./buildnight_workspace")
     ap.add_argument("--runs_root", default="./runs")

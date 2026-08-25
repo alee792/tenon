@@ -1,0 +1,145 @@
+diff --git a/sia/orchestrator.py b/sia/orchestrator.py
+--- a/sia/orchestrator.py
++++ b/sia/orchestrator.py
+@@ -551,6 +551,118 @@
+     return FeedbackContext(execution_status, execution_section).as_tuple()
+ 
+ 
++# --------------------------------------------------------------------------- #
++# SELECTOR FORK: the missing selection step.
++#
++# Upstream SIA derives generation N+1 from generation N no matter how gen N
++# scored, so a regression is carried forward and the best agent ever found is
++# never the one the next edit starts from. These helpers compute the INCUMBENT
++# (best-scoring prior generation) and record an accept/reject decision; the edit
++# to _run_feedback_agent below seeds the feedback agent from that incumbent.
++#
++# Score parsing mirrors sia.context_manager (results.json "accuracy", percentage
++# strings like "48.99%") so the numbers here match SIA's own reporting exactly.
++# Standard library only; no new imports (os, json, datetime, Path, logger, Names
++# are already imported at module top).
++# --------------------------------------------------------------------------- #
++def _parse_gen_score(gen_dir: str) -> float | None:
++    """Parse the primary metric ("accuracy") from a generation's results.json.
++
++    Mirrors sia.context_manager score semantics: read results.json, take the
++    top-level "accuracy", accept percentage strings like "48.99%", and otherwise
++    fall back to the first numeric top-level scalar. Returns None when no score
++    is available (matching upstream's "no structured metrics").
++    """
++    results_path = os.path.join(gen_dir, Names.RESULTS_JSON)
++    if not os.path.exists(results_path):
++        return None
++    try:
++        with open(results_path, encoding="utf-8") as f:
++            data = json.load(f)
++    except (OSError, json.JSONDecodeError):
++        return None
++    if not isinstance(data, dict):
++        return None
++    val = data.get("accuracy")
++    if val is None:
++        for v in data.values():
++            if isinstance(v, (int, float)) and not isinstance(v, bool):
++                return float(v)
++        return None
++    if isinstance(val, bool):
++        return None
++    if isinstance(val, str):
++        try:
++            return float(val.strip().rstrip("%"))
++        except ValueError:
++            return None
++    if isinstance(val, (int, float)):
++        return float(val)
++    return None
++
++
++def _compute_incumbent(run_dir: str, current_gen: int) -> tuple[int, float | None]:
++    """Return (incumbent_gen, incumbent_score): the best-scoring generation in
++    1..current_gen by results.json "accuracy".
++
++    run_generation evaluates the current generation (run_evaluation writes
++    gen_N/results.json) BEFORE calling _run_feedback_agent, so at feedback time
++    gens 1..N all have a results.json and the incumbent over 1..N is well-defined.
++
++    Strict ">" keeps the EARLIER generation on a tie; a run with no scored
++    generations returns (current_gen, None), so behavior collapses to upstream
++    SIA (seed from the current generation).
++    """
++    best_gen = current_gen
++    best_score: float | None = None
++    for gen in range(1, current_gen + 1):
++        score = _parse_gen_score(os.path.join(run_dir, f"gen_{gen}"))
++        if score is None:
++            continue
++        if best_score is None or score > best_score:
++            best_score = score
++            best_gen = gen
++    return best_gen, best_score
++
++
++def _log_selection(
++    run_dir: str,
++    current_gen: int,
++    incumbent_gen: int,
++    current_score: float | None,
++    incumbent_score: float | None,
++    accepted: bool,
++) -> None:
++    """Append one accept/reject decision to <run_dir>/selection_log.jsonl.
++
++    Deterministic analogue of the injection-kit's docstring protocol: a durable
++    record of which generation seeded the next edit and why. Best-effort; a
++    logging failure never fails the run.
++    """
++    delta = None
++    if current_score is not None and incumbent_score is not None:
++        delta = current_score - incumbent_score
++    entry = {
++        "gen": current_gen,
++        "incumbent_gen": incumbent_gen,
++        "current_score": current_score,
++        "incumbent_score": incumbent_score,
++        "delta_vs_incumbent": delta,
++        "accepted": accepted,
++        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
++    }
++    try:
++        with open(os.path.join(run_dir, "selection_log.jsonl"), "a", encoding="utf-8") as f:
++            f.write(json.dumps(entry) + "\n")
++    except OSError as e:
++        logger.warning(f"Could not write selection log: {e}")
++    logger.info(
++        f"  ✓ Selection gen {current_gen}: "
++        f"{'ACCEPT (new incumbent)' if accepted else 'REJECT (revert to incumbent)'}; "
++        f"seeding next edit from incumbent gen {incumbent_gen}"
++    )
++
++
+ def _run_feedback_agent(
+     current_gen: int,
+     max_gen: int,
+@@ -575,9 +687,21 @@
+     # Read the appropriate agent file based on focus mode
+     gen_dir = os.path.join(run_dir, f"gen_{current_gen}")
+     if focus == "weights":
++        # Weights mode chains train.py linearly; incumbent-seeding is harness-only.
+         agent_file = os.path.join(gen_dir, Names.TRAIN_SCRIPT)
+     else:
+-        agent_file = os.path.join(gen_dir, Names.TARGET_AGENT)
++        # SELECTOR FORK: seed the feedback agent from the INCUMBENT (best-scoring
++        # prior generation) instead of always from the current generation. Because
++        # run_generation evaluates gen N before this runs, the incumbent over
++        # gens 1..N is well-defined. This is the selection step SIA lacks: the next
++        # edit branches from the best agent found, not from a possible regression.
++        # Only the file read changes -- the feedback prompt embeds this file's text
++        # verbatim as `agent_py` (prompts.py), so no prompt text is touched.
++        incumbent_gen, incumbent_score = _compute_incumbent(run_dir, current_gen)
++        current_score = _parse_gen_score(gen_dir)
++        accepted = incumbent_gen == current_gen and current_score is not None
++        _log_selection(run_dir, current_gen, incumbent_gen, current_score, incumbent_score, accepted)
++        agent_file = os.path.join(run_dir, f"gen_{incumbent_gen}", Names.TARGET_AGENT)
+ 
+     agent_py = Path(agent_file).read_text(encoding="utf-8")
+     task = Path(dataset_dir, "task.md").read_text(encoding="utf-8")

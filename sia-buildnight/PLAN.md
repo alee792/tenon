@@ -30,8 +30,9 @@ This directly answers the four judging questions:
   behavior?* → modular seed agent with clean stage boundaries (§4.1).
 - *What should persist between iterations?* → the **incumbent** (best-so-far
   agent + score) and an experiment ledger (§4.2).
-- *What guidance helps the improvement agent reason?* → the guidance doc that
-  encodes the selection rule the feedback agent executes (§4.3).
+- *What guidance helps the improvement agent reason?* → the selection protocol
+  in the `target_agent.py` module docstring — the one artifact SIA embeds
+  verbatim in the feedback prompt every generation (§4.3).
 
 ---
 
@@ -49,8 +50,12 @@ What we can touch **without forking core** — confirmed in `hexo-ai/sia`:
 What we **cannot** override without a fork (so we route around it):
 
 - **Meta / feedback prompt text** — locked, golden-master tested
-  (`prompts.py` header). Our guidance rides in via the **seed directory**,
-  which the feedback prompt tells the agent to read.
+  (`prompts.py` header). Our guidance rides in via the **`target_agent.py`
+  module docstring**, which SIA embeds verbatim in the feedback prompt every
+  generation. (The feedback prompt does NOT tell the agent to read the seed
+  directory — only the *meta* prompt does, at gen 1 — so a side file like
+  `GUIDANCE.md` is invisible to the feedback agent. This was confirmed
+  empirically: a small model ignored it.)
 - **The scored `evaluate.py`** — frozen ("fixed evaluation harness"). We never
   touch scoring; all observability comes from the agent's own logs.
 
@@ -62,21 +67,42 @@ show it.
 
 > ⚠️ **Confirm with challenge leads on the night** (§8): whether re-seeding a
 > *new* `sia run` from a previously-evolved agent counts as "produced through
-> the SIA loop." Our default posture (below) does not depend on it.
+> the SIA loop." Our default mode (below) does not depend on it.
 
 ---
 
-## 3. Two postures, chosen at handoff
+## 3. Deployment modes & determinism (keep all options open)
 
-- **Posture A — In-loop selector (default, safest).** Our selection rule ships
-  as guidance + memory files in the seed directory. The feedback agent executes
-  the hill-climb-with-revert itself, inside a single `sia run`. Zero outer
-  scripts, zero rules risk: the gain is produced by the loop.
-- **Posture B — Outer driver (if re-seeding is permitted / evals are cheap &
-  parallel).** `orchestrate.py` runs many short `sia run`s, keeps the incumbent
-  across runs, and fans out a beam. Higher ceiling, needs the §8 ruling.
+We don't know the night's scenario, so the kit ships every mode and picks at
+handoff. All three add the *same* missing selector; they differ only in how much
+of it is deterministic vs. model-guided, and in what the environment must allow.
 
-We pre-build both. The triage judge (§6) recommends which to use.
+- **Mode A — In-loop, injection-only (default; submittable as a stock `sia run`).**
+  The selection protocol lives in the `target_agent.py` module docstring — the
+  one artifact SIA embeds verbatim in the feedback prompt every generation. A
+  capable feedback model executes hill-climb-with-revert; `sia_history.py`
+  computes the incumbent deterministically and hands it over; `context.md` (SIA's
+  own score history) and `improvement.md` (the one ledger the prompt lets the
+  agent write) are the memory. Zero core edits, zero rules risk.
+- **Mode A+fork — In-loop, deterministic (only if the repo is forkable & submittable).**
+  A ~30-line `orchestrator.py` patch makes the feedback agent *provably* seed from
+  the incumbent (ready-to-apply reference in `fork/`). Removes the dependence on
+  model compliance.
+- **Mode B — Outer driver (offline scouting only; NOT submitted).** `orchestrate.py`
+  drives many `sia run`s on our own machine to discover which hypotheses / seed
+  structures help; we fold the winners into the Mode-A scaffold we submit. Needs
+  no ruling because it never touches the submission.
+
+Determinism, honestly — the hard boundary is that the feedback agent is the only
+writer of the next generation's code, so *enforcing* the branch needs the fork:
+
+| Layer | Deterministic without a fork? |
+| --- | --- |
+| Observability + diagnostic summary (the evidence the agent sees) | ✅ always, sandbox-proof |
+| Incumbent *computation* (`sia_history`) | ✅ when the run can read sibling gens (sandbox=none, the default); else falls back to `context.md` |
+| Incumbent *enforcement* (that gen N+1 is actually seeded from it) | ❌ needs Mode A+fork; injection-only relies on a capable feedback model obeying the docstring |
+
+The triage judge (§6) picks the mode + algorithm from what the night allows.
 
 ---
 
@@ -107,40 +133,53 @@ agent studies and edits. Structured for *precise* edits:
 ### 4.2 Persistence — the **incumbent** + ledger convention
 > **Source finding (matters):** `copy_reference_into` (`agent_reference.py:126`)
 > copies the *pristine* seed dir into every generation, so a ledger/incumbent
-> file placed in the seed dir is **reset each generation**. Persistence therefore
-> works differently per posture:
-> - **Posture B (outer driver):** `incumbent.json` + `ledger.jsonl` live at the
->   run-root workspace (outside gen dirs), owned by `orchestrate.py` — never
->   clobbered. `incumbent_agent.py` is copied into the seed dir before each run.
-> - **Posture A (in-loop):** there are no persistent seed-dir data files; the
->   feedback agent **reconstructs** the incumbent by scanning `../gen_*/results.json`
->   for the max score and appends to a run-root `../ledger.jsonl`. GUIDANCE.md
->   spells out the reconstruction.
+> file placed in the seed dir is **reset each generation**, and the locked
+> feedback prompt bars the feedback agent from writing files other than
+> `target_agent.py` + `improvement.md`. Persistence therefore differs by mode:
+> - **Mode A / A+fork (in-loop):** the sanctioned score history is `context.md`
+>   (SIA writes every generation's score + deltas there) and per-gen
+>   `improvement.md` (the feedback agent's ledger, using the fixed schema in the
+>   `target_agent.py` docstring). `sia_history.py` recomputes the incumbent
+>   deterministically from `../gen_*/results.json` when the run can see siblings.
+> - **Mode B (offline scouting, our own process):** `incumbent.json` +
+>   `ledger.jsonl` live at the run-root workspace, owned by `orchestrate.py` —
+>   free to write because it is not the sandboxed in-loop agent.
 
-Ledger schema (both postures): `{gen, hypothesis, edit_summary, score,
+Ledger schema (all modes): `{gen, hypothesis, edit_summary, score,
 delta_vs_incumbent, accepted}` — the experiment history the judges grade and the
-strategy-bandit reads from.
+strategy-bandit reads from. In-loop it is expressed as `improvement.md` blocks;
+offline as `ledger.jsonl` lines.
 
-### 4.3 Guidance — `kit/seed_agent/GUIDANCE.md`
-Lives *inside* the seed/reference dir so it rides into every generation and the
-feedback agent reads it. It is
-The selection rule, written *as instructions the feedback agent will follow*:
-1. Read `incumbent.json` and `ledger.jsonl` before editing.
-2. If the last generation regressed vs the incumbent → **revert** to
-   `incumbent_agent.py` and try a *different* hypothesis class.
-3. If it improved → promote it to the incumbent.
-4. Record `{hypothesis, edit_summary, score, delta, accepted}` to the ledger.
-5. Change one hypothesis at a time; keep edits local to one stage.
+### 4.3 Selection protocol — the `target_agent.py` docstring (NOT a side file)
+The binding guidance lives in the **module docstring of `target_agent.py`**,
+because that file is the only artifact SIA embeds verbatim in the feedback prompt
+every generation. A separate `GUIDANCE.md` is invisible to the feedback agent
+(the prompt never references the seed dir) and was empirically ignored by a small
+model — it is **removed**. Verified working with a capable meta model. The
+docstring encodes, as instructions the feedback agent follows:
+1. **Find the incumbent** — prefer the deterministic `incumbent` field in the
+   diagnostic (from `sia_history`); else read scores from `context.md`.
+2. **Never build on a regression** — if the handed generation scored below the
+   incumbent, edit `<run_dir>/gen_<M>/target_agent.py` (the incumbent) instead.
+3. **Change one hypothesis** (families listed in the docstring); keep it local to
+   one stage.
+4. **Preserve** the CLI contract, the logging, the incumbent surfacing, and the
+   docstring itself.
+5. **Record** the decision in `improvement.md` using a fixed schema — the ONE
+   ledger the locked prompt permits, and one SIA folds into `context.md` next gen.
 
-The active algorithm (§5) is injected by swapping the algorithm's guidance
-block into this file at handoff.
+The forbidden `../ledger.jsonl` / `incumbent.json` writes are gone from the
+in-loop path (the prompt bars the feedback agent from writing extra files); that
+file-based ledger/incumbent store now lives only in `algorithms/` for Mode B and
+the fork. `DESIGN.md` orients the meta agent at gen 1 (which *does* read the seed
+dir) and points it at the docstring as the source of truth.
 
 ### 4.4 Profiles — `kit/profiles/`
 `target-buildnight.json` (points `agent_reference` at `kit/seed_agent/`) and a
 `meta-buildnight.json`. Model/provider fields are filled from the setup kit
 credentials at handoff (deferred — see §7).
 
-### 4.5 Outer driver — `kit/orchestrate.py` (Posture B)
+### 4.5 Outer driver — `kit/orchestrate.py` (Mode B, offline scouting)
 CLI wrapper: maintain incumbent across runs, launch N `sia run`s (beam width),
 parse `runs/run_*/gen_*/results.json`, promote the argmax, repeat until the time
 budget. Reuses the exact accuracy-parsing from SIA's `context_manager.py`
@@ -157,6 +196,14 @@ completes, and our profile resolves. Run during the 5:00 PM setup window.
 ---
 
 ## 5. The three algorithms (one interface, `algorithms/base.py`)
+
+**Scope note.** A single stock `sia run` (Mode A) is inherently *single-track*:
+SIA owns the generation loop, so the in-loop selector is greedy hill-climb (or
+annealed) encoded in the docstring, plus the bandit for hypothesis choice. The
+`algorithms/` library is the **executable reference** for that logic and the
+engine for Mode B (offline scouting) and the fork — it is what the docstring
+protocol mirrors, so our numbers match across modes. **Parallel beam (width > 1)
+is Mode B / fork only**; it cannot run inside one `sia run`.
 
 Common interface: given the ledger + the set of evaluated candidates so far, a
 selector answers two questions — **which agent to seed the next edit from**, and
@@ -208,15 +255,16 @@ Decision table (encoded, not vibes):
 
 | Observation | Recommendation |
 | --- | --- |
-| cheap eval **and** parallel sandbox | Posture B outer driver, **beam** width 3–4 |
-| expensive eval, low noise | Posture A, **greedy hill climb** (beam=1) |
-| expensive eval, high noise | Posture A, **annealed** + large noise margin |
-| ≥ ~15 affordable gens, signal that edit-family matters | layer **strategy-bandit** on top |
+| repo forkable & submittable | **Mode A+fork** — deterministic incumbent seeding |
+| stock `sia run` only, capable model, low noise | **Mode A**, greedy hill-climb docstring |
+| stock `sia run` only, high noise | **Mode A**, annealed variant + large noise margin |
+| ≥ ~15 affordable gens, edit-family matters | layer the **strategy-bandit** hypothesis choice |
+| cheap eval **and** parallel runs allowed | also run **Mode B offline** to scout, fold wins into the seed |
 
-Output: a filled-in `HANDOFF.md` naming the posture, algorithm, hyperparameters
-(K, B, noise margin, cooling), the exact `sia run` / `orchestrate.py` command,
-and the guidance block to drop into `GUIDANCE.md`. That doc is the single thing
-we hand to the build agent at 5:50.
+Output: a filled-in `HANDOFF.md` naming the mode, algorithm, hyperparameters
+(noise margin, cooling, bandit on/off), the exact `sia run` command (and, for the
+fork, the `git apply` line), and the docstring-protocol variant to load into the
+seed. That doc is the single thing we hand to the build agent at 5:50.
 
 > This triage step is itself a submission highlight: "we don't guess the search
 > strategy, we measure the environment and let a judge select it."
@@ -244,23 +292,26 @@ credentials, mirrors the repo's own test posture).
   to satisfy that contract, keeping all logging and stage boundaries intact."
 - `P3_run_triage.md` — "run `kit/triage.py`, paste its HANDOFF.md, and start the
   chosen loop."
-- `P4_supervise.md` — "watch the ledger; enforce the guidance rule; if the loop
-  stalls N gens, switch to the triage's second-choice algorithm."
+- `P4_supervise.md` — "watch `context.md` / `improvement.md`; confirm the feedback
+  agent is branching from the incumbent (docstring protocol); if the loop stalls
+  N gens, switch to the triage's second-choice algorithm."
 
 ---
 
 ## 8. Open questions to resolve on the night (with challenge leads)
 
 1. Is re-seeding a new `sia run` from a previously-evolved agent allowed
-   (Posture B)? If no → Posture A only.
+   (enables Mode B offline scouting)? If no → skip Mode B; Mode A/A+fork still ship.
 2. May the seed agent emit extra diagnostic files beyond the submission, and are
    any output-size caps enforced?
 3. Concurrency: are parallel `sia run`s / parallel evals permitted on the
    provided compute?
-4. Is the provided repo forkable (could we edit `orchestrator.py` for the clean
-   incumbent-seeding patch), or scaffold-only?
+4. Is the provided repo forkable **and submittable** (enables Mode A+fork — the
+   deterministic incumbent-seeding patch, ready in `fork/`), or scaffold-only?
 
-Answers set posture (§3) and algorithm (§6). The kit runs under either ruling.
+Answers set the mode (§3) and algorithm (§6). The kit runs under any ruling:
+stock `sia run` → Mode A; forkable → Mode A+fork; either way Mode B can scout
+offline. This is why we keep all three paths open rather than betting on one.
 
 ---
 
@@ -285,20 +336,24 @@ sia-buildnight/
   PLAN.md                     ← this file
   kit/
     seed_agent/               ← reference dir (copied into every generation)
-      target_agent.py         ← modular instrumented seed (§4.1)
+      target_agent.py         ← modular seed; docstring carries the protocol (§4.1, §4.3)
       observability.py        ← TrajectoryLogger + diagnostic summary (§4.1)
-      GUIDANCE.md             ← selection rule the feedback agent runs (§4.3)
+      sia_history.py          ← deterministic incumbent computation (§4.2)
+      DESIGN.md               ← gen-1 orientation for the meta agent (§4.3)
       requirements.txt        ← seed runtime deps
     profiles/                 ← drop-in SIA profile JSON (§4.4)
     prompts/                  ← P1–P4 handoff prompts (§7)
-    orchestrate.py            ← outer driver, Posture B (§4.5)
+    orchestrate.py            ← outer driver, Mode B offline scouting (§4.5)
     triage.py                 ← handoff judge (§6)
     preflight.sh              ← setup-window checks (§4.8)
     HANDOFF.md.tmpl           ← template triage fills in
-  algorithms/
-    base.py                   ← Selector interface + ledger/incumbent (§5)
-    beam_hill_climb.py
+  algorithms/                 ← selector reference for Mode B + the fork (§5)
+    base.py                   ← Selector interface + ledger/incumbent
+    beam_hill_climb.py        ← (beam = Mode B / fork only)
     annealed.py
     strategy_bandit.py
+  fork/                       ← Mode A+fork reference (apply only if permitted)
+    FORK_PATCH.md
+    orchestrator_incumbent_seed.patch
   tests/                      ← credential-free, fake `sia run`
 ```
