@@ -13,10 +13,11 @@ If any of these stops being true, the product is no longer tenon:
    person can read, review, and diff — never a second inventory or a
    surface the author must mentally model but cannot read.
 2. **The harness owns intelligence; tenon owns the crossing.** Tenon compiles
-   one portable source of truth into native integration, proves it valid
+   one portable source of truth into native integration — including
+   configuration it injects into the harness's own files — proves it valid
    before it touches a workspace, and detects drift afterward. It never
-   absorbs model loops, context, approvals, interactive UX, or runtime
-   supervision.
+   absorbs model loops, context, approval enforcement, interactive UX, or
+   runtime supervision.
 3. **Nothing mutates a workspace unvalidated, and trust stays with the
    author.** Tenon proves contracts, never behavior, and never claims
    enforcement or safety it cannot deliver.
