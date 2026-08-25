@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+kit/HANDOFF.md
+buildnight_workspace/
+runs/

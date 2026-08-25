@@ -1,0 +1,5 @@
+# Runtime deps for the seed target_agent.py. SIA installs these before running
+# the target agent (orchestrator: install_requirements on gen requirements.txt).
+# HANDOFF: add task-specific deps (pandas, numpy, scikit-learn, …) as needed.
+anthropic>=0.40
+python-dotenv>=1.0

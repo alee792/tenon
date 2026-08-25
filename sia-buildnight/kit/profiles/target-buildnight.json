@@ -1,0 +1,10 @@
+{
+  "profile_id": "target-buildnight",
+  "name": "Build Night target (instrumented seed)",
+  "model": "HANDOFF-task-model-id",
+  "provider_id": "HANDOFF-provider-id",
+  "agent_reference": {
+    "source": "../kit/seed_agent/",
+    "entrypoint": "target_agent.py"
+  }
+}

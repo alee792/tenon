@@ -1,0 +1,7 @@
+{
+  "profile_id": "meta-buildnight",
+  "name": "Build Night meta/feedback agent",
+  "agent_impl": "claude",
+  "model": "HANDOFF-meta-model-id",
+  "provider_id": "HANDOFF-provider-id"
+}

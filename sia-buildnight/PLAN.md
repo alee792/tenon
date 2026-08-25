@@ -105,14 +105,25 @@ agent studies and edits. Structured for *precise* edits:
   them into the first trajectory slot so the feedback agent always sees them.
 
 ### 4.2 Persistence — the **incumbent** + ledger convention
-Shipped in the seed dir, copied forward every generation:
-- `incumbent_agent.py` — best-scoring agent so far (seeded = generation 1).
-- `incumbent.json` — `{gen, score, metric_name, timestamp}`.
-- `ledger.jsonl` — one line per generation: `{gen, hypothesis, edit_summary,
-  score, delta_vs_incumbent, accepted}`. This is the experiment history the
-  judges grade on and the strategy-bandit reads from.
+> **Source finding (matters):** `copy_reference_into` (`agent_reference.py:126`)
+> copies the *pristine* seed dir into every generation, so a ledger/incumbent
+> file placed in the seed dir is **reset each generation**. Persistence therefore
+> works differently per posture:
+> - **Posture B (outer driver):** `incumbent.json` + `ledger.jsonl` live at the
+>   run-root workspace (outside gen dirs), owned by `orchestrate.py` — never
+>   clobbered. `incumbent_agent.py` is copied into the seed dir before each run.
+> - **Posture A (in-loop):** there are no persistent seed-dir data files; the
+>   feedback agent **reconstructs** the incumbent by scanning `../gen_*/results.json`
+>   for the max score and appends to a run-root `../ledger.jsonl`. GUIDANCE.md
+>   spells out the reconstruction.
 
-### 4.3 Guidance — `kit/guidance/GUIDANCE.md`
+Ledger schema (both postures): `{gen, hypothesis, edit_summary, score,
+delta_vs_incumbent, accepted}` — the experiment history the judges grade and the
+strategy-bandit reads from.
+
+### 4.3 Guidance — `kit/seed_agent/GUIDANCE.md`
+Lives *inside* the seed/reference dir so it rides into every generation and the
+feedback agent reads it. It is
 The selection rule, written *as instructions the feedback agent will follow*:
 1. Read `incumbent.json` and `ledger.jsonl` before editing.
 2. If the last generation regressed vs the incumbent → **revert** to
@@ -273,8 +284,11 @@ Answers set posture (§3) and algorithm (§6). The kit runs under either ruling.
 sia-buildnight/
   PLAN.md                     ← this file
   kit/
-    seed_agent/               ← modular instrumented target agent (§4.1)
-    guidance/GUIDANCE.md      ← selection rule the feedback agent runs (§4.3)
+    seed_agent/               ← reference dir (copied into every generation)
+      target_agent.py         ← modular instrumented seed (§4.1)
+      observability.py        ← TrajectoryLogger + diagnostic summary (§4.1)
+      GUIDANCE.md             ← selection rule the feedback agent runs (§4.3)
+      requirements.txt        ← seed runtime deps
     profiles/                 ← drop-in SIA profile JSON (§4.4)
     prompts/                  ← P1–P4 handoff prompts (§7)
     orchestrate.py            ← outer driver, Posture B (§4.5)
