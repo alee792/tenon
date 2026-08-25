@@ -77,23 +77,70 @@ Rules the guidance should enforce (ACE + metacognitive-reflection literature):
 - **Separate principle from procedure** — note both the general lesson and the
   concrete edit (metacognitive-reflection framing).
 
-## On "MCE"
+## MCE — Meta Context Engineering (the separation principle)
 
-I could not resolve **MCE** to a specific published RSI/reflection framework —
-it did not surface in search. The nearest metacognitive-reflection work, if one
-of these is what you meant:
-- **MARS — Metacognitive Agent with Reflective Self-improvement** (principle +
-  procedural learning in one recurrence cycle).
-- **"Learn Like Humans: Use Meta-cognitive Reflection for Efficient
-  Self-Improvement"** (arXiv 2601.11974).
-- **Meta-Policy Reflexion** (arXiv 2509.03990) — reusable reflective memory +
-  rule admissibility.
+**MCE = bi-level co-evolution: separate the context *mechanism* from the context
+*content*.** The mechanism (context *skills* — *how* the agent reflects, selects,
+and manages memory) evolves independently of the content (context *artifacts* —
+*what* it stores/edits: the code, the playbook). The point is to **avoid
+conflating procedural improvement with artifact growth** — don't let "how I
+improve" degrade every time you edit "what I produced."
 
-Tell me which (or the real expansion of MCE) and I'll fold its specifics in.
+Mapping to SIA:
+- **Mechanism (meta-layer)** = our selection/reflection protocol — the
+  `target_agent.py` docstring + `GUIDANCE.md`. This is a *skill*; keep it stable
+  and separately versioned. It should NOT be rewritten as a side effect of editing
+  the agent's task code.
+- **Content (artifacts)** = `target_agent.py`'s strategy code + the itemized
+  playbook (`improvement.md` / `PLAYBOOK.md`). These evolve freely.
+
+The default SIA loop conflates the two: every generation the feedback agent both
+rewrites the code and re-derives its reflection prose, with nothing protecting the
+method. MCE says: freeze the method layer, evolve the content layer. For us that
+is almost free — we already tell the agent to preserve the docstring; make the
+separation explicit and version the meta-layer.
+
+## High-yield, low-effort changes given SIA's constraints
+
+Ranked for a <2h, ~6–10-generation sprint. All are prompt/format/convention
+changes — no fork, no new tooling.
+
+1. **[MCE] Freeze + version the meta-layer.** Put a `PROTOCOL vN` line at the top
+   of the docstring/`GUIDANCE.md`; rule: "never edit the protocol while editing
+   task code." Separates mechanism from content. *Effort: trivial. Yield: high —
+   stops method drift over generations.*
+2. **[ACE] Itemized delta playbook, not prose.** Replace the free-form
+   `improvement.md` with tagged bullets (`[Strategy]`/`[Mistake]`/`[Tool]`), each
+   with an ID, the evidence, and the score outcome; **carry forward and
+   delta-update — never rewrite.** *Effort: a schema. Yield: high — directly fixes
+   SIA's context-collapse + brevity-bias exposure (it rewrites `improvement.md`
+   fresh each gen and summarizes via `_generate_llm_summary`).*
+3. **[Reflexion + rule admissibility] Don't repeat rejected hypotheses.** Before
+   proposing, scan the playbook; skip anything marked `REJECTED`; promote to
+   `VALIDATED` only after a measured score gain. *Effort: a rule. Yield: high —
+   SIA has no selector, so it otherwise re-tries known-bad edits and burns
+   generations.*
+4. **[STOP] Explicit editable-region markers.** A crisp `FROZEN ABOVE / EDITABLE
+   BELOW` banner in `target_agent.py` around the strategy region (CLI, logging,
+   incumbent surfacing, docstring stay frozen). *Effort: comments. Yield: high —
+   keeps edits local; hits the judges' "precise changes without breaking unrelated
+   behavior" criterion.*
+5. **[Self-Harness Pareto] Put cost in the ledger.** Log per-hypothesis
+   token/latency cost (observability already captures `latency_ms`); the agent /
+   bandit then avoids expensive-low-gain tactics (e.g. k-sample voting that cost
+   3× for −0.4). *Effort: one field. Yield: medium-high under an eval budget.*
+
+Deliberately **out of the low-effort set** (higher effort or low yield at this
+scale): evolutionary population / Pareto harness search (= beam / Mode B / fork);
+held-in/held-out regression splitting (the eval is external and frozen); and
+aggressive curator de-dup (context bloat is minor over ~8 generations — a single
+"merge duplicates, cap at N" line is enough).
 
 ## Sources
-- ACE: https://arxiv.org/abs/2510.04618
-- Reflexion (foundational verbal self-reflection): the origin of outcome-grounded
-  textual reflection loops.
-- Meta-Policy Reflexion: https://arxiv.org/pdf/2509.03990
-- "Learn Like Humans" (metacognitive reflection): https://arxiv.org/pdf/2601.11974
+- ACE — Agentic Context Engineering: https://arxiv.org/abs/2510.04618
+- Lil'Log, "Harness Engineering for Self-Improvement" (Weng, 2026) — surveys ACE,
+  MCE, Meta-Harness, Self-Harness, ADAS; the three harness patterns
+  (execute-test-iterate, file system as memory, sub-agent spawning).
+- Reading list: github.com/leezythu/Awesome-Harness-Self-Improvement
+- Meta-Policy Reflexion (reusable memory + rule admissibility):
+  https://arxiv.org/pdf/2509.03990
