@@ -2,19 +2,23 @@
 
 SIA copies this directory into the meta agent's working directory at generation
 1 and tells it to read the files before writing the first `target_agent.py`. This
-note orients that first build. It is **not** the binding contract for later
-generations — the feedback agent never receives this file.
+note orients that first build.
 
-> **The binding protocol for every generation lives in the module docstring at
-> the top of `target_agent.py`.** That file is the only artifact SIA embeds
-> verbatim in the feedback prompt each generation, so all durable guidance must
-> live there. Keep that docstring intact and at the top of the file.
+> **The always-in-context protocol lives in the module docstring at the top of
+> `target_agent.py`.** That file is the one artifact SIA embeds verbatim in the
+> feedback prompt every generation, so it is the guidance floor that works with
+> any implementation. `GUIDANCE.md` carries the same protocol in more detail; the
+> feedback prompt does not point at it, but agentic implementations that explore
+> their working directory (e.g. OpenHands) discover and follow it. Keep the two in
+> sync. Minimal implementations rely on the docstring alone.
 
 ## Files in this seed
 
 - `target_agent.py` — the agent to build and iterate. Modular stages
   (`load_dataset → plan → solve_one → format_submission → write`) so edits stay
   local. Its docstring carries the selection protocol and hypothesis families.
+- `GUIDANCE.md` — the same selection protocol in more detail, for agentic impls
+  that explore the working dir. Keep it consistent with the docstring.
 - `observability.py` — pristine, re-copied every generation. Per-sample failure
   taxonomy + an aggregate diagnostic written to both always-visible channels
   (stdout tail and a sort-first `execution_q-diagnostic.json`). Do not inline it
