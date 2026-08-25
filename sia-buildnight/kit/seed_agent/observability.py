@@ -26,6 +26,31 @@ from typing import Any
 EXECUTION_DIRNAME = "agent_execution"
 DIAGNOSTIC_FILENAME = "execution_q-diagnostic.json"  # sorts before execution_q0.json
 
+# A sample slower than this is flagged as an efficiency risk. Some SIA challenges
+# score partly on runtime, so latency is a first-class signal, not a footnote.
+DEFAULT_LATENCY_BUDGET_MS = 20_000.0
+EXEMPLARS_PER_CLUSTER = 2          # concrete failing cases per cluster
+MAX_CLUSTERS = 4                   # keep the diagnostic small (SIA size-caps it)
+_FIELD_TRUNC = 240                 # cap any single expected/got string
+
+
+def _truncate(val: Any, limit: int = _FIELD_TRUNC) -> Any:
+    """Shorten long strings so the diagnostic stays inside SIA's size cap while
+    still carrying a readable exemplar."""
+    if isinstance(val, str) and len(val) > limit:
+        return val[:limit] + f"…(+{len(val) - limit} chars)"
+    return val
+
+
+def _percentile(sorted_vals: list[float], pct: float) -> float | None:
+    if not sorted_vals:
+        return None
+    k = (len(sorted_vals) - 1) * pct
+    lo = int(k)
+    hi = min(lo + 1, len(sorted_vals) - 1)
+    frac = k - lo
+    return round(sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * frac, 2)
+
 
 class SampleRecord(dict):
     """One sample's structured trace. A dict subclass so it JSON-dumps cleanly
@@ -73,10 +98,12 @@ class TrajectoryLogger:
         log.finalize()
     """
 
-    def __init__(self, working_dir: str | Path):
+    def __init__(self, working_dir: str | Path,
+                 latency_budget_ms: float = DEFAULT_LATENCY_BUDGET_MS):
         self.dir = Path(working_dir) / EXECUTION_DIRNAME
         self.dir.mkdir(parents=True, exist_ok=True)
         self.records: list[SampleRecord] = []
+        self.latency_budget_ms = latency_budget_ms
 
     # Context manager per sample so a crash is captured as a failure record,
     # never lost — robustness the feedback agent can see and fix.
@@ -114,11 +141,80 @@ class TrajectoryLogger:
             "total_latency_ms": round(sum(latencies), 1) if latencies else None,
             "mean_latency_ms": round(sum(latencies) / len(latencies), 1) if latencies else None,
             "total_tokens": int(sum(token_counts)) if token_counts else None,
+            # Concrete failing cases, grouped, so the feedback agent sees WHAT to
+            # fix — not just counts. SIA's own first-3 trajectory window is
+            # positional; these are chosen for being informative.
+            "clusters": self._clusters(failed),
+            # Calibration: are low-confidence samples the ones going wrong, and is
+            # confidence even a live signal or a hardcoded constant?
+            "confidence": self._confidence_signal(),
+            # Efficiency: p50/p95 and the count of samples over budget (complements
+            # the total/mean latency above with distribution + a budget breach count).
+            "latency": self._latency_signal(),
             "hint": (
                 f"Most failures are in the '{by_stage.most_common(1)[0][0]}' stage "
                 f"({by_stage.most_common(1)[0][1]}/{len(failed)}); focus there."
-                if by_stage else "No failures recorded; look for low-confidence correct samples."
+                if by_stage else "No failures recorded; if the score is still low the "
+                "failures are SEMANTIC (wrong answers a crash taxonomy can't see) — "
+                "reach for reasoning families and wire confidence to a real signal."
             ),
+        }
+
+    def _clusters(self, failed: list[SampleRecord]) -> list[dict]:
+        """Group failures by (stage, error_class) and attach a few real
+        exemplars per cluster, biggest cluster first."""
+        buckets: dict[tuple[str, str], list[SampleRecord]] = {}
+        for r in failed:
+            key = (r.get("stage", "?"), r.get("error_class") or "?")
+            buckets.setdefault(key, []).append(r)
+        ranked = sorted(buckets.items(), key=lambda kv: len(kv[1]), reverse=True)
+        out: list[dict] = []
+        for (stage, error_class), recs in ranked[:MAX_CLUSTERS]:
+            out.append({
+                "stage": stage,
+                "error_class": error_class,
+                "count": len(recs),
+                "examples": [
+                    {
+                        "sample_id": r.get("sample_id"),
+                        "expected": _truncate(r.get("expected")),
+                        "got": _truncate(r.get("got")),
+                        "notes": _truncate(r.get("notes")),
+                    }
+                    for r in recs[:EXEMPLARS_PER_CLUSTER]
+                ],
+            })
+        return out
+
+    def _confidence_signal(self) -> dict:
+        vals = [r.get("confidence") for r in self.records
+                if isinstance(r.get("confidence"), (int, float))]
+        if not vals:
+            return {"available": False, "degenerate": True,
+                    "note": "no confidence logged — solve_one must return one"}
+        lo = sum(1 for v in vals if v < 0.34)
+        mid = sum(1 for v in vals if 0.34 <= v < 0.67)
+        hi = sum(1 for v in vals if v >= 0.67)
+        degenerate = len(set(round(v, 4) for v in vals)) == 1
+        return {
+            "available": True,
+            "degenerate": degenerate,
+            "buckets": {"low<0.34": lo, "mid": mid, "high>=0.67": hi},
+            "note": ("confidence is a constant — wire it to logprobs / vote "
+                     "agreement so low-confidence samples become actionable"
+                     if degenerate else
+                     f"{lo} low-confidence samples are the best retry/vote targets"),
+        }
+
+    def _latency_signal(self) -> dict:
+        vals = sorted(r.get("latency_ms") for r in self.records
+                      if isinstance(r.get("latency_ms"), (int, float)))
+        over = sum(1 for v in vals if v > self.latency_budget_ms)
+        return {
+            "budget_ms": self.latency_budget_ms,
+            "p50_ms": _percentile(vals, 0.50),
+            "p95_ms": _percentile(vals, 0.95),
+            "over_budget": over,
         }
 
     def finalize(self, extra: dict | None = None) -> dict:
@@ -137,21 +233,39 @@ class TrajectoryLogger:
         (self.dir / DIAGNOSTIC_FILENAME).write_text(
             json.dumps(s, indent=2), encoding="utf-8"
         )
-        incumbent = (extra or {}).get("incumbent") if extra else None
-        # stdout tail — keep it compact (<= 10 lines) and last.
+        extra = extra or {}
+        incumbent = extra.get("incumbent")
+        rec = extra.get("recommended_hypothesis") or {}
+        cross = extra.get("cross_gen") or {}
+        delta = cross.get("failure_delta")
+        pred = cross.get("prediction_check")
+        # stdout tail — SIA shows only the last ~10 lines, so print the most
+        # actionable signals last. Full detail lives in the diagnostic JSON.
         print("=== DIAGNOSTIC SUMMARY ===")
         print(f"samples={s['total_samples']} failed={s['failed']} "
               f"success_rate={s['success_rate']}")
         print(f"failures_by_stage={s['failures_by_stage']}")
         print(f"failures_by_error_class={s['failures_by_error_class']}")
         print(f"worst_stage={s['worst_stage']} mean_confidence={s['mean_confidence']}")
+        lat = s.get("latency", {})
         print(f"COST: total_tokens={s['total_tokens']} total_latency_ms={s['total_latency_ms']} "
-              f"mean_latency_ms={s['mean_latency_ms']}")
+              f"| latency p50={lat.get('p50_ms')}ms p95={lat.get('p95_ms')}ms "
+              f"over_budget={lat.get('over_budget')}")
         if incumbent:
             print(f"INCUMBENT: gen={incumbent.get('gen')} score={incumbent.get('score')} "
                   f"(branch the next edit from gen_{incumbent.get('gen')} if it beats this run)")
         else:
             print("INCUMBENT: none visible here — read context.md for prior scores")
+        if delta:
+            print(f"DELTA vs gen_{delta.get('prev_gen')}: "
+                  f"new_failures={delta.get('new_failure_classes')} "
+                  f"cleared={delta.get('cleared_failure_classes')}")
+        if pred:
+            print(f"LAST PREDICTION ({pred.get('hypothesis')}): "
+                  f"predicted improvement, actual_delta={pred.get('actual_delta')} "
+                  f"→ {'held' if pred.get('held') else 'FAILED — revert & change family'}")
+        if rec.get("family"):
+            print(f"RECOMMEND: try '{rec['family']}' — {rec.get('reason')}")
         print(f"HINT: {s['hint']}")
         print("=== END DIAGNOSTIC SUMMARY ===")
         return s

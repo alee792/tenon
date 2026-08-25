@@ -128,13 +128,43 @@ agent studies and edits. Structured for *precise* edits:
 - a task-model client seam (`solve_one`) left as the one obvious hook for the
   improvement agent to iterate on.
 
-`kit/seed_agent/observability.py` — the logging library:
+`kit/seed_agent/observability.py` — the within-generation logging library:
 - `TrajectoryLogger` (multi-sample, one file per sample, matching SIA's
   `agent_execution/execution_qN.json` convention);
 - a **failure taxonomy**: every sample tagged `{stage, error_class, expected,
   got, confidence, latency_ms}` rather than a raw message dump;
-- `write_diagnostic_summary()` — computes aggregate failure modes and writes
-  them into the first trajectory slot so the feedback agent always sees them.
+- **failure clusters with exemplars** — failures grouped by `(stage,
+  error_class)` with a few concrete `(expected, got)` cases per cluster, so the
+  feedback agent sees *what* to fix, not just counts (SIA's own first-3
+  trajectory window is positional; these are chosen for being informative);
+- **confidence calibration** — buckets low/mid/high and flags a *degenerate*
+  (constant) confidence, because a blind loop cannot target retries / voting
+  without a real per-sample confidence;
+- **latency signal** — p50/p95 and an over-budget count (some SIA challenges
+  score partly on runtime);
+- `finalize()` — writes the aggregate diagnostic into the sort-first trajectory
+  slot **and** the stdout tail so the feedback agent always sees it, merging in
+  the cross-generation `extra` payload below.
+
+`kit/seed_agent/signals.py` — the **cross-generation** memory (the piece this
+adds over the base kit). `signals.gather(working_dir, summary, incumbent)`
+computes, deterministically from sibling `gen_*` dirs and folds into the
+diagnostic:
+- **`failure_delta`** — what the *last edit* changed in the failure profile
+  (`new_failure_classes` a regression introduced, `cleared_failure_classes` it
+  fixed) — the single most actionable "what did I just do" signal, and one the
+  feedback agent cannot see today;
+- **`tried`** — a per-generation digest of which hypothesis family was tried and
+  whether the score moved (the always-visible, in-loop analogue of the strategy
+  bandit's ledger read — no fork required);
+- **`prediction_check`** — whether the previous generation's `predicted_effect`
+  actually held, closing the hypothesis→evidence loop the ledger opens but never
+  checks;
+- **`recommended_hypothesis`** — the next family to try, mapped from the crash
+  profile (or escalated to a reasoning family when failures are semantic),
+  *excluding* families already tried without payoff.
+All of it degrades to `None`/empty under `--sandbox docker`; the docstring
+protocol then falls back to `context.md`.
 
 ### 4.2 Persistence — the **incumbent** + ledger convention
 > **Source finding (matters):** `copy_reference_into` (`agent_reference.py:126`)
@@ -352,7 +382,8 @@ sia-buildnight/
   kit/
     seed_agent/               ← reference dir (copied into every generation)
       target_agent.py         ← modular seed; docstring carries the protocol (§4.1, §4.3)
-      observability.py        ← TrajectoryLogger + diagnostic summary (§4.1)
+      observability.py        ← TrajectoryLogger + within-gen diagnostic (§4.1)
+      signals.py              ← cross-generation delta / tried / prediction / recommendation (§4.1)
       sia_history.py          ← deterministic incumbent computation (§4.2)
       GUIDANCE.md             ← richer protocol for agentic impls (§4.3)
       DESIGN.md               ← gen-1 orientation for the meta agent (§4.3)

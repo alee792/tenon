@@ -40,30 +40,54 @@ blind linear chain into a hill climb that never steps down.
    incumbent, start from the incumbent's `../gen_<M>/target_agent.py`, not the one
    you were given. If it *is* the incumbent, continue from it. Never build on a
    regression.
-3. **Pick one hypothesis — and don't repeat a known failure.** First read the
-   playbook (prior `improvement.md` blocks and, if present, `PLAYBOOK.md`). **Skip
-   any item tagged REJECTED** — do not re-try an edit that already regressed.
-   Prefer families that earned a VALIDATED gain, or an untried family that targets
-   the worst stage in the diagnostic. Weigh gain against **COST** (the
-   `total_tokens` / latency in the diagnostic): don't keep an expensive tactic
-   that buys little. Change exactly one family, local to one stage.
-4. **Edit only the EDITABLE region.** Make your one change strictly between the
+3. **Read the signals** (all in the same diagnostic file / stdout block,
+   computed deterministically each generation — don't re-derive them by eye):
+   - `cross_gen.failure_delta` — what your LAST edit changed in the failure
+     profile (`new_failure_classes` a regression introduced, `cleared_failure_classes`
+     it fixed). A non-empty `new_failure_classes` is the smoking gun of a
+     regressive edit.
+   - `cross_gen.prediction_check` — whether last generation's `predicted_effect`
+     actually happened (`held`). If a change was predicted to help and
+     `actual_delta` came back ≤ 0, that family did NOT work here — revert and pick
+     another.
+   - `clusters` — concrete failing `(expected, got)` exemplars grouped by cause;
+     fix what these SHOW, not what the counts merely suggest.
+   - `confidence` / `latency` — if `confidence.degenerate` is true, wire
+     `solve_one` to a real confidence first; `latency.over_budget` flags
+     efficiency debt.
+4. **Pick one hypothesis — and don't repeat a known failure.** Start from
+   `recommended_hypothesis.family` in the diagnostic: it is computed from your
+   crash profile and already EXCLUDES families tried without payoff (`cross_gen.tried`),
+   escalating to a reasoning family when failures are semantic. Cross-check it
+   against the playbook (prior `improvement.md` blocks and, if present,
+   `PLAYBOOK.md`): **skip any item tagged REJECTED**, and prefer a family that
+   earned a VALIDATED gain or is untried against the worst stage. Override the
+   recommendation only when `failure_delta` / `clusters` point somewhere more
+   specific. Weigh gain against **COST** (the `total_tokens` / latency in the
+   diagnostic): don't keep an expensive tactic that buys little. Change exactly
+   one family, local to one stage.
+5. **Edit only the EDITABLE region.** Make your one change strictly between the
    `EDITABLE REGION START` / `EDITABLE REGION END` markers in `target_agent.py`.
    Everything outside — the docstring, imports, and `main()` (CLI contract,
-   `surface_incumbent`, `TrajectoryLogger`) — is FROZEN. Keep it intact.
-5. **Record it as an itemized playbook — carried forward, delta-updated.** Always
-   write `improvement.md` (SIA folds it into `context.md`). Do **not** re-write it
-   as fresh prose each generation — that erodes detail. Carry prior items forward
-   verbatim; only ADD or UPDATE what changed. If your tooling allows, mirror the
-   items to `../ledger.jsonl` at the run root.
+   `surface_incumbent`, `signals.gather`, `TrajectoryLogger`) — is FROZEN. Keep it
+   intact.
+6. **Record it as an itemized playbook — carried forward, delta-updated.** Always
+   write `improvement.md` (SIA folds it into `context.md`; `signals.py` also reads
+   `hypothesis` + `predicted_effect` back to compute the tried-digest and
+   prediction-check). Do **not** re-write it as fresh prose each generation — that
+   erodes detail. Carry prior items forward verbatim; only ADD or UPDATE what
+   changed. If your tooling allows, mirror the items to `../ledger.jsonl` at the
+   run root.
 
-   Per-generation block:
+   Per-generation block (keep `hypothesis` and `predicted_effect` verbatim —
+   `signals.py` reads them back):
 
        ## Generation <N>
        - incumbent_gen: <M>   incumbent_score: <S>   this_score: <T or pending>
        - seed_gen: <the gen whose code you edited>
        - hypothesis: <one family below>
        - edit_summary: <one sentence: what + where>
+       - predicted_effect: <why it should raise the score — checked next gen>
        - evidence: <worst stage / error class from the diagnostic>
        - cost: <total_tokens / total_latency_ms from the diagnostic>
 
