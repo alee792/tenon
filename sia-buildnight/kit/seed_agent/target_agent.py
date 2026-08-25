@@ -1,6 +1,6 @@
 r"""
 ================================================================================
-PROTOCOL FOR THE IMPROVING AGENT — READ THIS ENTIRE DOCSTRING, EVERY GENERATION
+PROTOCOL v1 — FOR THE IMPROVING AGENT — READ THIS ENTIRELY, EVERY GENERATION
 ================================================================================
 You are SIA's feedback agent. SIA embeds this file *verbatim* in your prompt
 every generation, so this docstring is the always-in-context contract — it works
@@ -8,6 +8,12 @@ with any implementation. A `GUIDANCE.md` in your working directory carries the
 same protocol in more detail; agentic implementations that explore their working
 dir (e.g. OpenHands) will find and follow it. If you see it, use it and keep it
 consistent with this docstring.
+
+METHOD vs. CONTENT — DO NOT CONFLATE THEM. This docstring is the *method* (how
+you improve). The task code below the FROZEN/EDITABLE banner and the playbook are
+the *content* (what you improve). **Never rewrite this protocol while editing task
+code.** If you genuinely improve the method itself, bump the version (PROTOCOL v2)
+and say why in `improvement.md` — otherwise leave it byte-for-byte intact.
 
 WHY THIS EXISTS
 SIA hands you the PREVIOUS generation's agent and asks you to improve it. But
@@ -31,31 +37,51 @@ THE SELECTION PROTOCOL (do these in order, every generation)
      the code you were given. Instead read the incumbent generation's file,
      `<run_dir>/gen_<M>/target_agent.py`, and improve THAT. If the handed
      generation IS the incumbent, continue from it. Never build on a regression.
-  3. CHANGE ONE HYPOTHESIS.
-     Pick exactly one edit family (see HYPOTHESIS FAMILIES). Keep the edit local
-     to a single stage function (`load_dataset`, `plan`, `solve_one`,
-     `format_submission`) so unrelated behavior cannot break.
-  4. PRESERVE THE LOAD-BEARING PARTS. These make the next generation able to
-     diagnose and select; deleting them blinds the loop:
-       - the CLI contract: `--dataset_dir` / `--working_dir`;
-       - `from sia_history import surface_incumbent` and the `TrajectoryLogger`
-         calls — keep the instrumentation and the incumbent surfacing intact;
-       - this docstring: keep it at the top of the file, updated but intact.
-  5. RECORD IT IN `improvement.md` (the ledger SIA explicitly reads back — it
-     folds prior `improvement.md` insights into `context.md`; always write this).
-     If your tooling allows, ALSO append a line to `../ledger.jsonl` at the run
-     root — a richer log the strategy bandit can use. SIA asks for "two files
-     only," but that is a soft instruction it does not enforce, so the extra
-     ledger persists. Use exactly this block so the history is machine- and
-     judge-readable:
+  3. CHOOSE ONE HYPOTHESIS — AND DON'T REPEAT A KNOWN FAILURE.
+     First read the playbook (prior `improvement.md` blocks and, if present,
+     `PLAYBOOK.md`). **Skip any hypothesis tagged REJECTED** — do not re-try an
+     edit that already regressed. Prefer families that earned a VALIDATED gain,
+     or an untried family that targets the worst stage in the diagnostic. Pick
+     exactly one edit family (see HYPOTHESIS FAMILIES) and keep the edit local to
+     a single stage so unrelated behavior cannot break. Weigh gain against COST
+     (tokens/latency in the diagnostic): don't keep an expensive tactic that buys
+     little.
+  4. EDIT ONLY THE EDITABLE REGION; PRESERVE THE FROZEN PARTS. Make your one
+     change strictly between the `EDITABLE REGION START` / `EDITABLE REGION END`
+     markers below (the task-strategy stages). Everything outside them is
+     load-bearing and FROZEN: this docstring, the imports, and `main()` — the CLI
+     contract (`--dataset_dir` / `--working_dir`), the `surface_incumbent` call,
+     and the `TrajectoryLogger` calls (instrumentation + incumbent surfacing).
+     Deleting the frozen parts blinds the next generation.
+  5. RECORD IT AS A PLAYBOOK — ITEMIZED, CARRIED FORWARD, DELTA-UPDATED.
+     Always write `improvement.md` (SIA reads it back and folds it into
+     `context.md`). Do NOT re-write it as fresh prose each generation — that
+     erodes detail over time. Maintain a growing, itemized playbook: carry prior
+     items forward verbatim and only ADD or UPDATE the ones that changed. If your
+     tooling allows, mirror the items to `../ledger.jsonl` at the run root (SIA's
+     "two files only" is soft and unenforced, so it persists).
+
+     Write this per-generation block:
 
          ## Generation <N>
-         - incumbent_gen: <M>
-         - incumbent_score: <S>
-         - seed_gen: <the gen whose code you actually edited>
-         - hypothesis: <one of the HYPOTHESIS FAMILIES>
-         - edit_summary: <one sentence: what you changed and where>
-         - predicted_effect: <why it should raise the score>
+         - incumbent_gen: <M>   incumbent_score: <S>   this_score: <T or pending>
+         - seed_gen: <the gen whose code you edited>
+         - hypothesis: <one HYPOTHESIS FAMILY>
+         - edit_summary: <one sentence: what + where>
+         - evidence: <worst stage / error class from the diagnostic>
+         - cost: <total_tokens / total_latency_ms from the diagnostic>
+
+     And UPDATE the carried playbook (append new items, re-tag existing ones):
+
+         ## Playbook (carried forward — edit deltas only)
+         - [T-003 | harden-output-parsing | VALIDATED +3.1] strip trailing
+           punctuation before the answer regex; fixed 42% of parse failures.
+         - [T-007 | self-consistency-voting | REJECTED -0.4, 3x tokens] no gain;
+           do not retry unless eval is cheap.
+
+     Tag an item VALIDATED only after a measured score gain; tag it REJECTED if it
+     regressed (and never retry it); keep the specific detail (which failure,
+     which pattern) — do not generalize into vague principles.
 
 HYPOTHESIS FAMILIES (change exactly one per generation)
   harden-output-parsing   make answer extraction / format_submission robust to
@@ -101,6 +127,13 @@ from sia_history import surface_incumbent   # deterministic incumbent computatio
 MODEL = os.getenv("TASK_MODEL", "claude-haiku-4-5-20251001")
 
 
+# ============================================================================= #
+# EDITABLE REGION START — task strategy only. Make your ONE change per generation
+# somewhere between this marker and EDITABLE REGION END. Everything outside is
+# frozen (see the protocol docstring, step 4).
+# ============================================================================= #
+
+
 # --------------------------------------------------------------------------- #
 # Task-model client seam — the one obvious hook for the improvement agent.
 # --------------------------------------------------------------------------- #
@@ -130,7 +163,9 @@ def solve_one(client, sample: dict) -> dict:
         messages=[{"role": "user", "content": prompt}],
     )
     text = "".join(getattr(b, "text", "") for b in resp.content).strip()
-    return {"answer": text, "confidence": 1.0}
+    usage = getattr(resp, "usage", None)  # cost signal for the Pareto view
+    tokens = (getattr(usage, "input_tokens", 0) + getattr(usage, "output_tokens", 0)) if usage else None
+    return {"answer": text, "confidence": 1.0, "tokens": tokens}
 
 
 # --------------------------------------------------------------------------- #
@@ -173,6 +208,13 @@ def format_submission(results: list[dict]) -> str:
 SUBMISSION_FILENAME = "submission.jsonl"  # HANDOFF: match evaluate.py's expectation
 
 
+# ============================================================================= #
+# EDITABLE REGION END — everything below is FROZEN instrumentation & wiring.
+# Do not edit main(): the CLI contract, incumbent surfacing, and logging live here
+# and the next generation depends on them.
+# ============================================================================= #
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dataset_dir", required=True)
@@ -197,6 +239,7 @@ def main() -> None:
             out = solve_one(client, sample)
             rec["got"] = out.get("answer")
             rec["confidence"] = out.get("confidence")
+            rec["tokens"] = out.get("tokens")  # cost signal, if solve_one reports it
             results.append({**sample, **out})
 
     submission = format_submission(results)

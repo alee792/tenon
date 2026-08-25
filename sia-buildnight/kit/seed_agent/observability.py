@@ -42,6 +42,7 @@ class SampleRecord(dict):
         got: Any = None,
         confidence: float | None = None,
         latency_ms: float | None = None,
+        tokens: int | None = None,
         messages: list | None = None,
         notes: str = "",
     ):
@@ -54,6 +55,7 @@ class SampleRecord(dict):
             got=got,
             confidence=confidence,
             latency_ms=latency_ms,
+            tokens=tokens,  # per-sample token cost, if the client reports usage
             messages=messages or [],
             notes=notes,
         )
@@ -94,6 +96,8 @@ class TrajectoryLogger:
         by_stage = Counter(r.get("stage", "?") for r in failed)
         by_error = Counter(r.get("error_class") or "?" for r in failed)
         confidences = [r.get("confidence") for r in self.records if isinstance(r.get("confidence"), (int, float))]
+        latencies = [r.get("latency_ms") for r in self.records if isinstance(r.get("latency_ms"), (int, float))]
+        token_counts = [r.get("tokens") for r in self.records if isinstance(r.get("tokens"), (int, float))]
         return {
             "type": "DIAGNOSTIC_SUMMARY",
             "total_samples": total,
@@ -103,6 +107,13 @@ class TrajectoryLogger:
             "failures_by_error_class": dict(by_error),
             "mean_confidence": round(sum(confidences) / len(confidences), 4) if confidences else None,
             "worst_stage": by_stage.most_common(1)[0][0] if by_stage else None,
+            # Cost — so the feedback agent can weigh a hypothesis's gain against its
+            # cost (Self-Harness Pareto): don't keep a tactic that buys little for a
+            # lot of tokens/latency. `total_tokens` is None if the client reports no
+            # usage; log it from solve_one when available.
+            "total_latency_ms": round(sum(latencies), 1) if latencies else None,
+            "mean_latency_ms": round(sum(latencies) / len(latencies), 1) if latencies else None,
+            "total_tokens": int(sum(token_counts)) if token_counts else None,
             "hint": (
                 f"Most failures are in the '{by_stage.most_common(1)[0][0]}' stage "
                 f"({by_stage.most_common(1)[0][1]}/{len(failed)}); focus there."
@@ -134,6 +145,8 @@ class TrajectoryLogger:
         print(f"failures_by_stage={s['failures_by_stage']}")
         print(f"failures_by_error_class={s['failures_by_error_class']}")
         print(f"worst_stage={s['worst_stage']} mean_confidence={s['mean_confidence']}")
+        print(f"COST: total_tokens={s['total_tokens']} total_latency_ms={s['total_latency_ms']} "
+              f"mean_latency_ms={s['mean_latency_ms']}")
         if incumbent:
             print(f"INCUMBENT: gen={incumbent.get('gen')} score={incumbent.get('score')} "
                   f"(branch the next edit from gen_{incumbent.get('gen')} if it beats this run)")

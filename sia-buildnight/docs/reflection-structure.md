@@ -102,6 +102,10 @@ separation explicit and version the meta-layer.
 
 ## High-yield, low-effort changes given SIA's constraints
 
+**Status: all five implemented** in `kit/seed_agent/target_agent.py` (docstring
+PROTOCOL v1 + EDITABLE REGION markers + token capture) and `GUIDANCE.md` (kept in
+sync), with cost aggregation in `observability.py`. This section is the rationale.
+
 Ranked for a <2h, ~6–10-generation sprint. All are prompt/format/convention
 changes — no fork, no new tooling.
 

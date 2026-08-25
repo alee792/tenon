@@ -37,3 +37,26 @@ def test_diagnostic_filename_sorts_before_numbered():
     # Guards the naming trick: '-' (0x2d) < '0' (0x30).
     names = ["execution_q0.json", "execution_q10.json", DIAGNOSTIC_FILENAME]
     assert sorted(names)[0] == DIAGNOSTIC_FILENAME
+
+
+def test_summary_aggregates_cost(tmp_path, capsys):
+    log = TrajectoryLogger(tmp_path)
+    with log.sample(0) as rec:
+        rec["got"] = "A"
+        rec["tokens"] = 100
+    with log.sample(1) as rec:
+        rec["got"] = "B"
+        rec["tokens"] = 150
+    s = log.finalize()
+    assert s["total_tokens"] == 250
+    assert s["total_latency_ms"] is not None
+    assert s["mean_latency_ms"] is not None
+    assert "COST: total_tokens=250" in capsys.readouterr().out
+
+
+def test_summary_cost_is_none_without_tokens(tmp_path):
+    log = TrajectoryLogger(tmp_path)
+    with log.sample(0) as rec:
+        rec["got"] = "A"  # no tokens recorded
+    s = log.finalize()
+    assert s["total_tokens"] is None

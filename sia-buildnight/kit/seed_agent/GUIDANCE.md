@@ -1,19 +1,27 @@
-# Selection guidance (feedback agent) — the file-based carrier
+# Selection & reflection guidance (feedback agent) — PROTOCOL v1
 
 > **When this file is used.** SIA copies this directory into your working
 > directory every generation, but the feedback *prompt* does not point at it.
 > Agentic implementations that explore their working directory (e.g. OpenHands,
 > and capable models) discover and follow it; minimal implementations do not.
-> For that reason the **same protocol also lives in the `target_agent.py` module
-> docstring**, which is always in-context — that docstring is the floor, this
-> file is the richer carrier. Keep them in sync.
+> The same protocol also lives in the `target_agent.py` module docstring, which is
+> always in-context — that docstring is the floor, this file is the richer
+> carrier. **Keep them in sync, and keep the version number matched.**
 >
 > SIA's prompt asks you to "create exactly two files." That is a soft
 > instruction, not a harness rule — nothing deletes or rejects extra files, so an
-> agentic impl may also maintain the `ledger.jsonl` below. Do so when your tooling
-> allows; otherwise fall back to the `improvement.md` ledger the prompt sanctions.
+> agentic impl may also maintain the `ledger.jsonl` below.
 
-## Why this matters
+## Method vs. content — do not conflate them (MCE)
+
+This protocol is the **method** (how you improve). The task code between the
+`EDITABLE REGION` markers in `target_agent.py` and the playbook are the
+**content** (what you improve). **Never rewrite this protocol while editing task
+code.** If you truly improve the method, bump the version (PROTOCOL v2) and note
+why in `improvement.md`; otherwise leave it intact. This keeps "how I improve"
+from degrading every time you edit "what I produced."
+
+## Why selection matters
 
 SIA hands you the *previous* generation's agent and asks you to improve it. But
 the previous generation may have **regressed**. If you always build on it, one
@@ -32,26 +40,44 @@ blind linear chain into a hill climb that never steps down.
    incumbent, start from the incumbent's `../gen_<M>/target_agent.py`, not the one
    you were given. If it *is* the incumbent, continue from it. Never build on a
    regression.
-3. **Pick one hypothesis.** Change exactly one edit family (below). Keep the edit
-   local to one stage (`load_dataset`, `plan`, `solve_one`, `format_submission`)
-   so unrelated behavior cannot break.
-4. **Preserve the load-bearing parts.** Keep the CLI contract
-   (`--dataset_dir`, `--working_dir`), the `TrajectoryLogger` and
-   `surface_incumbent` calls, and the `target_agent.py` docstring intact.
-5. **Record it.** Always write an `improvement.md` block (the sanctioned ledger):
+3. **Pick one hypothesis — and don't repeat a known failure.** First read the
+   playbook (prior `improvement.md` blocks and, if present, `PLAYBOOK.md`). **Skip
+   any item tagged REJECTED** — do not re-try an edit that already regressed.
+   Prefer families that earned a VALIDATED gain, or an untried family that targets
+   the worst stage in the diagnostic. Weigh gain against **COST** (the
+   `total_tokens` / latency in the diagnostic): don't keep an expensive tactic
+   that buys little. Change exactly one family, local to one stage.
+4. **Edit only the EDITABLE region.** Make your one change strictly between the
+   `EDITABLE REGION START` / `EDITABLE REGION END` markers in `target_agent.py`.
+   Everything outside — the docstring, imports, and `main()` (CLI contract,
+   `surface_incumbent`, `TrajectoryLogger`) — is FROZEN. Keep it intact.
+5. **Record it as an itemized playbook — carried forward, delta-updated.** Always
+   write `improvement.md` (SIA folds it into `context.md`). Do **not** re-write it
+   as fresh prose each generation — that erodes detail. Carry prior items forward
+   verbatim; only ADD or UPDATE what changed. If your tooling allows, mirror the
+   items to `../ledger.jsonl` at the run root.
+
+   Per-generation block:
 
        ## Generation <N>
-       - incumbent_gen: <M>
-       - incumbent_score: <S>
-       - seed_gen: <the gen whose code you actually edited>
+       - incumbent_gen: <M>   incumbent_score: <S>   this_score: <T or pending>
+       - seed_gen: <the gen whose code you edited>
        - hypothesis: <one family below>
-       - edit_summary: <one sentence: what and where>
-       - predicted_effect: <why it should raise the score>
+       - edit_summary: <one sentence: what + where>
+       - evidence: <worst stage / error class from the diagnostic>
+       - cost: <total_tokens / total_latency_ms from the diagnostic>
 
-   If your tooling allows, also append one JSON line to `../ledger.jsonl` at the
-   run root: `{"gen": N, "hypothesis": "...", "edit_summary": "...",
-   "seed_gen": M, "incumbent_score": S}`. This richer log powers the strategy
-   bandit; it is optional and impl-dependent.
+   Carried playbook (tagged items with IDs — edit deltas only):
+
+       ## Playbook (carried forward — edit deltas only)
+       - [T-003 | harden-output-parsing | VALIDATED +3.1] strip trailing
+         punctuation before the answer regex; fixed 42% of parse failures.
+       - [T-007 | self-consistency-voting | REJECTED -0.4, 3x tokens] no gain;
+         do not retry unless eval is cheap.
+
+   Tag VALIDATED only after a measured score gain; tag REJECTED if it regressed
+   (and never retry it); keep the specific detail — do not generalize into vague
+   principles.
 
 ## Hypothesis families (change one per generation)
 
