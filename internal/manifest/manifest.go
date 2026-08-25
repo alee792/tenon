@@ -14,10 +14,11 @@
 //
 // Model note: the manifest carries an OPTIONAL model field. Tenon does not
 // verify which model actually served a turn (the harness owns model selection),
-// so Verify deliberately ignores model and Resolve leaves it empty. Emitting the
-// model pin into generated harness configuration is deferred to a later slice;
-// this package neither fabricates a model nor runs a billed turn to discover
-// one.
+// so Verify deliberately ignores model and Resolve leaves it empty. The model
+// is operator-supplied (manifest write --model); this package neither fabricates
+// a model nor runs a billed turn to discover one. Emitting a pinned model into
+// generated harness configuration is done by the harness drivers, not here
+// (ADR 0020).
 package manifest
 
 import (

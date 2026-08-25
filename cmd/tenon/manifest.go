@@ -119,6 +119,18 @@ func manifestIdentity(supplied *manifest.Manifest) string {
 	return supplied.Identity()
 }
 
+// manifestModel returns the supplied manifest's pinned model for
+// harnessName, or "" when no manifest was supplied or that harness pins no
+// model (ADR 0020). apply and validate thread the result into
+// apply.Target.Model identically, so their generation — and any resulting
+// diagnostics — match.
+func manifestModel(supplied *manifest.Manifest, harnessName string) string {
+	if supplied == nil {
+		return ""
+	}
+	return supplied.Harnesses[harnessName].Model
+}
+
 // runManifest dispatches the "tenon manifest" subcommands.
 func runManifest(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || args[0] != "write" {
@@ -132,13 +144,18 @@ func runManifest(args []string, stdout, stderr io.Writer) int {
 // manifest bytes to --output (or stdout). The bytes for an unchanged closure
 // are byte-identical across runs (no timestamps). When --manifest is also
 // given, the current closure is verified against it first, so write can refresh
-// or confirm a manifest. The result is an ordinary versioned file.
+// or confirm a manifest. When --model is given, its value is recorded as the
+// selected harness's pinned model; write never resolves a model itself (doing
+// so would mean either billing a Claude turn or opening a Codex thread just to
+// discover one), so an unset --model leaves the model empty exactly as before
+// ADR 0020. The result is an ordinary versioned file.
 func runManifestWrite(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("manifest write", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	harnessName := fs.String("harness", "", "target harness: claude or codex")
 	output := fs.String("output", "", "output path (defaults to stdout)")
 	manifestPath := fs.String("manifest", "", "optional manifest to verify before writing")
+	model := fs.String("model", "", "optional model to pin for the selected harness (operator-supplied; never resolved automatically)")
 
 	positional, ok := parsePositional(fs, args)
 	if !ok || len(positional) != 1 {
@@ -191,6 +208,11 @@ func runManifestWrite(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintln(stderr, "tenon manifest write:", err)
 		return 1
+	}
+	if *model != "" {
+		pins := current.Harnesses[*harnessName]
+		pins.Model = *model
+		current.Harnesses[*harnessName] = pins
 	}
 	bytes := current.Bytes()
 	if *output == "" {

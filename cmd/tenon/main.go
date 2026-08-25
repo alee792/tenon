@@ -44,7 +44,7 @@ const usage = `usage:
   tenon apply AGENT --harness <claude|codex> [--workspace DIR] [--manifest PATH] [--diagnostics <prose|jsonl>]
   tenon validate AGENT --harness <claude|codex> [--manifest PATH] [--diagnostics <prose|jsonl>]
   tenon fingerprint show AGENT [--diagnostics <prose|jsonl>]
-  tenon manifest write AGENT --harness <claude|codex> [--output PATH] [--manifest PATH]
+  tenon manifest write AGENT --harness <claude|codex> [--output PATH] [--manifest PATH] [--model VALUE]
   tenon mcp serve AGENT --harness <claude|codex> [--workspace DIR] [--manifest PATH]
   tenon run AGENT --workspace DIR --harness <claude|codex> [--conversation ID] [--input jsonl] [--manifest PATH] [--timeout DUR] [--turn-timeout DUR]
   tenon schedule trigger AGENT NAME --workspace DIR --harness <claude|codex> --input-id ID [--manifest PATH] [--turn-timeout DUR] [--timeout DUR]
@@ -282,6 +282,7 @@ func runValidate(args []string, stdout, stderr io.Writer) int {
 				Executable:       executable,
 				IntegrationStore: resolveIntegrationStoreBase(),
 				TenonVersion:     mcp.Version,
+				Model:            manifestModel(supplied, driver.Harness()),
 			}, diags)
 		}
 	}
@@ -352,6 +353,7 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 		IntegrationStore: storeBase,
 		TenonVersion:     mcp.Version,
 		ManifestIdentity: manifestIdentity(supplied),
+		Model:            manifestModel(supplied, driver.Harness()),
 	}, driver)
 	for _, d := range applyDiags.All() {
 		diags.Add(d)

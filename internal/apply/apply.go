@@ -54,8 +54,20 @@ type Target struct {
 	// (manifest.Manifest.Identity), recorded in the apply record as a
 	// provenance join key so observation made outside tenon can be joined to
 	// the exact pinned closure that produced it. Empty when no manifest was
-	// supplied; it is never rendered into model-facing content.
+	// supplied; it is never rendered into model-facing content, so it is
+	// deliberately NOT forwarded into the Target a driver's Generate receives
+	// (see ApplyWithTarget).
 	ManifestIdentity string
+	// Model is the pinned model (manifest.HarnessPins.Model) for the selected
+	// harness, or "" when no manifest was supplied or that manifest pins no
+	// model (ADR 0020). Unlike ManifestIdentity, Model IS forwarded into the
+	// Target a driver's Generate receives: it is native configuration the
+	// harness reads at launch (a `model` key in .codex/config.toml or
+	// .claude/settings.json), not model-facing instructions content, so the
+	// no-leak rule that keeps provenance out of Generate does not apply to
+	// it. A driver emits Model into its owned native configuration file and
+	// nowhere else.
+	Model string
 }
 
 // Driver is the seam between the portable project and one native harness.
@@ -162,6 +174,7 @@ func ApplyWithTarget(p *agentproject.Project, target Target, driver Driver) (*Re
 		Executable:       executable,
 		IntegrationStore: target.IntegrationStore,
 		TenonVersion:     target.TenonVersion,
+		Model:            target.Model,
 	}, diags)
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
 
