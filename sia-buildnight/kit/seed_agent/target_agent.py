@@ -32,42 +32,70 @@ THE SELECTION PROTOCOL (do these in order, every generation)
      b. If it is absent (the run was sandboxed and could not see siblings),
         READ `context.md` in the run directory: SIA writes every generation's
         score there. The incumbent is the generation with the highest score.
-  2. CHOOSE YOUR SEED CODE.
+  2. READ THE SIGNALS (all in the same diagnostic file/stdout block).
+     These are computed deterministically each generation — do not re-derive
+     them by eye from the trajectories.
+       - `cross_gen.failure_delta` — what your LAST edit changed in the failure
+         profile: `new_failure_classes` a regression introduced, and
+         `cleared_failure_classes` it fixed. A non-empty `new_failure_classes`
+         is the smoking gun of a regressive edit.
+       - `cross_gen.prediction_check` — whether last generation's
+         `predicted_effect` actually happened (`held`). If a change was
+         predicted to help and `actual_delta` came back <= 0, that family did
+         NOT work here; revert and pick a different one.
+       - `clusters` — concrete failing (expected, got) exemplars grouped by
+         cause. Fix what these SHOW, not what the counts merely suggest.
+       - `confidence` / `latency` — if `confidence.degenerate` is true, wire
+         `solve_one` to return a real confidence first (a blind loop can't target
+         retries/voting without it); `latency.over_budget` flags efficiency debt.
+  3. CHOOSE YOUR SEED CODE.
      If the generation you were handed scored BELOW the incumbent, do NOT edit
      the code you were given. Instead read the incumbent generation's file,
      `<run_dir>/gen_<M>/target_agent.py`, and improve THAT. If the handed
      generation IS the incumbent, continue from it. Never build on a regression.
-  3. CHOOSE ONE HYPOTHESIS — AND DON'T REPEAT A KNOWN FAILURE.
-     First read the playbook (prior `improvement.md` blocks and, if present,
-     `PLAYBOOK.md`). **Skip any hypothesis tagged REJECTED** — do not re-try an
-     edit that already regressed. Prefer families that earned a VALIDATED gain,
-     or an untried family that targets the worst stage in the diagnostic. Pick
-     exactly one edit family (see HYPOTHESIS FAMILIES) and keep the edit local to
-     a single stage so unrelated behavior cannot break. Weigh gain against COST
-     (tokens/latency in the diagnostic): don't keep an expensive tactic that buys
-     little.
-  4. EDIT ONLY THE EDITABLE REGION; PRESERVE THE FROZEN PARTS. Make your one
+  4. CHOOSE ONE HYPOTHESIS — AND DON'T REPEAT A KNOWN FAILURE.
+     Start from `recommended_hypothesis.family` in the diagnostic: it is computed
+     from your crash profile and already EXCLUDES families in `cross_gen.tried`
+     that were tried without payoff, so you explore instead of repeating a dud.
+     Cross-check it against the playbook (prior `improvement.md` blocks and, if
+     present, `PLAYBOOK.md`): **skip any hypothesis tagged REJECTED**, and prefer
+     a family that earned a VALIDATED gain or is untried against the worst stage.
+     Override the recommendation only when `failure_delta` / `clusters` point
+     somewhere more specific. Pick exactly one family (see HYPOTHESIS FAMILIES)
+     and keep the edit local to a single stage so unrelated behavior cannot break.
+     Weigh gain against COST (tokens/latency in the diagnostic): don't keep an
+     expensive tactic that buys little.
+     NOTE: the taxonomy only sees crashes and self-flagged bad output — NOT
+     answers that are merely wrong. If crashes are near zero but the score is
+     flat, your failures are SEMANTIC: reach for a reasoning family
+     (self-consistency-voting, decompose-reasoning, add-verification) — which is
+     exactly what `recommended_hypothesis` escalates to in that case.
+  5. EDIT ONLY THE EDITABLE REGION; PRESERVE THE FROZEN PARTS. Make your one
      change strictly between the `EDITABLE REGION START` / `EDITABLE REGION END`
      markers below (the task-strategy stages). Everything outside them is
      load-bearing and FROZEN: this docstring, the imports, and `main()` — the CLI
      contract (`--dataset_dir` / `--working_dir`), the `surface_incumbent` call,
-     and the `TrajectoryLogger` calls (instrumentation + incumbent surfacing).
-     Deleting the frozen parts blinds the next generation.
-  5. RECORD IT AS A PLAYBOOK — ITEMIZED, CARRIED FORWARD, DELTA-UPDATED.
+     the `signals.gather(...)` call, and the `TrajectoryLogger` calls
+     (instrumentation + incumbent surfacing). Deleting the frozen parts blinds the
+     next generation.
+  6. RECORD IT AS A PLAYBOOK — ITEMIZED, CARRIED FORWARD, DELTA-UPDATED.
      Always write `improvement.md` (SIA reads it back and folds it into
-     `context.md`). Do NOT re-write it as fresh prose each generation — that
-     erodes detail over time. Maintain a growing, itemized playbook: carry prior
-     items forward verbatim and only ADD or UPDATE the ones that changed. If your
-     tooling allows, mirror the items to `../ledger.jsonl` at the run root (SIA's
-     "two files only" is soft and unenforced, so it persists).
+     `context.md`; `signals.py` also parses this block to compute the tried-digest
+     and the prediction-check). Do NOT re-write it as fresh prose each generation —
+     that erodes detail over time. Maintain a growing, itemized playbook: carry
+     prior items forward verbatim and only ADD or UPDATE the ones that changed. If
+     your tooling allows, mirror the items to `../ledger.jsonl` at the run root
+     (SIA's "two files only" is soft and unenforced, so it persists).
 
-     Write this per-generation block:
+     Write this per-generation block (keep `hypothesis` and `predicted_effect`
+     verbatim — `signals.py` reads them back):
 
          ## Generation <N>
          - incumbent_gen: <M>   incumbent_score: <S>   this_score: <T or pending>
          - seed_gen: <the gen whose code you edited>
          - hypothesis: <one HYPOTHESIS FAMILY>
          - edit_summary: <one sentence: what + where>
+         - predicted_effect: <why it should raise the score — checked next gen>
          - evidence: <worst stage / error class from the diagnostic>
          - cost: <total_tokens / total_latency_ms from the diagnostic>
 
@@ -109,8 +137,8 @@ feedback agent can change ONE stage without breaking the rest:
 Only the task-shaped glue marked `# HANDOFF:` is filled in on the night, from the
 revealed task.md / evaluate.py / dataset. Runtime deps (anthropic, …) go in this
 directory's requirements.txt so SIA installs them; the pure-stdlib helpers
-(`sia_history`, `observability`) are re-copied pristine into every generation, so
-the feedback agent cannot corrupt them.
+(`sia_history`, `observability`, `signals`) are re-copied pristine into every
+generation, so the feedback agent cannot corrupt them.
 """
 
 from __future__ import annotations
@@ -120,6 +148,7 @@ import json
 import os
 from pathlib import Path
 
+import signals                              # pristine: cross-generation signals
 from observability import TrajectoryLogger  # pristine, re-copied each generation
 from sia_history import surface_incumbent   # deterministic incumbent computation
 
@@ -165,6 +194,10 @@ def solve_one(client, sample: dict) -> dict:
     text = "".join(getattr(b, "text", "") for b in resp.content).strip()
     usage = getattr(resp, "usage", None)  # cost signal for the Pareto view
     tokens = (getattr(usage, "input_tokens", 0) + getattr(usage, "output_tokens", 0)) if usage else None
+    # HANDOFF: return a REAL confidence, not this constant. Without it the
+    # diagnostic flags `confidence.degenerate` and the loop cannot target
+    # retries / self-consistency voting. Wire it to logprobs, a self-reported
+    # certainty, or vote agreement once solve_one does real work.
     return {"answer": text, "confidence": 1.0, "tokens": tokens}
 
 
@@ -244,7 +277,14 @@ def main() -> None:
 
     submission = format_submission(results)
     (Path(args.working_dir) / SUBMISSION_FILENAME).write_text(submission, encoding="utf-8")
-    log.finalize(extra={"incumbent": incumbent})  # diagnostic + incumbent, always visible
+
+    # Cross-generation signals: what the last edit changed (failure_delta),
+    # whether its prediction held, which families are spent, and the family to
+    # try next. Deterministic bookkeeping over sibling gen dirs; degrades to
+    # empty under sandboxing. Merged into the always-visible diagnostic.
+    summary = log.summary()
+    cross = signals.gather(args.working_dir, summary, incumbent)
+    log.finalize(extra={"incumbent": incumbent, **cross})
 
 
 if __name__ == "__main__":

@@ -24,10 +24,13 @@ the revealed environment, and surface the best agent it finds.
 
 ## What's here
 - `kit/seed_agent/` — the instrumented, modular seed agent SIA edits;
-  `observability.py` (per-sample taxonomy + diagnostic summary) and
-  `sia_history.py` (deterministic incumbent computation), both re-copied pristine
-  every generation; the **selection protocol lives in `target_agent.py`'s
-  docstring**; `DESIGN.md` orients the meta agent at gen 1.
+  `observability.py` (within-gen taxonomy: failure clusters + exemplars,
+  confidence calibration, latency), `signals.py` (cross-generation memory:
+  failure-delta vs. last gen, tried-family digest, prediction check, and the
+  recommended next family), and `sia_history.py` (deterministic incumbent
+  computation) — all re-copied pristine every generation; the **selection
+  protocol lives in `target_agent.py`'s docstring**; `DESIGN.md` orients the meta
+  agent at gen 1.
 - `algorithms/` — three selectors behind one interface (beam hill climbing,
   simulated-annealing-lite, UCB strategy bandit): the reference implementation
   used by Mode B and the fork. Pure stdlib, unit-tested.

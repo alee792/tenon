@@ -26,6 +26,12 @@ note orients that first build.
 - `sia_history.py` — pristine, re-copied every generation. Deterministically
   computes the incumbent (best prior generation) from sibling `results.json` and
   threads it into the diagnostic. Import and call `surface_incumbent`.
+- `signals.py` — pristine, re-copied every generation. The cross-generation
+  memory the feedback agent otherwise lacks: `signals.gather(...)` computes the
+  failure-profile delta vs. the previous generation, a tried-family digest with
+  pay-off, whether the last generation's prediction held, and the recommended
+  next hypothesis family (excluding families already tried without payoff). All
+  of it merges into the always-visible diagnostic. Import and call `gather`.
 - `requirements.txt` — third-party deps (anthropic, …) SIA installs before the
   run.
 
@@ -35,7 +41,7 @@ note orients that first build.
   boundaries.
 - Wire the `# HANDOFF:` points to the revealed task (dataset loader, `solve_one`
   prompt/parse, `format_submission` to match `evaluate.py`, submission filename).
-- Preserve the `TrajectoryLogger` and `surface_incumbent` calls — they are how
-  every later generation diagnoses and selects.
+- Preserve the `TrajectoryLogger`, `surface_incumbent`, and `signals.gather`
+  calls — they are how every later generation diagnoses and selects.
 - Do not optimize for specific samples; the score gain must come from general
   capability improvements produced by the loop.
