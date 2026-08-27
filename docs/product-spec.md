@@ -597,13 +597,12 @@ above:
   the native harness runtime is not yet bundled into the staged tree
   (expected on the base image), and the authored-tool execution closure is
   staged whole rather than minimized, both recorded in the staging artifact
-  manifest. Go and Python authored tools stage and serve from the staged
-  tree today: the closure is a self-contained Go host binary, or a pinned
-  standalone CPython interpreter with the project's locked dependencies laid
-  flat beside it (no venv), reachable from the staged apply record's
-  `closure_root`. TypeScript remains refused with a named diagnostic
-  (`stage.tools.runtime-unsupported`) pending its own bounded rendering
-  spike (issue #16). The container gate is manual: CI does not build or run
+  manifest. Go, Python, and TypeScript authored tools all stage and serve
+  from the staged tree today: the closure is a self-contained Go host
+  binary, a pinned standalone CPython interpreter with the project's locked
+  dependencies laid flat beside it (no venv), or the `deno` executable
+  itself beside a pruned, cached-only `DENO_DIR` (issue #16), reachable from
+  the staged apply record's `closure_root`. The container gate is manual: CI does not build or run
   a staged image, so run
   [`scripts/check-staged-images.sh`](../scripts/check-staged-images.sh)
   (see [`docs/staged-acceptance.md`](staged-acceptance.md)) before a

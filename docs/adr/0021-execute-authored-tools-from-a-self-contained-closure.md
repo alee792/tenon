@@ -39,17 +39,22 @@ build* tools. Concretely:
   directory. `uv` remains a preparation-time tool and never runs at serve
   time; the venv machinery — `pyvenv.cfg`, activation scripts, the
   interpreter symlink — never exists, so nothing points outside the closure.
-- **TypeScript** follows the same contract; its rendering is a bounded spike
-  (per tenet 4) with `deno compile` as the candidate — the direct analog of
-  the Go host, with tool modules passed via `--include` — and the
-  prototype-proven fallback of copying the single self-contained `deno`
-  executable into the closure beside a pruned, cached-only `DENO_DIR`
-  (hctl served a real tool call this way from a clean base image with no
-  network; its prune list, including Deno's `node_compat_bin` link back to
-  the build-time executable, is the starting point). Both satisfy the
-  contract; the spike picks between them. Until it lands, staging *refuses*
-  a TypeScript-bearing agent with a named diagnostic rather than emitting a
-  tree that cannot run.
+- **TypeScript** follows the same contract. A bounded spike (per tenet 4)
+  weighed `deno compile` — the direct analog of the Go host, with tool
+  modules passed via `--include` — against the prototype-proven fallback of
+  copying the single self-contained `deno` executable into the closure
+  beside a pruned, cached-only `DENO_DIR` (hctl served a real tool call this
+  way from a clean base image with no network). The spike could not verify
+  `deno compile`'s decisive unknown (whether `--include`d source resolves
+  once the closure relocates) in a sandboxed environment that denies Deno's
+  own egress, so it landed the fallback instead: preparation copies `deno`
+  into the closure and, once inspection's own launch has run (Deno itself
+  regenerates its derived caches at that point, keyed to preparation's own
+  paths), prunes `DENO_DIR` back down to its actually-downloaded package
+  cache — hctl's prune list ported forward and corrected for a newer Deno
+  release's on-disk cache format (flat `*_v2` files rather than a `gen/`
+  and per-module `registry.json` tree), `node_compat_bin`'s link back to the
+  build-time executable included.
 
 Deno-as-runtime and CPython are runtime; `uv`, the Go toolchain, and
 deno-as-compiler are build tools and stay in the build image, per ADR 0012's
@@ -155,14 +160,16 @@ determinism the manifest already claims: today the venv links whatever
 interpreter the machine offers, so two machines preparing identical pinned
 source could disagree beneath an identical manifest; a pinned interpreter
 closes that hole. Closures grow by the runtime they now carry (tens of
-megabytes for CPython; comparable for a compiled TypeScript host) —
-ADR 0012 already records that minimization is deferred, and that note now
-covers a larger, honest number. Preparation on a network-restricted machine
+megabytes for CPython; the `deno` executable itself, well over a hundred,
+for TypeScript) — ADR 0012 already records that minimization is deferred,
+and that note now covers a larger, honest number. Preparation on a network-restricted machine
 needs the pinned interpreter artifact available through whatever channel
 supplies its other pinned inputs; the build-image journey already assumes
 this. The agent manifest's tool-runtime pins, which the
 distilled specification inherited as Deno, uv, and Go versions, gain the
 interpreter identity itself once the interpreter is the pinned artifact;
 `uv` remains pinned as a preparation input, no longer implied at serve
-time. Until each language's rendering lands, staging refuses that language
-with a named diagnostic — a smaller true claim over a broader broken one.
+time. Go, Python, and TypeScript all render and stage today; a future
+authored-tool language follows the same rule until its own rendering lands
+— staging refuses it with a named diagnostic, a smaller true claim over a
+broader broken one.

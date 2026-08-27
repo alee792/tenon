@@ -108,6 +108,14 @@ def execute(input: Input, context: dict) -> Output:
     return Output(words=len(input.text.split()), calls=calls)
 `
 
+// writeTypeScriptTool gives an agent one TypeScript tool and its deno
+// dependency manifest, ready for `deno install --entrypoint` to lock.
+func writeTypeScriptTool(t *testing.T, agent string) {
+	t.Helper()
+	writeFile(t, agent, "deno.json", []byte("{\n  \"imports\": {\n    \"zod\": \"npm:zod@^4.1.12\"\n  }\n}\n"), 0o644)
+	writeFile(t, agent, "tools/shout_text.ts", []byte(typescriptToolFile), 0o644)
+}
+
 // writePythonTool gives an agent one Python tool and its native dependency
 // files, ready for `uv lock` to resolve.
 func writePythonTool(t *testing.T, agent string) {
@@ -799,5 +807,67 @@ func TestServeCallsAPythonToolFromAStagedTree(t *testing.T) {
 	result := callResult(t, responses[1])
 	if result["words"] != float64(3) {
 		t.Fatalf("count-words output = %#v", result)
+	}
+}
+
+// TestServeCallsATypeScriptToolFromAStagedTree is ADR 0021's acceptance
+// shape for TypeScript: stage a TypeScript-tool agent, verify the staged
+// tree, then serve from the staged workspace and staged closure with no
+// workspace tool cache ever prepared there — the direct regression proof
+// for issue #16's fallback (deno copied into the closure beside a pruned,
+// cached-only DENO_DIR): if DENO_DIR's derived caches were not pruned, or
+// if the launch command still depended on a build-machine PATH lookup for
+// deno, this fails exactly the way it once did staging entirely refuse
+// TypeScript.
+func TestServeCallsATypeScriptToolFromAStagedTree(t *testing.T) {
+	deno := requireToolchain(t, "deno")
+	agent := writeAgent(t, "staged-typescript-tool-agent", validInstructions)
+	writeTypeScriptTool(t, agent)
+	lockDependencies(t, agent, deno, "install", "--entrypoint", "tools/shout_text.ts")
+	out := filepath.Join(t.TempDir(), "staged")
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"stage", agent, "--harness", "claude", "--output", out}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("stage exit %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+	}
+
+	artifact := filepath.Join(out, "opt", "tenon", "artifact.json")
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"stage", "verify", "--artifact", artifact, "--prefix", out}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("a staged TypeScript-tool tree must verify: exit %d\nstderr: %s", code, stderr.String())
+	}
+
+	// The staged closure carries its own deno executable: launch execs it
+	// directly rather than depending on a build-machine PATH lookup.
+	closure := filepath.Join(out, "opt", "tenon", "runtimes", "tools")
+	found := false
+	_ = filepath.WalkDir(closure, func(path string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && filepath.Base(path) == "deno" && filepath.Base(filepath.Dir(path)) == "bin" {
+			found = true
+		}
+		return nil
+	})
+	if !found {
+		t.Fatal("the staged closure must carry its own deno executable at <closure>/deno/bin/deno")
+	}
+
+	stagedSource := filepath.Join(out, "opt", "tenon", "agents", "staged-typescript-tool-agent")
+	stagedWorkspace := filepath.Join(out, "workspace")
+
+	if _, err := os.Stat(filepath.Join(stagedWorkspace, ".tenon", "cache", "tools")); !os.IsNotExist(err) {
+		t.Fatalf("the staged workspace must carry no tool cache, found one (or a stat error): %v", err)
+	}
+
+	responses := serveManaged(t, stagedSource, "claude", stagedWorkspace, listRequest,
+		toolCall(2, "shout-text", `{"text":"hi"}`))
+
+	listed := listedTool(t, responses[0], "shout-text")
+	if listed["description"] != "Uppercase bounded text." {
+		t.Fatalf("description = %v", listed["description"])
+	}
+	result := callResult(t, responses[1])
+	if result["shouted"] != "HI" {
+		t.Fatalf("shout-text output = %#v", result)
 	}
 }

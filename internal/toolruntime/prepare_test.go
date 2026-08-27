@@ -134,6 +134,91 @@ func TestRemovePythonClosureSymlinksRefusesATargetOutsideTheClosure(t *testing.T
 	}
 }
 
+// buildFakeDenoCache lays out a DENO_DIR by hand, shaped like Deno 2.9's own
+// on-disk cache after `deno check` populates it: flat derived-cache files
+// keyed by preparation-time specifiers (some with SQLite -shm/-wal
+// siblings), a lazily created node_compat_bin carrying a symlink back to
+// the build-time deno executable, and the actual downloaded npm package
+// cache that must survive pruning.
+func buildFakeDenoCache(t *testing.T) (dir string) {
+	t.Helper()
+	dir = t.TempDir()
+	for _, name := range []string{
+		"check_cache_v2", "dep_analysis_cache_v2", "fast_check_cache_v2",
+		"node_analysis_cache_v2", "v8_code_cache_v2", "v8_code_cache_v2-shm", "v8_code_cache_v2-wal",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("derived cache\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fakeDeno := filepath.Join(dir, "..", "fake-build-time-deno")
+	if err := os.WriteFile(fakeDeno, []byte("#!fake\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "node_compat_bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(fakeDeno, filepath.Join(dir, "node_compat_bin", "deno")); err != nil {
+		t.Fatal(err)
+	}
+	npmPkg := filepath.Join(dir, "npm", "registry.npmjs.org", "zod", "4.4.3")
+	if err := os.MkdirAll(npmPkg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(npmPkg, "index.js"), []byte("export const z = {};\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// TestPruneDenoCacheKeepsNpmAndDiscardsDerivedCaches proves pruneDenoCache
+// discards every path-keyed derived cache entry and node_compat_bin's
+// symlink back to the build-time executable, while leaving the actually
+// downloaded npm package cache a --cached-only run depends on untouched and
+// leaving no symlink anywhere in the result (copyTree refuses one outright
+// at staging time).
+func TestPruneDenoCacheKeepsNpmAndDiscardsDerivedCaches(t *testing.T) {
+	dir := buildFakeDenoCache(t)
+
+	if err := pruneDenoCache(dir); err != nil {
+		t.Fatalf("pruning a normally shaped deno cache must succeed: %v", err)
+	}
+
+	for _, gone := range []string{
+		"check_cache_v2", "dep_analysis_cache_v2", "fast_check_cache_v2",
+		"node_analysis_cache_v2", "v8_code_cache_v2", "v8_code_cache_v2-shm", "v8_code_cache_v2-wal",
+		"node_compat_bin",
+	} {
+		if _, err := os.Lstat(filepath.Join(dir, gone)); !os.IsNotExist(err) {
+			t.Fatalf("%s must be discarded by pruning: %v", gone, err)
+		}
+	}
+
+	kept := filepath.Join(dir, "npm", "registry.npmjs.org", "zod", "4.4.3", "index.js")
+	if content, err := os.ReadFile(kept); err != nil || string(content) != "export const z = {};\n" {
+		t.Fatalf("the downloaded npm package cache must survive pruning intact: %v, %q", err, content)
+	}
+
+	assertNoSymlinksAnywhere(t, dir)
+}
+
+// TestPruneDenoCacheFailsClosedOnASurvivingSymlink proves the defense-in-
+// depth walk actually fires: a symlink outside the known node_compat_bin
+// shape is refused rather than silently kept or silently deleted.
+func TestPruneDenoCacheFailsClosedOnASurvivingSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "..", "escape-target")
+	if err := os.WriteFile(target, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dir, "surprise-link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := pruneDenoCache(dir); err == nil {
+		t.Fatal("a surviving symlink outside the known prune list must fail closed")
+	}
+}
+
 func assertNoSymlinksAnywhere(t *testing.T, root string) {
 	t.Helper()
 	if err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {

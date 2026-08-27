@@ -152,9 +152,8 @@ exact configuration that produced it.
 ## Status
 
 The [product specification](docs/product-spec.md)'s acceptance list is
-implemented and credential-free tested. Staging serves Go and Python
-authored tools end to end from the staged tree; TypeScript remains refused
-with a named diagnostic pending its own bounded rendering spike (ADR 0021,
+implemented and credential-free tested. Staging serves Go, Python, and
+TypeScript authored tools end to end from the staged tree (ADR 0021,
 issue #16). See the specification's
 [known limitations](docs/product-spec.md#known-limitations) for the rest,
 including that the Codex driver's successful-turn path has not been

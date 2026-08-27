@@ -13,8 +13,8 @@ limitations", "Real harness drivers").
 
 ## What it proves
 
-For each supported authored-tool language (Go and Python today; TypeScript
-stays refused pending its own rendering spike, issue #16) the script:
+For each supported authored-tool language (Go, Python, and TypeScript,
+ADR 0021, issue #16) the script:
 
 1. writes a minimal probe agent carrying one authored tool in that language,
 2. runs `tenon stage` to produce a complete runnable tree,
@@ -38,10 +38,7 @@ stays refused pending its own rendering spike, issue #16) the script:
    never checks this itself).
 
 It also stages and images a tool-free agent, proving the empty runtime
-record (`runtime.bundled: false`, no staged language runtime), and proves
-the TypeScript refusal end to end: `tenon stage` exits 1, names the stable
-`stage.tools.runtime-unsupported` diagnostic, and publishes no output
-directory.
+record (`runtime.bundled: false`, no staged language runtime).
 
 This is a proof of the staged tree and the documented compatible base, not
 of a published tenon harness image: `images/inputs.json` pins every harness
@@ -81,7 +78,7 @@ and serves a real tool call over MCP — only this gate does.
 
 ## How to run it
 
-On a Linux/amd64 host with Docker, Go, and `uv` installed:
+On a Linux/amd64 host with Docker, Go, `uv`, and `deno` installed:
 
 ```sh
 ./scripts/check-staged-images.sh
@@ -94,7 +91,7 @@ the Docker images it builds — `tenon-staged-tool-free`, `tenon-staged-go`,
 the first `FAIL` line. A clean run ends with:
 
 ```
-PASS check-staged-images: TypeScript refusal, tool-free, Go-only, and Python-only staged images all verified
+PASS check-staged-images: tool-free, Go-only, Python-only, and TypeScript-only staged images all verified
 ```
 
 ## Recording acceptance evidence

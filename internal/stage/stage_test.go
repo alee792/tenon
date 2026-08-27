@@ -501,14 +501,54 @@ func Execute(ctx context.Context, in Input) (Output, error) {
 }
 `
 
-// TestStageRefusesTypeScriptTools proves staging refuses a TypeScript-bearing
-// agent with the stable stage.tools.runtime-unsupported diagnostic, before
-// any mutation: the output directory is never created.
-func TestStageRefusesTypeScriptTools(t *testing.T) {
-	agent := writeAgent(t, "ts-tool-agent")
-	writeFile(t, agent, "deno.json", "{}\n")
-	writeFile(t, agent, "deno.lock", "{}\n")
-	writeFile(t, agent, "tools/shout_text.ts", "export default {}\n")
+// typescriptTool is a minimal valid TypeScript tool: authored types satisfy
+// `deno check`, an npm dependency (zod) proves the downloaded package cache
+// closure staging carries, not only the local module.
+const typescriptTool = `import { z } from "zod";
+
+export default {
+  description: "Uppercase bounded text.",
+  inputSchema: z.object({ text: z.string() }).strict(),
+  outputSchema: z.object({ shouted: z.string() }).strict(),
+  execute: (input: { text: string }) => ({ shouted: input.text.toUpperCase() }),
+};
+`
+
+// requireDeno skips the test when deno is absent, matching cmd/tenon's own
+// requireToolchain gate: TENON_REQUIRE_TOOLCHAINS=1 turns the gap into a
+// named failure so CI green still means the TypeScript closure path ran.
+func requireDeno(t *testing.T) string {
+	t.Helper()
+	found, err := exec.LookPath("deno")
+	if err != nil {
+		if os.Getenv("TENON_REQUIRE_TOOLCHAINS") == "1" {
+			t.Fatal("deno is not on PATH but TENON_REQUIRE_TOOLCHAINS=1 requires it")
+		}
+		t.Skip("deno is not on PATH; the TypeScript closure staging path is proven without it")
+	}
+	return found
+}
+
+// TestStageTypeScriptToolCarriesRuntimeClosure proves ADR 0021's TypeScript
+// closure stages via issue #16's fallback: preparation copies deno's own
+// executable into the closure and prunes DENO_DIR's derived, path-keyed
+// caches, and the staged tree carries no symlink and no build-machine path
+// — including inside the pruned DENO_DIR itself and the copied deno binary,
+// which carriedPayload must route to joined-path matching the same way it
+// already does for the Python and Go closures.
+func TestStageTypeScriptToolCarriesRuntimeClosure(t *testing.T) {
+	deno := requireDeno(t)
+	agent := writeAgent(t, "typescript-tool-agent")
+	writeFile(t, agent, "deno.json", "{\n  \"imports\": {\n    \"zod\": \"npm:zod@^4.1.12\"\n  }\n}\n")
+	writeFile(t, agent, "tools/shout_text.ts", typescriptTool)
+	cmd := exec.Command(deno, "install", "--entrypoint", "tools/shout_text.ts")
+	cmd.Dir = agent
+	if output, err := cmd.CombinedOutput(); err != nil {
+		if os.Getenv("TENON_REQUIRE_TOOLCHAINS") == "1" {
+			t.Fatalf("deno install failed but TENON_REQUIRE_TOOLCHAINS=1 requires it: %v\n%s", err, output)
+		}
+		t.Skipf("deno install could not resolve the fixture's dependencies (network needed): %v\n%s", err, output)
+	}
 	exe := fakeExecutable(t)
 
 	out := filepath.Join(t.TempDir(), "staged")
@@ -518,23 +558,51 @@ func TestStageRefusesTypeScriptTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stage error: %v", err)
 	}
-	if res != nil {
-		t.Fatalf("a refused stage must report no result, got %v", res)
+	if diags.HasErrors() {
+		t.Fatalf("stage diagnostics: %v", diags.All())
 	}
-	found := false
-	for _, d := range diags.All() {
-		if d.ID == "stage.tools.runtime-unsupported" {
-			found = true
-			if !strings.Contains(d.Rule, "TypeScript") {
-				t.Fatalf("the diagnostic must name the language: %q", d.Rule)
-			}
+	if len(res.RuntimeLanguages) != 1 || res.RuntimeLanguages[0] != "typescript" {
+		t.Fatalf("expected a typescript runtime closure, got %v", res.RuntimeLanguages)
+	}
+
+	closure := filepath.Join(out, "opt", "tenon", "runtimes", "tools")
+
+	var denoBin string
+	err = filepath.WalkDir(closure, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			t.Fatalf("the staged typescript closure carries a symlink: %s", path)
+		}
+		if !d.IsDir() && d.Name() == "deno" && filepath.Base(filepath.Dir(path)) == "bin" {
+			denoBin = path
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if denoBin == "" {
+		t.Fatal("the staged typescript closure must carry its own deno executable")
+	}
+
+	// The derived, path-keyed DENO_DIR caches (deno check's own, and
+	// whatever Prepare's inspection launch regenerated) do not survive into
+	// the staged closure; the downloaded npm package cache does.
+	denoDir := filepath.Join(filepath.Dir(filepath.Dir(denoBin)), "..", "deno-dir")
+	for _, gone := range []string{"check_cache_v2", "dep_analysis_cache_v2", "fast_check_cache_v2",
+		"node_analysis_cache_v2", "v8_code_cache_v2", "gen", "node_compat_bin"} {
+		if _, err := os.Lstat(filepath.Join(denoDir, gone)); !os.IsNotExist(err) {
+			t.Fatalf("%s must not survive into the staged closure: %v", gone, err)
 		}
 	}
-	if !found {
-		t.Fatalf("expected stage.tools.runtime-unsupported, got %v", diags.All())
+	if _, err := os.Stat(filepath.Join(denoDir, "npm")); err != nil {
+		t.Fatalf("the downloaded npm package cache must survive into the staged closure: %v", err)
 	}
-	if _, err := os.Stat(out); !os.IsNotExist(err) {
-		t.Fatal("a refused stage must leave no output directory")
+
+	if err := Verify(filepath.Join(out, "opt", "tenon", "artifact.json"), out); err != nil {
+		t.Fatalf("a staged TypeScript-tool tree must verify: %v", err)
 	}
 }
 

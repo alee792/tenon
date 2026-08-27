@@ -69,65 +69,6 @@ func TestStageCLIJourney(t *testing.T) {
 	}
 }
 
-// TestStageRefusesTypeScriptButOtherCommandsStillWork proves ADR 0021's
-// staging refusal end to end through the CLI: `tenon stage` reports the
-// stable stage.tools.runtime-unsupported diagnostic and writes no output
-// directory for a TypeScript-bearing agent, while `tenon validate` and
-// `tenon apply` keep working locally for the very same agent — only staging
-// refuses. Go and Python tools both stage today; only TypeScript is refused.
-func TestStageRefusesTypeScriptButOtherCommandsStillWork(t *testing.T) {
-	cases := []struct {
-		name     string
-		language string
-		setup    func(t *testing.T, agent string)
-	}{
-		{
-			name:     "typescript",
-			language: "TypeScript",
-			setup: func(t *testing.T, agent string) {
-				writeFile(t, agent, "deno.json", []byte("{}\n"), 0o644)
-				writeFile(t, agent, "deno.lock", []byte(`{"version":"4"}`+"\n"), 0o644)
-				writeFile(t, agent, "tools/shout_text.ts", []byte(typescriptToolFile), 0o644)
-			},
-		},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			agent := writeAgent(t, c.name+"-tool-agent", validInstructions)
-			c.setup(t, agent)
-			out := filepath.Join(t.TempDir(), "staged")
-
-			var stdout, stderr bytes.Buffer
-			code := run([]string{"stage", agent, "--harness", "claude", "--output", out, "--diagnostics", "jsonl"},
-				nil, &stdout, &stderr)
-			if code == 0 {
-				t.Fatalf("staging a %s-bearing agent must fail: %q", c.language, stdout.String())
-			}
-			got := filterDiags(parseDiagLines(t, stdout.String()), "stage.tools.runtime-unsupported")
-			if len(got) != 1 {
-				t.Fatalf("expected exactly one stage.tools.runtime-unsupported, got %q", stdout.String())
-			}
-			if !strings.Contains(got[0].Rule, c.language) {
-				t.Fatalf("the diagnostic must name %s: %q", c.language, got[0].Rule)
-			}
-			if _, err := os.Stat(out); !os.IsNotExist(err) {
-				t.Fatal("a refused stage must leave no output directory")
-			}
-
-			// Only staging refuses: validate never carries staging's own
-			// diagnostic for the identical agent, whatever it otherwise
-			// reports (a missing local deno/uv toolchain is this
-			// environment's business, not staging's refusal).
-			stdout.Reset()
-			stderr.Reset()
-			run([]string{"validate", agent, "--harness", "claude", "--diagnostics", "jsonl"}, nil, &stdout, &stderr)
-			if got := filterDiags(parseDiagLines(t, stdout.String()), "stage.tools.runtime-unsupported"); len(got) != 0 {
-				t.Fatalf("validate must never report stage's own diagnostic: %v", got)
-			}
-		})
-	}
-}
-
 // TestStageUnderGithubStyledPathStagesCleanly proves the build-machine-path
 // scan does not false-positive on an entirely ordinary agent location: a
 // path under a "github.com/<owner>/" directory, the shape any agent
@@ -201,5 +142,40 @@ func TestStageUnderGithubStyledPathStagesCleanlyWithAPythonClosure(t *testing.T)
 	stderr.Reset()
 	if code := run([]string{"stage", "verify", "--artifact", artifact, "--prefix", out}, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("a staged python-closure tree under a github.com/-styled path must verify: exit %d\nstderr: %s", code, stderr.String())
+	}
+}
+
+// TestStageUnderGithubStyledPathStagesCleanlyWithATypeScriptClosure is the
+// same false-positive proof as
+// TestStageUnderGithubStyledPathStagesCleanlyWithAPythonClosure, but with a
+// TypeScript closure present: the copied deno executable and the pruned,
+// cached-only DENO_DIR (downloaded npm package sources — ordinary text
+// free to carry short tokens like "github" or the agent's own directory
+// ancestry) must be routed to joined-path matching by carriedPayload, the
+// same provenance-based routing the Python closure already needed, not
+// left to component matching to false-positive on.
+func TestStageUnderGithubStyledPathStagesCleanlyWithATypeScriptClosure(t *testing.T) {
+	deno := requireToolchain(t, "deno")
+	agent := filepath.Join(t.TempDir(), "github.com", "someowner", "ts-agent")
+	writeFile(t, agent, "instructions.md", []byte(validInstructions), 0o644)
+	writeTypeScriptTool(t, agent)
+	lockDependencies(t, agent, deno, "install", "--entrypoint", "tools/shout_text.ts")
+
+	out := filepath.Join(t.TempDir(), "staged")
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"stage", agent, "--harness", "claude", "--output", out, "--diagnostics", "jsonl"},
+		nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("stage exit %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+	}
+	if got := filterDiags(parseDiagLines(t, stdout.String()), "stage.tree.build-path-leaked"); len(got) != 0 {
+		t.Fatalf("staging a typescript closure under a github.com/-styled path must not false-positive (got %d): %v",
+			len(got), got)
+	}
+
+	artifact := filepath.Join(out, "opt", "tenon", "artifact.json")
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"stage", "verify", "--artifact", artifact, "--prefix", out}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("a staged typescript-closure tree under a github.com/-styled path must verify: exit %d\nstderr: %s", code, stderr.String())
 	}
 }

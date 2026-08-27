@@ -113,20 +113,6 @@ func Stage(ctx context.Context, opts Options) (*Result, *diagnostics.List, error
 		return nil, diags, nil
 	}
 
-	// Refuse a TypeScript-bearing agent before any mutation: its execution
-	// closure does not land until ADR 0021's TypeScript rendering spike, and a
-	// tree staged for it today would verify while unable to serve. Go and
-	// Python tools both stage today; apply/validate/serve keep working for
-	// every language locally, only staging refuses.
-	if projectHasLanguage(p, toolruntime.TypeScript) {
-		diags.Errorf("stage.tools.runtime-unsupported", "tools",
-			"%s tools cannot be staged yet: Go and Python tools stage today, while the TypeScript execution closure lands with ADR 0021's bounded rendering spike (docs/adr/0021-execute-authored-tools-from-a-self-contained-closure.md)",
-			languageLabel(toolruntime.TypeScript))
-	}
-	if diags.HasErrors() {
-		return nil, diags, nil
-	}
-
 	absOutput, err := filepath.Abs(opts.Output)
 	if err != nil {
 		return nil, diags, fmt.Errorf("resolving output: %w", err)
@@ -356,31 +342,6 @@ func Stage(ctx context.Context, opts Options) (*Result, *diagnostics.List, error
 	}, diags, nil
 }
 
-// projectHasLanguage reports whether any of p's discovered tools are written
-// in lang.
-func projectHasLanguage(p *agentproject.Project, lang string) bool {
-	for _, t := range p.Tools {
-		if t.Language == lang {
-			return true
-		}
-	}
-	return false
-}
-
-// languageLabel renders a toolruntime language constant for prose.
-func languageLabel(lang string) string {
-	switch lang {
-	case toolruntime.Python:
-		return "Python"
-	case toolruntime.TypeScript:
-		return "TypeScript"
-	case toolruntime.Go:
-		return "Go"
-	default:
-		return lang
-	}
-}
-
 // harnessPlaceholderNote states plainly that the native harness runtime is not
 // bundled in this slice: the published tenon harness images do not exist yet,
 // so /opt/tenon/harness is an empty placeholder and the entrypoint expects the
@@ -453,6 +414,21 @@ func prepareClosure(ctx context.Context, p *agentproject.Project, diags *diagnos
 			return nil, "", nil, fmt.Errorf("normalizing the python closure for staging: %w", err)
 		}
 	}
+
+	// A TypeScript closure's DENO_DIR carries derived, path-keyed caches
+	// (type-check/codegen output) staging's own build-machine-path scan
+	// refuses to publish (ADR 0021): pruning them is staging-only
+	// normalization, not something a local `tenon apply`'s persistent
+	// workspace cache needs — see PruneDenoDirClosureCache. This must run
+	// after toolruntime.Prepare above has returned: Prepare's own
+	// inspection launch is itself a `deno run` that repopulates whatever
+	// derived caches it needs.
+	if langSet[toolruntime.TypeScript] {
+		if err := toolruntime.PruneDenoDirClosureCache(prepared); err != nil {
+			return nil, "", nil, fmt.Errorf("normalizing the typescript closure for staging: %w", err)
+		}
+	}
+
 	carry, err := os.MkdirTemp("", "tenon-stage-closure-")
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("creating the closure directory: %w", err)
@@ -535,10 +511,13 @@ func rewritePythonSysconfigData(oldRoot, newRoot string) error {
 }
 
 // maxBuildPathScanFileBytes bounds one file the build-machine-path scan
-// reads into memory. Nothing staging writes is expected anywhere near this
-// size; a file that exceeds it is an environment surprise, not an authored
-// contract violation, so it fails as an error rather than a diagnostic.
-const maxBuildPathScanFileBytes = 64 << 20
+// reads into memory. It matches toolruntime's own bound on a runtime
+// executable copied whole into a closure (maxClosureExecutableBytes): the
+// scan must read every legitimately staged file, deno's own ~150MB
+// executable among them, whole. A file that exceeds it is an environment
+// surprise, not an authored contract violation, so it fails as an error
+// rather than a diagnostic.
+const maxBuildPathScanFileBytes = 256 << 20
 
 // minBuildPathComponentLen excludes short path segments from the
 // build-machine-path scan. A compiled binary's own data is not text: any
@@ -725,6 +704,15 @@ func carriedPayload(rel, closureRootFinal string) bool {
 	case rest == "go/host":
 		// The compiled Go tool host binary. go.mod and main.go beside it
 		// are tenon-rendered text and stay component-matched.
+		return true
+	case rest == "deno" || strings.HasPrefix(rest, "deno/"):
+		// The copied deno executable itself.
+		return true
+	case rest == "deno-dir" || strings.HasPrefix(rest, "deno-dir/"):
+		// The pruned, cached-only DENO_DIR: downloaded npm package
+		// sources (arbitrary third-party text), carried in rather than
+		// authored or rendered by tenon — the same false-positive class
+		// CPython's stdlib text files exist to avoid.
 		return true
 	}
 	return false
