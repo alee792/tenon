@@ -1,8 +1,8 @@
 #!/bin/sh
 # Build the release archives and checksum manifest for an exact vX.Y.Z tag.
 #
-# The artifact names are contract, not convenience: ADR 0005 (as widened by its
-# successor) binds tenon_X.Y.Z_<os>_<arch>.tar.gz, each carrying exactly one
+# The artifact names are contract, not convenience: ADR 0005, as widened by
+# ADR 0022, binds tenon_X.Y.Z_<os>_<arch>.tar.gz, each carrying exactly one
 # `tenon` executable at the archive root, plus one tenon_X.Y.Z_SHA256SUMS
 # covering every archive. A user verifies that manifest before trusting the
 # binary, so this script writes those names literally rather than deriving them
