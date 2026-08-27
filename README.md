@@ -62,6 +62,29 @@ The measure of the product is that the journey above is only the first leg:
 
 All of it without editing the folder.
 
+## Install
+
+The first release, v0.1.0, is not yet published — this section is written
+so it becomes true the moment the tag lands. Once it does, the
+[releases page](https://github.com/alee792/tenon/releases) carries one
+archive per supported platform (`darwin-arm64`, `linux-amd64`,
+`linux-arm64`) plus one checksum manifest covering all three
+([ADR 0022](docs/adr/0022-widen-the-release-platform-matrix.md)):
+
+```sh
+curl -LO https://github.com/alee792/tenon/releases/download/v0.1.0/tenon_0.1.0_linux_amd64.tar.gz
+curl -LO https://github.com/alee792/tenon/releases/download/v0.1.0/tenon_0.1.0_SHA256SUMS
+sha256sum -c tenon_0.1.0_SHA256SUMS --ignore-missing
+tar -xzf tenon_0.1.0_linux_amd64.tar.gz
+install -m 0755 tenon /usr/local/bin/tenon   # or anywhere else on PATH
+tenon version                                # reports 0.1.0
+```
+
+Substitute `darwin_arm64` or `linux_arm64` for your platform. There is no
+`go install` journey and no `tenon package` command — the archive is the
+only supported distribution, per
+[ADR 0005](docs/adr/0005-first-install-release-archive.md).
+
 ## Staging for deployment
 
 `tenon stage` prepares one complete runnable filesystem tree at canonical
@@ -128,10 +151,13 @@ exact configuration that produced it.
 ## Status
 
 The [product specification](docs/product-spec.md)'s acceptance list is
-implemented and credential-free tested, with staging's authored-tool
-execution not yet runnable end to end (ADR 0021; see the specification's
-[known limitations](docs/product-spec.md#known-limitations)). The
-[north star](docs/north-star.md) governs every decision. Tenon was
-prototyped as `hctl` in
+implemented and credential-free tested. Staging serves Go and Python
+authored tools end to end from the staged tree; TypeScript remains refused
+with a named diagnostic pending its own bounded rendering spike (ADR 0021,
+issue #16). See the specification's
+[known limitations](docs/product-spec.md#known-limitations) for the rest,
+including that the Codex driver's successful-turn path has not been
+validated live. The [north star](docs/north-star.md) governs every
+decision. Tenon was prototyped as `hctl` in
 [alee792/hctl](https://github.com/alee792/hctl), now the frozen, read-only
 reference implementation.

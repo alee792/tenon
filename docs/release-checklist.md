@@ -1,0 +1,151 @@
+# v0.1.0 release checklist
+
+The ordered pre-tag checklist for the first release, distilled from
+[issue #22](https://github.com/alee792/tenon/issues/22). Version policy is
+already decided: ship `v0.1.0` clean — 0.x *is* the instability signal in
+semver — and use GitHub's pre-release checkbox (a `-suffixed` tag such as
+`v0.1.0-rc.1`) for audience signalling instead of an `-alpha` suffix; the
+release workflow marks a suffixed tag as a GitHub pre-release
+automatically.
+
+Each step below names what runs it and what it requires. "Automated"
+means CI or the release workflow proves it with no human action beyond
+triggering it; "manual" means a person must run and record it themselves.
+
+## 1. Full suite green
+
+```sh
+./scripts/check.sh
+```
+
+Automated (CI runs the same gate on every push and pull request); requires
+only the Go toolchain pinned in `go.mod`. Formats (`gofmt`), vets, and runs
+the full test suite with `-race`. No credentials, network, or Docker
+required — every test is credential-free per `AGENTS.md`.
+
+## 2. Reproducibility job green
+
+The "Release build is reproducible" job in `.github/workflows/ci.yml`
+builds the real release path twice against a throwaway tag
+(`v0.0.0-reproducibility-check`) via `scripts/release.sh` and diffs the two
+`SHA256SUMS` manifests. Automated; requires GNU tar (the runner is
+`ubuntu-24.04`, which has it) and no credentials. Confirm it is green on
+the commit that will be tagged, not merely on `main` at some earlier point.
+
+## 3. Container acceptance gate
+
+**Manual.** Build and exercise both harness images locally (neither is
+published — see [harness images](harness-images.md) and issue #19):
+
+```sh
+docker build -f images/codex/Dockerfile -t tenon-codex-check .
+docker build -f images/claude/Dockerfile -t tenon-claude-check .
+```
+
+Record a transcript showing each image builds and that `tenon stage`'s
+output runs inside it per the [two-stage journey](harness-images.md#two-journeys).
+Requires Docker and, per `images/inputs.json`, every
+`TODO-pin-before-first-build` pin (`go` and `uv`'s digests; `deno`,
+`claude`, and `codex`'s version, URL, and digest) resolved to a real,
+checksum-verified value first — the Dockerfiles cannot produce a usable
+image until then. Publishing either image is separate, explicitly
+authorized work and is out of scope for this checklist; the Claude image
+additionally awaits an Anthropic terms review before it may be published
+at all.
+
+## 4. Codex driver live validation
+
+Either of two outcomes satisfies this step:
+
+- **Live validation.** Manually run the Codex driver's successful-turn
+  path against a real, authenticated `codex` binary (the
+  `//go:build harness` integration tests exercise this; CI does not run
+  them). Requires local Codex credentials.
+- **Known-limitation line confirmed present.** If live auth is not fixed
+  before cut, confirm the release notes and `CHANGELOG.md`'s
+  Known limitations state the gap explicitly: only the Codex driver's
+  credential-safe 401 classification is live-validated, not its
+  successful-turn path. This is already recorded in
+  [`CHANGELOG.md`](../CHANGELOG.md) and
+  [the specification's known limitations](product-spec.md#known-limitations)
+  as of this checklist's writing.
+
+## 5. Release candidate tag rehearsal
+
+Tag an `-rc` suffix to exercise the full tag → build → publish pipeline
+end to end before the real tag:
+
+```sh
+git tag v0.1.0-rc.1
+git push origin v0.1.0-rc.1
+```
+
+**Requires a human with push and release-creation credentials** — this
+checklist does not authorize running it. The `Release` GitHub Actions
+workflow (`.github/workflows/release.yml`) is automated from the tag push
+onward: it builds all three platform archives with `scripts/release.sh`,
+verifies the checksum manifest, and publishes a GitHub release marked
+pre-release (the workflow's `case "$TAG" in *-*)` branch). Confirm the
+release page carries three `tenon_0.1.0-rc.1_<os>_<arch>.tar.gz` archives
+and one `tenon_0.1.0-rc.1_SHA256SUMS`, and that it is flagged pre-release.
+
+## 6. Clean-machine journey per platform
+
+**Manual, per platform** (`darwin-arm64`, `linux-amd64`, `linux-arm64`),
+using only the rc's published artifacts and the README — not this
+checkout:
+
+```sh
+curl -LO https://github.com/alee792/tenon/releases/download/v0.1.0-rc.1/tenon_0.1.0-rc.1_<os>_<arch>.tar.gz
+curl -LO https://github.com/alee792/tenon/releases/download/v0.1.0-rc.1/tenon_0.1.0-rc.1_SHA256SUMS
+sha256sum -c tenon_0.1.0-rc.1_SHA256SUMS --ignore-missing
+tar -xzf tenon_0.1.0-rc.1_<os>_<arch>.tar.gz
+./tenon version                       # reports v0.1.0-rc.1
+```
+
+Then, per issue #22:
+
+- Run [the five-minute journey](../README.md#the-first-five-minutes) verbatim.
+- Apply the same source to a second, unrelated workspace and confirm both
+  apply cleanly.
+- `tenon schedule trigger` against a schedule file, confirming it dispatches.
+- `tenon stage` an agent, per staging's ADR-0021-truthful state at cut
+  time (Go and Python tool agents stage and serve; a TypeScript-tool agent
+  is refused with `stage.tools.runtime-unsupported`).
+
+Record the transcript of each platform run as release acceptance evidence.
+Requires one real machine per platform (or an equivalent clean VM/container)
+and no credentials beyond what the journey itself needs (none, for `apply`
+and `stage`).
+
+## 7. README and release-notes accuracy pass
+
+**Manual**, done once per cut, not automated:
+
+- The README's first-five-minutes journey matches the rc rehearsal's
+  actual output byte for byte.
+- The README's Status section and this repository's `CHANGELOG.md` both
+  name exactly which languages stage end to end at cut time (per
+  issues #14–#17's state).
+- `CHANGELOG.md`'s `## [0.1.0]` heading's `UNRELEASED` marker is replaced
+  with the tag date, and its content is swept against `git log` one more
+  time for anything landed since the rc rehearsal.
+- `go test ./internal/docscheck/` passes, confirming every relative
+  Markdown link across `README.md`, `AGENTS.md`, `CHANGELOG.md`,
+  `CONTRIBUTING.md`, `SECURITY.md`, `examples/README.md`, and `docs/`
+  still resolves.
+
+## 8. Tag v0.1.0
+
+Only after every step above is green and recorded:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+**Requires a human with push and release-creation credentials.** The
+`Release` workflow then runs automatically, exactly as it did for the rc,
+publishing the three platform archives and the checksum manifest as a
+non-pre-release GitHub release (no `-suffix` on `v0.1.0`, so the workflow's
+prerelease case does not match).
