@@ -2,12 +2,25 @@
 
 All notable changes to this project are documented in this file.
 
-## [Unreleased]
+## [0.1.0] - UNRELEASED
 
 The first release, v0.1.0, ships the core described in
 [the product specification](docs/product-spec.md).
 
 ### Added
+
+- `tenon stage` never emits a Go tool tree that verifies but cannot serve
+  (issue #14): the staged apply record now names the closure root relative
+  to the workspace, and `tenon mcp serve` honors it when present, so a
+  staged Go-tool tree serves tool calls directly with no workspace tool
+  cache ever prepared. The generated Go host's `go.mod` replace directive
+  now names the agent source relative to its own build directory, so the
+  build-machine path is never embedded in the built binary in the first
+  place (previously visible via `go version -m` even after a `-trimpath`
+  build). Staging refuses a TypeScript-bearing agent with a named
+  diagnostic (`stage.tools.runtime-unsupported`) before any mutation;
+  `apply`/`validate`/`mcp serve` are unaffected and continue to work
+  locally for every language.
 
 - Python authored tools run from a self-contained execution closure (ADR
   0021): preparation installs a pinned, checksum-verified standalone
@@ -15,10 +28,10 @@ The first release, v0.1.0, ships the core described in
   it, with no venv, no `pyvenv.cfg`, and no interpreter symlink — `uv` never
   runs at serve time, and launch execs the closure's own interpreter
   directly, identically for `tenon apply`/`tenon mcp serve` and for a
-  staged tree. `tenon stage` now stages and serves Python-tool agents (Go
-  and Python both stage today; TypeScript remains refused with a named
-  diagnostic pending its own rendering spike). The staged manifest records
-  the interpreter's identity and ABI (for example
+  staged tree. `tenon stage` now stages and serves Python-tool agents too
+  (Go and Python both stage and serve today; TypeScript remains refused
+  with a named diagnostic pending its own rendering spike, issue #16). The
+  staged manifest records the interpreter's identity and ABI (for example
   `cpython-3.11.13-linux-x86_64-gnu`). Preparing a Python-tool agent
   requires the network on every run, not only the first (`uv` does not
   cache the interpreter download itself); the exact interpreter installed
@@ -50,6 +63,38 @@ The first release, v0.1.0, ships the core described in
   explicitly overwrites modified tenon-owned files (hand-authored files stay
   refused).
 
+- Release archives cover `darwin-arm64`, `linux-amd64`, and `linux-arm64`
+  (ADR 0022), each `tenon_X.Y.Z_<os>_<arch>.tar.gz` holding exactly one
+  `tenon` executable at its root, alongside one `tenon_X.Y.Z_SHA256SUMS`
+  covering all three. Archives are byte-identical for a given tag and Go
+  toolchain — build timestamps derive from the tagged commit rather than
+  the clock — and CI's "Release build is reproducible" job builds the real
+  release path twice against a throwaway tag and fails if the checksums
+  differ. `scripts/release.sh` builds the archives; the `Release` GitHub
+  Actions workflow triggers on any pushed tag matching `v*.*.*` (which
+  also matches a pre-release-suffixed rehearsal tag like `v0.1.0-rc.1`,
+  not only a clean `vX.Y.Z`) and publishes them, marking the suffixed
+  case as a GitHub pre-release automatically. `tenon version` reports the
+  version stamped at build time from the tag, closing the gap where every
+  binary previously reported a hardcoded `0.1.0-dev` regardless of what an
+  agent manifest's `tenon_version` pin expected.
+
+- `docs/harness-images.md` and `images/<claude|codex>/Dockerfile` define
+  the compatible-base contract, the two build journeys (direct apply, and
+  two-stage selective staging), the credential boundary, and what gates
+  publication of each harness image; neither image is published yet, and
+  publication of the Claude image additionally awaits an Anthropic terms
+  review (issue #19).
+
+- `tenon fingerprint show` reports an agent's source fingerprint and its
+  per-file digests without applying anything; `tenon apply` records the
+  clean working tree's git commit SHA alongside the apply record when the
+  source is a clean git checkout; and `apply`/`validate` accept
+  `--diagnostics jsonl` to emit a single structured JSON summary line
+  instead of prose, for scripted and outer-loop consumption —
+  `{agent, fingerprint}` for `validate`, and `{agent, harness, workspace,
+  fingerprint, written, removed, managed_tools}` for `apply`.
+
 - `tenon apply` and `tenon validate` compile one filesystem-authored agent
   project (`instructions.md`, `skills/`, `plugins/`, `tools/`,
   `subagents/`, `connections/`, `schedules/`, `harnesses/`)
@@ -78,13 +123,23 @@ The first release, v0.1.0, ships the core described in
 See [the specification's known limitations](docs/product-spec.md#known-limitations)
 for the full list. Notably:
 
-- Staging cannot yet serve authored tools end to end in any language
-  (ADR 0021); the per-language closures land in issues #14–#17.
+- Staging serves Go and Python authored tools end to end from the staged
+  tree today (ADR 0021); TypeScript remains refused with a named
+  diagnostic (`stage.tools.runtime-unsupported`) pending its own bounded
+  rendering spike (issue #16).
+- Python tool preparation fetches the pinned standalone CPython
+  interpreter on every `validate`/`apply` run, not only the first, because
+  `uv` does not cache the interpreter download itself; a network-restricted
+  machine needs it reachable through whatever channel supplies tenon's
+  other pinned inputs.
 - A supplied manifest is verified at `tenon run`'s session start, not
   re-verified per turn within that session (`schedule run` re-verifies
   each occurrence).
 - The Codex driver's successful-turn path has not been validated live —
   only its credential-safe 401 classification has.
+- Neither harness image (`docs/harness-images.md`) is published; the Claude
+  image additionally awaits an Anthropic terms review before it may be
+  published at all (issue #19).
 
 ### Compatibility policy (0.x)
 
