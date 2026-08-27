@@ -10,8 +10,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Supersede in-flight pull-request runs, but never cancel a run on main:
+  # a fast follow-up merge would otherwise destroy the only green signal the
+  # previous commit ever had.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   check:
@@ -20,22 +23,60 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Check out source
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          # Nothing here pushes, and the suite executes third-party TypeScript
+          # and Python through the authored-tool hosts. Do not leave a token in
+          # .git/config where those subprocesses can read it.
+          persist-credentials: false
 
       - name: Set up Go from go.mod
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
 
       # Deno and uv let the polyglot authored-tool tests run rather than
       # skip; the suite stays green without them.
       - name: Set up Deno
-        uses: denoland/setup-deno@v2
+        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
           deno-version: v2.x
+          cache: true
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
 
       - name: Run repository checks
         run: ./scripts/check.sh
+
+  reproducible:
+    name: Release build is reproducible
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go from go.mod
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+
+      # The project claims its release artifacts are reproducible. Build the
+      # real release path twice against a throwaway tag and require identical
+      # checksums, so the claim is a test rather than an assertion.
+      - name: Build the release archives twice and compare
+        run: |
+          set -eu
+          git tag --force v0.0.0-reproducibility-check HEAD
+          ./scripts/release.sh v0.0.0-reproducibility-check
+          cp dist/tenon_*_SHA256SUMS "$RUNNER_TEMP/first.sums"
+          ./scripts/release.sh v0.0.0-reproducibility-check
+          if ! diff -u "$RUNNER_TEMP/first.sums" dist/tenon_*_SHA256SUMS; then
+            echo "release archives are not byte-reproducible" >&2
+            exit 1
+          fi
+          echo "release archives are byte-reproducible"
