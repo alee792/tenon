@@ -124,9 +124,11 @@ exact configuration that produced it.
 
 ## Status
 
-Pre-implementation. The [product specification](docs/product-spec.md) is the
-binding contract, [docs/workbench/status.md](docs/workbench/status.md) tracks
-the gap, and the [north star](docs/north-star.md) governs every decision.
-Tenon was prototyped as `hctl` in
+The [product specification](docs/product-spec.md)'s acceptance list is
+implemented and credential-free tested, with staging's authored-tool
+execution not yet runnable end to end (ADR 0021; see the specification's
+[known limitations](docs/product-spec.md#known-limitations)). The
+[north star](docs/north-star.md) governs every decision. Tenon was
+prototyped as `hctl` in
 [alee792/hctl](https://github.com/alee792/hctl), now the frozen, read-only
 reference implementation.
