@@ -10,10 +10,10 @@ import (
 
 // fakeClosure is a credential-free resolver: it returns fixed pins without ever
 // running a real harness or toolchain.
-func fakeClosure(harnessVersion, deno, uv, goVer string, pkgs []PackageIdentity) Resolver {
+func fakeClosure(harnessVersion, deno, uv, goVer, python string, pkgs []PackageIdentity) Resolver {
 	return Resolver{
 		HarnessVersion:    func(string) (string, error) { return harnessVersion, nil },
-		ToolRuntimes:      func() (string, string, string, error) { return deno, uv, goVer, nil },
+		ToolRuntimes:      func() (string, string, string, string, error) { return deno, uv, goVer, python, nil },
 		PackageIdentities: func(string) ([]PackageIdentity, error) { return pkgs, nil },
 	}
 }
@@ -82,7 +82,7 @@ func TestMarshalByteIdentical(t *testing.T) {
 		{ID: "zeta", ManifestSHA256: "22"},
 		{ID: "alpha", ManifestSHA256: "11"},
 	}
-	r := fakeClosure("2.1.240", "2.0.0", "", "1.26.5", pkgs)
+	r := fakeClosure("2.1.240", "2.0.0", "", "1.26.5", "", pkgs)
 
 	a, err := Resolve(fakeProject(), "claude", "0.1.0-dev", r)
 	if err != nil {
@@ -114,7 +114,7 @@ func TestMarshalByteIdentical(t *testing.T) {
 }
 
 func TestVerifyPassesOnIdentical(t *testing.T) {
-	r := fakeClosure("2.1.240", "2.0.0", "", "1.26.5", []PackageIdentity{{ID: "gh", ManifestSHA256: "abc"}})
+	r := fakeClosure("2.1.240", "2.0.0", "", "1.26.5", "", []PackageIdentity{{ID: "gh", ManifestSHA256: "abc"}})
 	cur, _ := Resolve(fakeProject(), "claude", "0.1.0-dev", r)
 	sup, _ := Resolve(fakeProject(), "claude", "0.1.0-dev", r)
 	if err := Verify(sup, cur); err != nil {
@@ -124,7 +124,7 @@ func TestVerifyPassesOnIdentical(t *testing.T) {
 
 func TestVerifyFailsClosedPerPin(t *testing.T) {
 	base := func() Resolver {
-		return fakeClosure("2.1.240", "2.0.0", "", "1.26.5", []PackageIdentity{{ID: "gh", ManifestSHA256: "abc"}})
+		return fakeClosure("2.1.240", "2.0.0", "", "1.26.5", "", []PackageIdentity{{ID: "gh", ManifestSHA256: "abc"}})
 	}
 	supplied, _ := Resolve(fakeProject(), "claude", "0.1.0-dev", base())
 
@@ -138,23 +138,33 @@ func TestVerifyFailsClosedPerPin(t *testing.T) {
 	mustCode(t, Verify(supplied, cur), "manifest.drift.tenon-version")
 
 	// harness version drift
-	cur, _ = Resolve(fakeProject(), "claude", "0.1.0-dev", fakeClosure("9.9.9", "2.0.0", "", "1.26.5", []PackageIdentity{{ID: "gh", ManifestSHA256: "abc"}}))
+	cur, _ = Resolve(fakeProject(), "claude", "0.1.0-dev", fakeClosure("9.9.9", "2.0.0", "", "1.26.5", "", []PackageIdentity{{ID: "gh", ManifestSHA256: "abc"}}))
 	mustCode(t, Verify(supplied, cur), "manifest.drift.harness-version")
 
 	// package manifest hash drift
-	cur, _ = Resolve(fakeProject(), "claude", "0.1.0-dev", fakeClosure("2.1.240", "2.0.0", "", "1.26.5", []PackageIdentity{{ID: "gh", ManifestSHA256: "CHANGED"}}))
+	cur, _ = Resolve(fakeProject(), "claude", "0.1.0-dev", fakeClosure("2.1.240", "2.0.0", "", "1.26.5", "", []PackageIdentity{{ID: "gh", ManifestSHA256: "CHANGED"}}))
 	mustCode(t, Verify(supplied, cur), "manifest.drift.package-hash")
 
 	// package pinned but absent in current
-	cur, _ = Resolve(fakeProject(), "claude", "0.1.0-dev", fakeClosure("2.1.240", "2.0.0", "", "1.26.5", nil))
+	cur, _ = Resolve(fakeProject(), "claude", "0.1.0-dev", fakeClosure("2.1.240", "2.0.0", "", "1.26.5", "", nil))
 	mustCode(t, Verify(supplied, cur), "manifest.drift.package-missing")
 
-	// tool runtime drift
-	cur, _ = Resolve(fakeProject(), "claude", "0.1.0-dev", fakeClosure("2.1.240", "2.9.9", "", "1.26.5", []PackageIdentity{{ID: "gh", ManifestSHA256: "abc"}}))
+	// tool runtime drift (deno)
+	cur, _ = Resolve(fakeProject(), "claude", "0.1.0-dev", fakeClosure("2.1.240", "2.9.9", "", "1.26.5", "", []PackageIdentity{{ID: "gh", ManifestSHA256: "abc"}}))
 	mustCode(t, Verify(supplied, cur), "manifest.drift.tool-runtime")
 
+	// tool runtime drift (python): the resolved version specification
+	// changing — an author editing requires-python or .python-version — is
+	// exactly the drift this pin exists to catch, per ToolRuntimes.Python's
+	// doc on what it can and cannot verify.
+	pySupplied, _ := Resolve(fakeProject(), "claude", "0.1.0-dev",
+		fakeClosure("2.1.240", "2.0.0", "", "1.26.5", "3.11", []PackageIdentity{{ID: "gh", ManifestSHA256: "abc"}}))
+	cur, _ = Resolve(fakeProject(), "claude", "0.1.0-dev",
+		fakeClosure("2.1.240", "2.0.0", "", "1.26.5", "3.12", []PackageIdentity{{ID: "gh", ManifestSHA256: "abc"}}))
+	mustCode(t, Verify(pySupplied, cur), "manifest.drift.tool-runtime")
+
 	// package now selected but not pinned (present in current, absent in supplied)
-	noPkg, _ := Resolve(fakeProject(), "claude", "0.1.0-dev", fakeClosure("2.1.240", "2.0.0", "", "1.26.5", nil))
+	noPkg, _ := Resolve(fakeProject(), "claude", "0.1.0-dev", fakeClosure("2.1.240", "2.0.0", "", "1.26.5", "", nil))
 	cur, _ = Resolve(fakeProject(), "claude", "0.1.0-dev", base())
 	mustCode(t, Verify(noPkg, cur), "manifest.drift.package-added")
 
@@ -171,7 +181,7 @@ func TestVerifyFailsClosedPerPin(t *testing.T) {
 // closure pins no harness (a hand-built or future caller): Verify must not
 // silently pass.
 func TestVerifyRejectsNoHarnessClosure(t *testing.T) {
-	supplied, _ := Resolve(fakeProject(), "claude", "0.1.0-dev", fakeClosure("2.1.240", "", "", "", nil))
+	supplied, _ := Resolve(fakeProject(), "claude", "0.1.0-dev", fakeClosure("2.1.240", "", "", "", "", nil))
 	empty := &Manifest{Agent: supplied.Agent, SourceFingerprint: supplied.SourceFingerprint, TenonVersion: supplied.TenonVersion}
 	mustCode(t, Verify(supplied, empty), "manifest.verify.no-harness")
 }
@@ -179,7 +189,7 @@ func TestVerifyRejectsNoHarnessClosure(t *testing.T) {
 // TestVerifyIgnoresModel proves the deliberate non-verification of the model
 // pin: two manifests that differ only in model verify cleanly.
 func TestVerifyIgnoresModel(t *testing.T) {
-	r := fakeClosure("2.1.240", "", "", "", nil)
+	r := fakeClosure("2.1.240", "", "", "", "", nil)
 	cur, _ := Resolve(fakeProject(), "claude", "0.1.0-dev", r)
 	sup, _ := Resolve(fakeProject(), "claude", "0.1.0-dev", r)
 	// A supplied manifest may record a model; Resolve leaves current empty.

@@ -588,7 +588,7 @@ func TestStageGoClosureCarriesNoBuildMachinePath(t *testing.T) {
 		t.Fatal("the fixture's own agent and executable directories must yield at least one dangerous needle to check against; the test proves nothing otherwise")
 	}
 	scanDiags := &diagnostics.List{}
-	if err := rejectBuildMachinePaths(out, componentNeedles, joinedNeedles, scanDiags); err != nil {
+	if err := rejectBuildMachinePaths(out, "", componentNeedles, joinedNeedles, scanDiags); err != nil {
 		t.Fatal(err)
 	}
 	if scanDiags.HasErrors() {
@@ -634,7 +634,7 @@ func TestRejectBuildMachinePathsFiresOnALeak(t *testing.T) {
 		t.Fatal(err)
 	}
 	diags := &diagnostics.List{}
-	if err := rejectBuildMachinePaths(clean, needles, nil, diags); err != nil {
+	if err := rejectBuildMachinePaths(clean, "", needles, nil, diags); err != nil {
 		t.Fatalf("scanning a clean tree: %v", err)
 	}
 	if diags.HasErrors() {
@@ -647,7 +647,7 @@ func TestRejectBuildMachinePathsFiresOnALeak(t *testing.T) {
 		t.Fatal(err)
 	}
 	diags = &diagnostics.List{}
-	if err := rejectBuildMachinePaths(leaking, needles, nil, diags); err != nil {
+	if err := rejectBuildMachinePaths(leaking, "", needles, nil, diags); err != nil {
 		t.Fatalf("scanning a leaking tree: %v", err)
 	}
 	found := false
@@ -683,7 +683,7 @@ func TestRejectBuildMachinePathsIgnoresBareComponentsInABinary(t *testing.T) {
 		t.Fatal(err)
 	}
 	diags := &diagnostics.List{}
-	if err := rejectBuildMachinePaths(textDir, componentNeedles, nil, diags); err != nil {
+	if err := rejectBuildMachinePaths(textDir, "", componentNeedles, nil, diags); err != nil {
 		t.Fatalf("scanning text: %v", err)
 	}
 	if !diags.HasErrors() {
@@ -699,7 +699,7 @@ func TestRejectBuildMachinePathsIgnoresBareComponentsInABinary(t *testing.T) {
 		t.Fatal(err)
 	}
 	diags = &diagnostics.List{}
-	if err := rejectBuildMachinePaths(binDir, componentNeedles, nil, diags); err != nil {
+	if err := rejectBuildMachinePaths(binDir, "", componentNeedles, nil, diags); err != nil {
 		t.Fatalf("scanning a binary: %v", err)
 	}
 	if diags.HasErrors() {
@@ -731,7 +731,7 @@ func TestRejectBuildMachinePathsFiresOnAJoinedLeakInABinary(t *testing.T) {
 				t.Fatal(err)
 			}
 			diags := &diagnostics.List{}
-			if err := rejectBuildMachinePaths(dir, nil, joinedNeedles, diags); err != nil {
+			if err := rejectBuildMachinePaths(dir, "", nil, joinedNeedles, diags); err != nil {
 				t.Fatalf("scanning: %v", err)
 			}
 			found := false
@@ -744,6 +744,55 @@ func TestRejectBuildMachinePathsFiresOnAJoinedLeakInABinary(t *testing.T) {
 				t.Fatalf("expected the scan to fire on a binary embedding a joined leak, got %v", diags.All())
 			}
 		})
+	}
+}
+
+// TestRejectBuildMachinePathsRoutesByProvenanceNotContentType is the
+// synthetic, network-free proof of the fix for the false-positive class a
+// real Python closure produces: a TEXT file positioned inside a carried-in
+// runtime payload (the closure's interpreter tree) that happens to carry a
+// bare component match — exactly CPython's own stdlib shape, thousands of
+// ordinary text files free to carry short tokens like "github.com" or an
+// organization name — must NOT fire, purely because of where it lives, not
+// because of whether its bytes look binary. A text file living at a
+// tenon-generated position (the workspace's own apply record, standing in
+// for go.mod/main.go/the copied agent source) carrying the identical bytes
+// still must fire: the scan is not simply disabled near a closure, only
+// re-routed within it. See carriedPayload.
+func TestRejectBuildMachinePathsRoutesByProvenanceNotContentType(t *testing.T) {
+	root := t.TempDir()
+	closureRootFinal := "/opt/tenon/runtimes/tools"
+	hash := "abc123hash"
+
+	// Carried-in payload position: a plain-text stdlib-shaped file under the
+	// closure's own interpreter tree.
+	writeFile(t, root, filepath.Join("opt", "tenon", "runtimes", "tools", hash,
+		"cpython", "cpython-3.11.13-linux-x86_64-gnu", "lib", "python3.11", "some_stdlib.py"),
+		"import os\n# see github.com/someowner for details\n")
+
+	// Generated position: text tenon itself writes (standing in for the
+	// apply record / go.mod / main.go / the copied agent source).
+	writeFile(t, root, filepath.Join("workspace", ".tenon", "apply-claude.json"),
+		`{"note":"replace target => /tmp/x/github.com/someowner/leak"}`)
+
+	componentNeedles := [][]byte{[]byte("github.com"), []byte("someowner")}
+	diags := &diagnostics.List{}
+	if err := rejectBuildMachinePaths(root, closureRootFinal, componentNeedles, nil, diags); err != nil {
+		t.Fatal(err)
+	}
+
+	flagged := map[string]bool{}
+	for _, d := range diags.All() {
+		if d.ID == "stage.tree.build-path-leaked" {
+			flagged[d.Path] = true
+		}
+	}
+	if flagged[filepath.ToSlash(filepath.Join("opt", "tenon", "runtimes", "tools", hash,
+		"cpython", "cpython-3.11.13-linux-x86_64-gnu", "lib", "python3.11", "some_stdlib.py"))] {
+		t.Fatalf("a carried-in payload text file must not be component-matched: %v", diags.All())
+	}
+	if !flagged[filepath.ToSlash(filepath.Join("workspace", ".tenon", "apply-claude.json"))] {
+		t.Fatalf("a generated text file embedding the identical bytes must still be flagged: %v", diags.All())
 	}
 }
 

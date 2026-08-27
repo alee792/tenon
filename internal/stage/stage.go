@@ -163,6 +163,19 @@ func Stage(ctx context.Context, opts Options) (*Result, *diagnostics.List, error
 	if err != nil {
 		return nil, diags, err
 	}
+	if closureDir != "" {
+		// prepareClosure carries the prepared closure out into its own
+		// throwaway directory (closureDir's parent) so the later copyTree
+		// into the staged tree can read it after the prepare-time cache
+		// itself is gone. Once Stage is done with closureDir — on every
+		// return path, success or failure — that carried copy is a second,
+		// unpublished copy of the whole closure (tens to well over a
+		// hundred megabytes with a Python interpreter and its dependencies)
+		// with nothing left to clean it up; removing it only on the
+		// copy-failure path inside prepareClosure left it on disk after
+		// every successful stage.
+		defer os.RemoveAll(filepath.Dir(closureDir))
+	}
 	if diags.HasErrors() {
 		return nil, diags, nil
 	}
@@ -320,7 +333,7 @@ func Stage(ctx context.Context, opts Options) (*Result, *diagnostics.List, error
 	// data is checked only for the fuller joined-path forms instead, since
 	// bare-component matching against it produces false positives no
 	// author-chosen path can dodge (see buildMachineJoinedNeedles).
-	if err := rejectBuildMachinePaths(tmp,
+	if err := rejectBuildMachinePaths(tmp, closureRootFinal,
 		buildMachineNeedles(p.Root, tmp, prepRoots),
 		buildMachineJoinedNeedles(p.Root, tmp, prepRoots),
 		diags); err != nil {
@@ -650,10 +663,12 @@ func buildMachineJoinedNeedles(agentRoot, stageTmp string, prepRoots []string) [
 
 // looksBinary reports whether content is binary rather than text, by the
 // same signal most "file"-style tools use: a NUL byte, or bytes that are
-// not valid UTF-8. The build-machine-path scan uses this to choose which
-// needle set to search a file with — component matching for text, joined
-// matching for binary — because a compiled binary's own data legitimately
-// contains short generic-looking tokens a text file would not.
+// not valid UTF-8. rejectBuildMachinePaths uses this only as a defensive
+// fallback within a file it has otherwise classified as tenon-generated
+// text (see carriedPayload): a compiled binary's own data legitimately
+// contains short generic-looking tokens a text file would not, so a
+// surprise binary landing in a "generated" position is still joined-matched
+// rather than component-matched.
 func looksBinary(content []byte) bool {
 	if bytes.IndexByte(content, 0) >= 0 {
 		return true
@@ -661,19 +676,80 @@ func looksBinary(content []byte) bool {
 	return !utf8.Valid(content)
 }
 
+// carriedPayload reports whether the staged file at rel (slash-separated,
+// relative to the staged tree root) is a runtime payload tenon carries in
+// from elsewhere — a compiled binary, or a third-party interpreter and
+// dependency tree — as opposed to text tenon itself generates or renders,
+// or the author's own copied source. The build-machine-path scan routes by
+// this provenance axis, not by whether a file's own bytes happen to look
+// binary: CPython's standalone interpreter alone ships roughly four
+// thousand ordinary TEXT files (its stdlib and C headers), each free to
+// carry short, ordinary-looking tokens ("github", "runner", "project", an
+// organization or CI runner's own directory name) that collide with a real
+// agent's path components by pure coincidence, exactly the false-positive
+// class component matching exists to avoid for a compiled binary's data —
+// so a carried-in tree is joined-matched wholesale regardless of whether
+// any one file inside it is text or binary. closureRootFinal is the
+// closure's own final canonical root (finalRuntimes+"/tools"), or "" for a
+// tool-free agent.
+func carriedPayload(rel, closureRootFinal string) bool {
+	if rel == strings.TrimPrefix(finalTenonBin, "/") {
+		return true
+	}
+	if closureRootFinal == "" {
+		return false
+	}
+	root := strings.TrimPrefix(closureRootFinal, "/") + "/"
+	withinClosureRoot, ok := strings.CutPrefix(rel, root)
+	if !ok {
+		return false
+	}
+	// withinClosureRoot is "<hash>/<rest>": one language closure sits
+	// directly under the closure root, named by source fingerprint plus
+	// host digest (toolruntime.Config.CacheDir). "<rest>" names the payload
+	// within it.
+	_, rest, ok := strings.Cut(withinClosureRoot, "/")
+	if !ok {
+		return false
+	}
+	switch {
+	case rest == "cpython" || strings.HasPrefix(rest, "cpython/"):
+		// The pinned standalone CPython interpreter tree: stdlib, C
+		// headers, the compiled interpreter binary and shared library.
+		return true
+	case rest == "site" || strings.HasPrefix(rest, "site/"):
+		// The project's own locked third-party dependencies, installed
+		// flat with no venv (ADR 0021) — carried in, not authored or
+		// rendered by tenon.
+		return true
+	case rest == "go/host":
+		// The compiled Go tool host binary. go.mod and main.go beside it
+		// are tenon-rendered text and stay component-matched.
+		return true
+	}
+	return false
+}
+
 // rejectBuildMachinePaths fails closed if any regular file inside root
 // embeds a dangerous build-machine path: preparation may write
-// machine-local paths, but publication may not carry them (ADR 0021). A
-// text file is checked component by component (componentNeedles); a binary
-// file is checked only for the fuller joined-path forms (joinedNeedles) —
-// bare-component matching against a compiled binary's own data produces the
-// class of false positive an agent living under, say, a `github.com/<org>/`
-// path or a directory named `context` or `internal` triggers by pure
-// coincidence with the binary's own embedded Go module and package data.
-// Every match is reported as a diagnostic naming the offending staged path
-// and the exact leaked text, so a caller sees every leak in one run rather
-// than stopping at the first.
-func rejectBuildMachinePaths(root string, componentNeedles, joinedNeedles [][]byte, diags *diagnostics.List) error {
+// machine-local paths, but publication may not carry them (ADR 0021). Each
+// file is routed by carriedPayload: a carried-in runtime payload (the
+// interpreter tree, the dependency directory, a compiled host binary, the
+// tenon executable) is checked only for the fuller joined-path forms
+// (joinedNeedles) — bare-component matching against payload data produces
+// the class of false positive an agent living under, say, a
+// `github.com/<org>/` path, or CPython's own thousands of ordinary stdlib
+// text files, triggers by pure coincidence; text tenon itself generates or
+// renders — the workspace integration, the apply record, a closure's own
+// go.mod/main.go, artifact.json, the copied agent source — is checked
+// component by component (componentNeedles), the same "a rewritten go.mod
+// proved a joined-absolute-string check insufficient on its own for text"
+// case ADR 0021 names, with looksBinary as a defensive fallback to joined
+// matching for the rare case a "generated" position turns out to hold
+// binary content after all. Every match is reported as a diagnostic naming
+// the offending staged path and the exact leaked text, so a caller sees
+// every leak in one run rather than stopping at the first.
+func rejectBuildMachinePaths(root, closureRootFinal string, componentNeedles, joinedNeedles [][]byte, diags *diagnostics.List) error {
 	if len(componentNeedles) == 0 && len(joinedNeedles) == 0 {
 		return nil
 	}
@@ -691,27 +767,38 @@ func rejectBuildMachinePaths(root string, componentNeedles, joinedNeedles [][]by
 		if info.Size() > maxBuildPathScanFileBytes {
 			return fmt.Errorf("the staged file %s exceeds the build-path scan's size bound", path)
 		}
-		content, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
 		rel, err := filepath.Rel(root, path)
 		if err != nil {
 			return err
 		}
-		needles := componentNeedles
-		if looksBinary(content) {
-			needles = joinedNeedles
+		relSlash := filepath.ToSlash(rel)
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
 		}
-		for _, needle := range needles {
-			if bytes.Contains(content, needle) {
-				diags.Errorf("stage.tree.build-path-leaked", filepath.ToSlash(rel),
-					"the staged file embeds the build-machine path %q; staging fails closed rather than publish a tree that verifies but carries preparation-machine detail",
-					string(needle))
+
+		needles := joinedNeedles
+		if !carriedPayload(relSlash, closureRootFinal) {
+			needles = componentNeedles
+			if looksBinary(content) {
+				needles = joinedNeedles
 			}
 		}
-		return nil
+		return matchNeedles(relSlash, content, needles, diags)
 	})
+}
+
+// matchNeedles reports every needle found in content as a
+// stage.tree.build-path-leaked diagnostic naming relSlash.
+func matchNeedles(relSlash string, content []byte, needles [][]byte, diags *diagnostics.List) error {
+	for _, needle := range needles {
+		if bytes.Contains(content, needle) {
+			diags.Errorf("stage.tree.build-path-leaked", relSlash,
+				"the staged file embeds the build-machine path %q; staging fails closed rather than publish a tree that verifies but carries preparation-machine detail",
+				string(needle))
+		}
+	}
+	return nil
 }
 
 // physical maps a canonical final path to its physical location under root.

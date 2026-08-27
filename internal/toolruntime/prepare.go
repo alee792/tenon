@@ -57,9 +57,19 @@ var (
 // see. Anything else is dropped. The CA entries let a toolchain find the
 // operator's certificate authority in a proxied or custom-CA environment:
 // SSL_CERT_FILE/SSL_CERT_DIR for the OpenSSL-based tools, and DENO_CERT for
-// Deno, which reads its CA from that variable rather than the SSL_CERT_* pair.
+// Deno, which reads its CA from that variable rather than the SSL_CERT_*
+// pair. The proxy entries are the other half of "a proxied environment":
+// the CA lets a toolchain trust the proxy's certificate, but without the
+// proxy variables themselves a mandatory-proxy environment still can't
+// reach the network at all — uv (python install's own fetch, deno's module
+// resolution) and go all honor the standard HTTP_PROXY/HTTPS_PROXY/NO_PROXY
+// trio, and both the upper- and lower-case forms are read in practice
+// (curl-style tooling conventionally prefers lower-case for all but
+// HTTPS_PROXY, to avoid the legacy CGI HTTP_PROXY footgun), so both are
+// allowed through.
 var environmentAllowlist = []string{
 	"PATH", "HOME", "TMPDIR", "LANG", "SSL_CERT_FILE", "SSL_CERT_DIR", "DENO_CERT", "GOROOT", "GOPATH",
+	"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
 }
 
 // Prepare materializes and inspects the tool runtime for cfg. It is safe to
@@ -236,7 +246,22 @@ func prepareClosurePython(ctx context.Context, cfg Config, dir, uv string) error
 		return prepareFailure(Python, "the intermediate requirements file could not be removed")
 	}
 
-	return normalizePythonClosure(filepath.Dir(filepath.Dir(interpBin)), siteDir)
+	return normalizePythonClosure(cpythonRoot, filepath.Dir(filepath.Dir(interpBin)), siteDir)
+}
+
+// ResolvePythonVersionSpec resolves the Python version specification a
+// project's own pin names — a `.python-version` file's exact pin, or the
+// floor of pyproject.toml's `requires-python` range — without installing or
+// fetching anything. It is exported so the agent manifest's tool-runtime
+// resolution (cmd/tenon) can pin what preparation will install without
+// duplicating this parsing: manifest resolution runs before tool
+// preparation (ADR: a supplied manifest is verified before any workspace
+// mutation), so it cannot yet read the exact patch and ABI
+// `uv python install` will actually resolve to — see prepareClosurePython
+// and pythonClosureLayout for that identity, which is what the staged
+// artifact manifest carries once preparation has actually run.
+func ResolvePythonVersionSpec(source string) (string, error) {
+	return pythonVersionSpec(source)
 }
 
 // pythonVersionSpec resolves the Python version to install: a `.python-version`
@@ -314,11 +339,24 @@ func pythonClosureLayout(dir string) (interpBin, siteDir, identity string, err e
 // must already be symlink-free before it can ever be staged; local
 // apply/serve normalizes exactly the same way, per ADR 0021's "one
 // contract, not a staging mode".
-func normalizePythonClosure(interpDir, siteDir string) error {
+// cpythonRoot is the --install-dir uv python install was given (the parent
+// of interpDir, the one versioned interpreter directory it installed).
+func normalizePythonClosure(cpythonRoot, interpDir, siteDir string) error {
 	for _, p := range []string{
 		filepath.Join(interpDir, "share", "terminfo"),
 		filepath.Join(interpDir, "share", "man"),
 		filepath.Join(siteDir, "bin"),
+		// uv's own bookkeeping at the install-dir and target-dir roots
+		// (its cross-process install lock, a scratch .temp/ directory it
+		// uses mid-install, and a .gitignore convenience for the
+		// directory) — never referenced by anything on tenon's launch
+		// path, and no more tenon's to ship than the uv binary itself.
+		filepath.Join(cpythonRoot, ".lock"),
+		filepath.Join(cpythonRoot, ".temp"),
+		filepath.Join(cpythonRoot, ".gitignore"),
+		filepath.Join(siteDir, ".lock"),
+		filepath.Join(siteDir, ".temp"),
+		filepath.Join(siteDir, ".gitignore"),
 	} {
 		if err := os.RemoveAll(p); err != nil {
 			return prepareFailure(Python, "the python closure could not be normalized: %v", err)

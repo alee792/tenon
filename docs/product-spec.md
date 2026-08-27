@@ -604,6 +604,18 @@ above:
   `closure_root`. TypeScript remains refused with a named diagnostic
   (`stage.tools.runtime-unsupported`) pending its own bounded rendering
   spike (issue #16).
+- **Python tool preparation requires the network, every run.** `tenon
+  validate` and `tenon apply` for a Python-tool agent fetch the pinned
+  standalone CPython interpreter (`uv python install`, roughly 90MB) even
+  when it was already fetched by a previous run: `uv` does not cache the
+  downloaded interpreter tarball itself (only its already-installed,
+  already-normalized closure is cached, per source fingerprint), so a
+  network-restricted machine needs the pinned interpreter artifact
+  reachable through whatever channel supplies tenon's other pinned inputs,
+  on every prepare, not only the first. A `requires-python` constraint in
+  `pyproject.toml` installs the *floor* of the range (`>=3.11,<3.13`
+  installs 3.11, not 3.12); a `.python-version` file, when present, names
+  the version exactly and takes precedence over `requires-python`.
 - **Real harness drivers.** The Claude and Codex drivers are validated by
   pure-function unit tests plus manual `//go:build harness` integration
   tests against live binaries; CI does not run the latter, so CI green means

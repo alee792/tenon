@@ -19,7 +19,23 @@ The first release, v0.1.0, ships the core described in
   and Python both stage today; TypeScript remains refused with a named
   diagnostic pending its own rendering spike). The staged manifest records
   the interpreter's identity and ABI (for example
-  `cpython-3.11.13-linux-x86_64-gnu`).
+  `cpython-3.11.13-linux-x86_64-gnu`). Preparing a Python-tool agent
+  requires the network on every run, not only the first (`uv` does not
+  cache the interpreter download itself); the exact interpreter installed
+  is the floor of `pyproject.toml`'s `requires-python` range, or a
+  `.python-version` file's exact pin when present, which takes precedence.
+  The build-machine-path scan staging runs before publishing now routes by
+  a file's provenance — component matching for text tenon itself generates
+  or renders, joined-path matching for a carried-in runtime payload (the
+  interpreter tree, the dependency directory, a compiled host binary, the
+  tenon executable) — rather than by whether the file's own bytes happen to
+  look binary, which false-positived on CPython's thousands of ordinary
+  stdlib and header text files. The agent manifest's `tool_runtimes` gains
+  a `python` pin: the resolved Python version specification a project's
+  own `requires-python`/`.python-version` names (not the exact installed
+  interpreter identity, which is not yet known at manifest-resolve time —
+  manifest verification runs before tool preparation — and which the
+  staged artifact manifest already carries once preparation has run).
 
 - `tenon drift` reports per-file divergence between a workspace and its
   apply record without mutating anything, and `tenon apply --discard-local`

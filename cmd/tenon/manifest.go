@@ -32,7 +32,7 @@ import (
 var manifestResolverFor = func(p *agentproject.Project, harnessName, storeBase string) manifest.Resolver {
 	return manifest.Resolver{
 		HarnessVersion:    func(h string) (string, error) { return resolveHarnessVersion(h) },
-		ToolRuntimes:      func() (string, string, string, error) { return resolveToolRuntimes(p) },
+		ToolRuntimes:      func() (string, string, string, string, error) { return resolveToolRuntimes(p) },
 		PackageIdentities: func(h string) ([]manifest.PackageIdentity, error) { return resolvePackageIdentities(p, storeBase) },
 	}
 }
@@ -264,31 +264,47 @@ func parseVersion(s string) string {
 	return s
 }
 
-// resolveToolRuntimes returns the Deno, uv, and Go runtime versions for the
-// languages the project's tools actually use; a language the project does not
-// use is left empty. A used language whose toolchain cannot be queried is an
-// error, so the closure never resolves against a runtime tenon could not read.
-func resolveToolRuntimes(p *agentproject.Project) (deno, uv, goVer string, err error) {
+// resolveToolRuntimes returns the Deno, uv, Go, and Python runtime pins for
+// the languages the project's tools actually use; a language the project
+// does not use is left empty. A used language whose toolchain cannot be
+// queried is an error, so the closure never resolves against a runtime
+// tenon could not read.
+//
+// python is the resolved Python version SPECIFICATION the project's own pin
+// names (manifest.ToolRuntimes.Python's doc explains why it is not the
+// exact installed interpreter identity): manifest resolution runs before
+// tool preparation ever runs (a supplied manifest is verified before any
+// workspace mutation), so it cannot read what `uv python install` will
+// actually resolve to without a second, redundant network fetch of the
+// pinned interpreter — `uv` does not cache that download across separate
+// --install-dir targets, so resolving the real identity here would double
+// the network cost of every apply and validate. Once preparation has
+// actually run, the staged artifact manifest carries the full identity
+// (internal/stage.RuntimeInfo.Interpreters).
+func resolveToolRuntimes(p *agentproject.Project) (deno, uv, goVer, python string, err error) {
 	used := map[string]bool{}
 	for _, t := range p.Tools {
 		used[t.Language] = true
 	}
 	if used[toolruntime.TypeScript] {
 		if deno, err = toolchainVersion("deno", "--version"); err != nil {
-			return "", "", "", err
+			return "", "", "", "", err
 		}
 	}
 	if used[toolruntime.Python] {
 		if uv, err = toolchainVersion("uv", "--version"); err != nil {
-			return "", "", "", err
+			return "", "", "", "", err
+		}
+		if python, err = toolruntime.ResolvePythonVersionSpec(p.Root); err != nil {
+			return "", "", "", "", err
 		}
 	}
 	if used[toolruntime.Go] {
 		if goVer, err = toolchainVersion("go", "version"); err != nil {
-			return "", "", "", err
+			return "", "", "", "", err
 		}
 	}
-	return deno, uv, goVer, nil
+	return deno, uv, goVer, python, nil
 }
 
 // toolchainVersion runs `<exe> <arg>` and parses a version token from its
