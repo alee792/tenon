@@ -3,7 +3,12 @@
 // any mutation: apply refuses to overwrite hand-authored native files or any
 // tenon-owned file modified since the previous apply, and reapplying
 // identical source is deterministic. Durable state is owner-only and written
-// atomically.
+// atomically. Target.DiscardLocal lets a caller explicitly opt an owned file
+// modified since the previous apply back into being overwritten; it never
+// weakens the hand-authored-file refusal. Drift reporting (regenerating in
+// memory and diffing against the workspace and the apply record, without
+// writing anything) lives in cmd/tenon, built on this package's exported
+// Driver, Target, and ReadRecord.
 package apply
 
 import (
@@ -68,6 +73,14 @@ type Target struct {
 	// it. A driver emits Model into its owned native configuration file and
 	// nowhere else.
 	Model string
+	// DiscardLocal, when true, lets apply overwrite a tenon-owned file that
+	// was modified on disk since the previous apply (apply.conflict.modified)
+	// instead of refusing. It never weakens apply.conflict.unowned: a
+	// hand-authored file that was never recorded as owned is always refused,
+	// discard or not. It is a caller policy choice, not generated content, so
+	// (like ManifestIdentity) it is deliberately NOT forwarded into the
+	// Target a driver's Generate receives.
+	DiscardLocal bool
 }
 
 // Driver is the seam between the portable project and one native harness.
@@ -117,6 +130,16 @@ type OwnedFile struct {
 // harness.
 func RecordPath(workspace, harness string) string {
 	return filepath.Join(workspace, ".tenon", "apply-"+harness+".json")
+}
+
+// ReadRecord reads the apply record for one workspace and harness, returning
+// (nil, nil) when no apply has ever been recorded there. It performs no
+// mutation and no further validation beyond decoding — callers that need
+// Verify's stronger workspace-matches-record guarantee should call Verify
+// instead; ReadRecord is for read-only reporting (drift) that must work even
+// against a workspace Verify would refuse.
+func ReadRecord(workspace, harness string) (*Record, error) {
+	return readRecord(RecordPath(workspace, harness))
 }
 
 // Result reports what apply wrote.
@@ -182,7 +205,7 @@ func ApplyWithTarget(p *agentproject.Project, target Target, driver Driver) (*Re
 	generated := map[string]bool{}
 	for _, f := range files {
 		generated[f.Path] = true
-		checkOwnership(ws, f.Path, previous, diags)
+		checkOwnership(ws, f.Path, previous, target.DiscardLocal, diags)
 	}
 	var stale []string
 	if previous != nil {
@@ -191,7 +214,7 @@ func ApplyWithTarget(p *agentproject.Project, target Target, driver Driver) (*Re
 				continue
 			}
 			stale = append(stale, path)
-			checkOwnership(ws, path, previous, diags)
+			checkOwnership(ws, path, previous, target.DiscardLocal, diags)
 		}
 		sort.Strings(stale)
 	}
@@ -338,8 +361,13 @@ func Verify(p *agentproject.Project, workspace, harness string) error {
 // checkOwnership reports a conflict diagnostic when the workspace file at
 // path cannot be safely replaced or removed: it exists without a record
 // (hand-authored) or its bytes or executable bit differ from the recorded
-// owned state (modified since the previous apply).
-func checkOwnership(ws, path string, previous *Record, diags *diagnostics.List) bool {
+// owned state (modified since the previous apply). When discardLocal is
+// true, a modified-since-apply owned file is reported as no conflict at all
+// so the caller's normal write (or stale removal) proceeds over it; a
+// hand-authored, never-recorded file is refused regardless — discardLocal
+// only ever widens what a previous tenon apply already owned, never what a
+// person authored by hand.
+func checkOwnership(ws, path string, previous *Record, discardLocal bool, diags *diagnostics.List) bool {
 	full := filepath.Join(ws, path)
 	info, err := os.Lstat(full)
 	if err != nil {
@@ -366,6 +394,9 @@ func checkOwnership(ws, path string, previous *Record, diags *diagnostics.List) 
 		return true
 	}
 	if hashBytes(current) != recorded.Hash || isExecutable(info.Mode()) != recorded.Executable {
+		if discardLocal {
+			return false // caller opted in: the local edit is discarded, never adopted
+		}
 		diags.Errorf("apply.conflict.modified", path,
 			"the tenon-owned file was modified since the previous apply; tenon fails closed rather than discard the edit")
 		return true

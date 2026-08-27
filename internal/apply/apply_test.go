@@ -261,6 +261,89 @@ func TestApplyRefusesModifiedOwnedFile(t *testing.T) {
 	}
 }
 
+// TestApplyDiscardLocalOverwritesModifiedOwnedFile proves --discard-local's
+// production seam (Target.DiscardLocal): a tenon-owned file modified since
+// the previous apply is overwritten instead of refused when DiscardLocal is
+// set, and the record reflects the freshly generated content.
+func TestApplyDiscardLocalOverwritesModifiedOwnedFile(t *testing.T) {
+	ws := t.TempDir()
+	p := project(t)
+	driver := fakeDriver{files: []GeneratedFile{{Path: "CLAUDE.md", Content: []byte("generated\n")}}}
+	if _, diags, err := ApplyWithTarget(p, Target{Workspace: ws, Executable: testExecutable}, driver); err != nil || diags.HasErrors() {
+		t.Fatalf("first apply failed: %v %v", err, diags.All())
+	}
+	if err := os.WriteFile(filepath.Join(ws, "CLAUDE.md"), []byte("edited by hand\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, diags, err := ApplyWithTarget(p, Target{Workspace: ws, Executable: testExecutable, DiscardLocal: true}, driver)
+	if err != nil || diags.HasErrors() {
+		t.Fatalf("discard-local apply failed: %v %v", err, diags.All())
+	}
+	if result == nil || len(result.Written) != 1 || result.Written[0] != "CLAUDE.md" {
+		t.Fatalf("result = %+v, want CLAUDE.md written", result)
+	}
+	got, err := os.ReadFile(filepath.Join(ws, "CLAUDE.md"))
+	if err != nil || string(got) != "generated\n" {
+		t.Fatalf("discard-local must overwrite the local edit: got %q, err %v", got, err)
+	}
+	owned, ok := readTestRecord(t, ws).Files["CLAUDE.md"]
+	if !ok || !strings.HasPrefix(owned.Hash, "sha256:") {
+		t.Fatalf("record must reflect the freshly written content: %+v, %v", owned, ok)
+	}
+}
+
+// TestApplyDiscardLocalStillRefusesHandAuthoredFile proves --discard-local
+// never widens apply.conflict.unowned: a file that was never recorded as
+// tenon-owned is refused exactly as without the flag, and never touched.
+func TestApplyDiscardLocalStillRefusesHandAuthoredFile(t *testing.T) {
+	ws := t.TempDir()
+	if err := os.WriteFile(filepath.Join(ws, "CLAUDE.md"), []byte("mine\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	driver := fakeDriver{files: []GeneratedFile{{Path: "CLAUDE.md", Content: []byte("generated\n")}}}
+
+	result, diags, err := ApplyWithTarget(project(t), Target{Workspace: ws, Executable: testExecutable, DiscardLocal: true}, driver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result != nil {
+		t.Fatal("expected refusal despite --discard-local")
+	}
+	requireErrorID(t, diags, "apply.conflict.unowned")
+	got, _ := os.ReadFile(filepath.Join(ws, "CLAUDE.md"))
+	if string(got) != "mine\n" {
+		t.Fatalf("hand-authored file was mutated: %q", got)
+	}
+}
+
+// TestApplyDiscardLocalOverwritesModifiedStaleFile proves --discard-local
+// also lets a modified-but-now-stale owned file be removed, instead of
+// refusing the whole apply the way it would without the flag.
+func TestApplyDiscardLocalOverwritesModifiedStaleFile(t *testing.T) {
+	ws := t.TempDir()
+	p := project(t)
+	first := fakeDriver{files: []GeneratedFile{{Path: "old.md", Content: []byte("generated\n")}}}
+	if _, diags, err := ApplyWithTarget(p, Target{Workspace: ws, Executable: testExecutable}, first); err != nil || diags.HasErrors() {
+		t.Fatalf("first apply failed: %v %v", err, diags.All())
+	}
+	if err := os.WriteFile(filepath.Join(ws, "old.md"), []byte("edited by hand\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	second := fakeDriver{files: []GeneratedFile{{Path: "new.md", Content: []byte("generated\n")}}}
+	result, diags, err := ApplyWithTarget(p, Target{Workspace: ws, Executable: testExecutable, DiscardLocal: true}, second)
+	if err != nil || diags.HasErrors() {
+		t.Fatalf("discard-local apply failed: %v %v", err, diags.All())
+	}
+	if len(result.Removed) != 1 || result.Removed[0] != "old.md" {
+		t.Fatalf("result.Removed = %v, want [old.md]", result.Removed)
+	}
+	if _, err := os.Stat(filepath.Join(ws, "old.md")); !os.IsNotExist(err) {
+		t.Fatal("the modified stale file must be removed under --discard-local")
+	}
+}
+
 func TestReapplyIdenticalSourceIsDeterministic(t *testing.T) {
 	ws := t.TempDir()
 	driver := fakeDriver{files: []GeneratedFile{{Path: "CLAUDE.md", Content: []byte("generated\n")}}}
