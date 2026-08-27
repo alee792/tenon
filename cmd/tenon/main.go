@@ -42,8 +42,9 @@ import (
 const prepareBudget = 5 * time.Minute
 
 const usage = `usage:
-  tenon apply AGENT --harness <claude|codex> [--workspace DIR] [--manifest PATH] [--diagnostics <prose|jsonl>]
+  tenon apply AGENT --harness <claude|codex> [--workspace DIR] [--manifest PATH] [--diagnostics <prose|jsonl>] [--discard-local]
   tenon validate AGENT --harness <claude|codex> [--manifest PATH] [--diagnostics <prose|jsonl>]
+  tenon drift AGENT --workspace DIR --harness <claude|codex> [--manifest PATH] [--diagnostics <prose|jsonl>]
   tenon fingerprint show AGENT [--diagnostics <prose|jsonl>]
   tenon manifest write AGENT --harness <claude|codex> [--output PATH] [--manifest PATH] [--model VALUE]
   tenon mcp serve AGENT --harness <claude|codex> [--workspace DIR] [--manifest PATH]
@@ -75,6 +76,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runApply(args[1:], stdout, stderr)
 	case "validate":
 		return runValidate(args[1:], stdout, stderr)
+	case "drift":
+		return runDrift(args[1:], stdout, stderr)
 	case "fingerprint":
 		if len(args) < 2 || args[1] != "show" {
 			fmt.Fprintf(stderr, "tenon fingerprint: the only subcommand is show\n%s", usage)
@@ -120,8 +123,11 @@ func runVersion(args []string, stdout, stderr io.Writer) int {
 }
 
 // commonFlags parses the shared AGENT positional and flag set. It returns
-// the agent path, the selected driver, and the diagnostics mode.
-func commonFlags(name string, args []string, stderr io.Writer, withWorkspace bool) (agent string, workspace string, driver apply.Driver, jsonl bool, manifestPath string, ok bool) {
+// the agent path, the selected driver, and the diagnostics mode. When
+// withDiscardLocal is true (apply only), it also accepts --discard-local and
+// returns whether it was set; every other caller gets discardLocal=false
+// unconditionally, since the flag is not registered on their FlagSet.
+func commonFlags(name string, args []string, stderr io.Writer, withWorkspace, withDiscardLocal bool) (agent string, workspace string, driver apply.Driver, jsonl bool, manifestPath string, discardLocal bool, ok bool) {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	harness := fs.String("harness", "", "target harness: claude or codex")
@@ -130,6 +136,10 @@ func commonFlags(name string, args []string, stderr io.Writer, withWorkspace boo
 	var ws *string
 	if withWorkspace {
 		ws = fs.String("workspace", "", "workspace directory (defaults to the agent directory)")
+	}
+	var discard *bool
+	if withDiscardLocal {
+		discard = fs.Bool("discard-local", false, "overwrite tenon-owned files modified since the previous apply; hand-authored files are still refused")
 	}
 
 	// Accept the positional agent root before or after flags.
@@ -142,18 +152,18 @@ func commonFlags(name string, args []string, stderr io.Writer, withWorkspace boo
 			continue
 		}
 		if err := fs.Parse(rest); err != nil {
-			return "", "", nil, false, "", false
+			return "", "", nil, false, "", false, false
 		}
 		next := fs.Args()
 		if len(next) == len(rest) {
 			fmt.Fprintf(stderr, "tenon %s: unexpected argument %q\n", name, rest[0])
-			return "", "", nil, false, "", false
+			return "", "", nil, false, "", false, false
 		}
 		rest = next
 	}
 	if len(positional) != 1 {
 		fmt.Fprintf(stderr, "tenon %s: exactly one AGENT directory is required\n%s", name, usage)
-		return "", "", nil, false, "", false
+		return "", "", nil, false, "", false, false
 	}
 	agent = positional[0]
 
@@ -164,7 +174,7 @@ func commonFlags(name string, args []string, stderr io.Writer, withWorkspace boo
 		driver = codex.Driver{}
 	default:
 		fmt.Fprintf(stderr, "tenon %s: --harness must be exactly claude or codex\n", name)
-		return "", "", nil, false, "", false
+		return "", "", nil, false, "", false, false
 	}
 	switch *mode {
 	case "prose":
@@ -172,13 +182,16 @@ func commonFlags(name string, args []string, stderr io.Writer, withWorkspace boo
 		jsonl = true
 	default:
 		fmt.Fprintf(stderr, "tenon %s: --diagnostics must be prose or jsonl\n", name)
-		return "", "", nil, false, "", false
+		return "", "", nil, false, "", false, false
 	}
 	workspace = agent
 	if withWorkspace && *ws != "" {
 		workspace = *ws
 	}
-	return agent, workspace, driver, jsonl, *manifest, true
+	if withDiscardLocal {
+		discardLocal = *discard
+	}
+	return agent, workspace, driver, jsonl, *manifest, discardLocal, true
 }
 
 func render(diags *diagnostics.List, jsonl bool, stdout, stderr io.Writer) {
@@ -243,7 +256,7 @@ func resolveExecutable() (string, error) {
 }
 
 func runValidate(args []string, stdout, stderr io.Writer) int {
-	agent, _, driver, jsonl, manifestPath, ok := commonFlags("validate", args, stderr, false)
+	agent, _, driver, jsonl, manifestPath, _, ok := commonFlags("validate", args, stderr, false, false)
 	if !ok {
 		return 2
 	}
@@ -318,7 +331,7 @@ func runValidate(args []string, stdout, stderr io.Writer) int {
 }
 
 func runApply(args []string, stdout, stderr io.Writer) int {
-	agent, workspace, driver, jsonl, manifestPath, ok := commonFlags("apply", args, stderr, true)
+	agent, workspace, driver, jsonl, manifestPath, discardLocal, ok := commonFlags("apply", args, stderr, true, true)
 	if !ok {
 		return 2
 	}
@@ -370,6 +383,7 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 		TenonVersion:     version.Version,
 		ManifestIdentity: manifestIdentity(supplied),
 		Model:            manifestModel(supplied, driver.Harness()),
+		DiscardLocal:     discardLocal,
 	}, driver)
 	for _, d := range applyDiags.All() {
 		diags.Add(d)
@@ -576,7 +590,7 @@ func (c toolCaller) Call(name string, arguments json.RawMessage) (json.RawMessag
 // generated setup this agent source applied: a harness starting a stale
 // managed server would otherwise serve an agent nobody applied.
 func runMCPServe(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	agent, workspace, driver, _, manifestPath, ok := commonFlags("mcp serve", args, stderr, true)
+	agent, workspace, driver, _, manifestPath, _, ok := commonFlags("mcp serve", args, stderr, true, false)
 	if !ok {
 		return 2
 	}
