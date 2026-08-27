@@ -9,6 +9,18 @@ The first release, v0.1.0, ships the core described in
 
 ### Added
 
+- Python authored tools run from a self-contained execution closure (ADR
+  0021): preparation installs a pinned, checksum-verified standalone
+  CPython plus the project's `uv export --locked` dependencies flat beside
+  it, with no venv, no `pyvenv.cfg`, and no interpreter symlink — `uv` never
+  runs at serve time, and launch execs the closure's own interpreter
+  directly, identically for `tenon apply`/`tenon mcp serve` and for a
+  staged tree. `tenon stage` now stages and serves Python-tool agents (Go
+  and Python both stage today; TypeScript remains refused with a named
+  diagnostic pending its own rendering spike). The staged manifest records
+  the interpreter's identity and ABI (for example
+  `cpython-3.11.13-linux-x86_64-gnu`).
+
 - `tenon drift` reports per-file divergence between a workspace and its
   apply record without mutating anything, and `tenon apply --discard-local`
   explicitly overwrites modified tenon-owned files (hand-authored files stay

@@ -113,17 +113,15 @@ func Stage(ctx context.Context, opts Options) (*Result, *diagnostics.List, error
 		return nil, diags, nil
 	}
 
-	// Refuse a Python- or TypeScript-bearing agent before any mutation: their
-	// execution closures do not land until ADR 0021's per-language work, and a
-	// tree staged for them today would verify while unable to serve. Go tools
-	// stage today; apply/validate/serve keep working for every language
-	// locally, only staging refuses.
-	for _, lang := range []string{toolruntime.Python, toolruntime.TypeScript} {
-		if projectHasLanguage(p, lang) {
-			diags.Errorf("stage.tools.runtime-unsupported", "tools",
-				"%s tools cannot be staged yet: Go tools stage today, while Python and TypeScript execution closures land with ADR 0021's per-language work (docs/adr/0021-execute-authored-tools-from-a-self-contained-closure.md)",
-				languageLabel(lang))
-		}
+	// Refuse a TypeScript-bearing agent before any mutation: its execution
+	// closure does not land until ADR 0021's TypeScript rendering spike, and a
+	// tree staged for it today would verify while unable to serve. Go and
+	// Python tools both stage today; apply/validate/serve keep working for
+	// every language locally, only staging refuses.
+	if projectHasLanguage(p, toolruntime.TypeScript) {
+		diags.Errorf("stage.tools.runtime-unsupported", "tools",
+			"%s tools cannot be staged yet: Go and Python tools stage today, while the TypeScript execution closure lands with ADR 0021's bounded rendering spike (docs/adr/0021-execute-authored-tools-from-a-self-contained-closure.md)",
+			languageLabel(toolruntime.TypeScript))
 	}
 	if diags.HasErrors() {
 		return nil, diags, nil
@@ -260,6 +258,11 @@ func Stage(ctx context.Context, opts Options) (*Result, *diagnostics.List, error
 			Note: "The prepared tool execution cache is staged whole: Go tools " +
 				"stage a self-contained host binary and the go toolchain is NOT " +
 				"copied. The closure is not further minimized in this slice.",
+		}
+		if identity, ok, err := pythonInterpreterIdentity(physDest); err != nil {
+			return nil, diags, fmt.Errorf("recording the python interpreter identity: %w", err)
+		} else if ok {
+			runtimeInfo.Interpreters = map[string]string{toolruntime.Python: identity}
 		}
 	} else {
 		runtimeInfo.Note = "the agent declares no authored tools, so no language runtime is staged"
@@ -421,6 +424,22 @@ func prepareClosure(ctx context.Context, p *agentproject.Project, diags *diagnos
 	// removal, into a staging-owned directory the caller then places in the
 	// tree.
 	prepared := cfg.CacheDir()
+
+	// A Python closure's standalone interpreter bakes its own install
+	// directory into one file, _sysconfigdata_*.py (ADR 0021): preparation
+	// wrote the throwaway prepare-time path, which staging now rewrites, in
+	// place, to the final canonical path the closure will actually occupy in
+	// the published tree — the same "normalize before proving
+	// relocatability" step ADR 0021 requires, and computable here because
+	// the final closure root is a function of prepared's own basename
+	// (the source fingerprint plus host digest), not of anything Stage
+	// builds later.
+	if langSet[toolruntime.Python] {
+		finalClosureRoot := finalRuntimes + "/tools/" + filepath.Base(prepared)
+		if err := rewritePythonSysconfigData(prepared, finalClosureRoot); err != nil {
+			return nil, "", nil, fmt.Errorf("normalizing the python closure for staging: %w", err)
+		}
+	}
 	carry, err := os.MkdirTemp("", "tenon-stage-closure-")
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("creating the closure directory: %w", err)
@@ -432,6 +451,74 @@ func prepareClosure(ctx context.Context, p *agentproject.Project, diags *diagnos
 		return nil, "", nil, fmt.Errorf("carrying the tool runtime closure: %w", err)
 	}
 	return languages, dest, prepRoots, nil
+}
+
+// pythonInterpreterIdentity reads the interpreter identity a staged Python
+// closure at closureDir carries (for example
+// "cpython-3.11.13-linux-x86_64-gnu"), from the single directory name
+// `uv python install` gives it under closureDir/cpython. ok is false when
+// closureDir carries no cpython/ subdirectory at all — every other language's
+// closure, and any closure staged before Python tools existed.
+func pythonInterpreterIdentity(closureDir string) (identity string, ok bool, err error) {
+	entries, rerr := os.ReadDir(filepath.Join(closureDir, "cpython"))
+	if rerr != nil {
+		if os.IsNotExist(rerr) {
+			return "", false, nil
+		}
+		return "", false, rerr
+	}
+	for _, e := range entries {
+		if e.IsDir() && strings.HasPrefix(e.Name(), "cpython-") {
+			return e.Name(), true, nil
+		}
+	}
+	return "", false, fmt.Errorf("the staged python closure at %s carries no installed interpreter directory", closureDir)
+}
+
+// rewritePythonSysconfigData rewrites, in place, every occurrence of oldRoot
+// (the throwaway directory the Python closure was actually prepared under)
+// to newRoot (the closure's final canonical path once staged) inside every
+// `_sysconfigdata_*.py` file under oldRoot — CPython's standalone interpreter
+// bakes its own install directory into exactly that one generated module
+// (verified against the closures `uv python install` produces: BINDIR,
+// BINLIBDEST, and the other absolute-path build_time_vars entries, all
+// sharing the one install-directory prefix); every other file under the
+// interpreter tree computes its paths at runtime relative to the running
+// binary. This is ADR 0021's own named example of the "rewrite the
+// enumerated files that embed an absolute preparation path" normalization
+// step, mirroring how the generated Go host's go.mod replace directive is
+// kept machine-independent (see renderGoHost).
+func rewritePythonSysconfigData(oldRoot, newRoot string) error {
+	if oldRoot == newRoot {
+		return nil
+	}
+	old := []byte(oldRoot)
+	replacement := []byte(newRoot)
+	return filepath.WalkDir(oldRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !d.Type().IsRegular() {
+			return nil
+		}
+		name := d.Name()
+		if !strings.HasPrefix(name, "_sysconfigdata_") || !strings.HasSuffix(name, ".py") {
+			return nil
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if !bytes.Contains(content, old) {
+			return nil
+		}
+		rewritten := bytes.ReplaceAll(content, old, replacement)
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(path, rewritten, info.Mode().Perm())
+	})
 }
 
 // maxBuildPathScanFileBytes bounds one file the build-machine-path scan

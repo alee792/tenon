@@ -206,11 +206,18 @@ func hostCommand(cfg Config, dir, language string, executables map[string]string
 			filepath.Join(dir, "typescript.ts"), cfg.Source)
 		cmd.Env = hostEnv("DENO_DIR=" + filepath.Join(dir, "deno-dir"))
 	case Python:
-		cmd = exec.Command(executables["uv"], "run", "--locked", "--no-sync", "--project", cfg.Source,
-			"python", filepath.Join(dir, "python.py"), cfg.Source)
-		cmd.Env = hostEnv(
-			"UV_PROJECT_ENVIRONMENT="+filepath.Join(dir, "python-venv"),
-			"PYTHONDONTWRITEBYTECODE=1")
+		// No uv, no venv, no PATH lookup: the closure interpreter is exec'd
+		// directly, exactly as it will be from a staged tree with no build
+		// toolchain present (ADR 0021). The dependency directory is added as
+		// a site directory by the host itself (hosts/python.py), not by an
+		// interpreter flag, so it is passed through the environment rather
+		// than the argument list the design fixes at "python.py <source>".
+		interpBin, siteDir, _, err := pythonClosureLayout(dir)
+		if err != nil {
+			return nil, err
+		}
+		cmd = exec.Command(interpBin, filepath.Join(dir, "python.py"), cfg.Source)
+		cmd.Env = append(hostEnv("PYTHONDONTWRITEBYTECODE=1"), "TENON_PYTHON_SITE="+siteDir)
 	case Go:
 		cmd = exec.Command(filepath.Join(dir, "go", "host"))
 		cmd.Env = hostEnv()
@@ -238,6 +245,9 @@ func verifyCache(cfg Config, dir string) error {
 			}
 		case Python:
 			if !sameFile(filepath.Join(dir, "python.py"), pythonHost) {
+				return staleCache
+			}
+			if _, _, _, err := pythonClosureLayout(dir); err != nil {
 				return staleCache
 			}
 		case Go:

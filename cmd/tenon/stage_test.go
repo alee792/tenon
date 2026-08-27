@@ -69,27 +69,18 @@ func TestStageCLIJourney(t *testing.T) {
 	}
 }
 
-// TestStageRefusesPythonAndTypeScriptButOtherCommandsStillWork proves ADR
-// 0021's staging refusal end to end through the CLI: `tenon stage` reports
-// the stable stage.tools.runtime-unsupported diagnostic and writes no output
-// directory for a Python- or TypeScript-bearing agent, while `tenon
-// validate` and `tenon apply` keep working locally for the very same agent —
-// only staging refuses.
-func TestStageRefusesPythonAndTypeScriptButOtherCommandsStillWork(t *testing.T) {
+// TestStageRefusesTypeScriptButOtherCommandsStillWork proves ADR 0021's
+// staging refusal end to end through the CLI: `tenon stage` reports the
+// stable stage.tools.runtime-unsupported diagnostic and writes no output
+// directory for a TypeScript-bearing agent, while `tenon validate` and
+// `tenon apply` keep working locally for the very same agent — only staging
+// refuses. Go and Python tools both stage today; only TypeScript is refused.
+func TestStageRefusesTypeScriptButOtherCommandsStillWork(t *testing.T) {
 	cases := []struct {
 		name     string
 		language string
 		setup    func(t *testing.T, agent string)
 	}{
-		{
-			name:     "python",
-			language: "Python",
-			setup: func(t *testing.T, agent string) {
-				writeFile(t, agent, "pyproject.toml", []byte("[project]\nname = \"x\"\n"), 0o644)
-				writeFile(t, agent, "uv.lock", []byte(""), 0o644)
-				writeFile(t, agent, "tools/count_words.py", []byte(pythonToolFile), 0o644)
-			},
-		},
 		{
 			name:     "typescript",
 			language: "TypeScript",
