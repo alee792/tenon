@@ -69,11 +69,11 @@ paths for an existing OCI builder — only the execution closure the agent's
 tools actually need, no build toolchains, credentials, or trust decisions:
 
 ```dockerfile
-FROM <tenon harness image> AS build
+FROM ghcr.io/alee792/tenon/codex:${TENON_VERSION} AS build   # not yet published; build locally from images/codex/Dockerfile
 COPY . /agent
 RUN tenon stage /agent --harness codex --output /out/agent
 
-FROM DOCUMENTED_COMPATIBLE_BASE
+FROM docker.io/library/ubuntu:24.04
 COPY --from=build /out/agent/opt/ /opt/
 COPY --from=build --chown=65532:65532 /out/agent/workspace/ /workspace/
 COPY --from=build --chown=65532:65532 /out/agent/home/tenon/ /home/tenon/
@@ -81,8 +81,11 @@ USER 65532:65532
 ENTRYPOINT ["/opt/tenon/bin/agent-entrypoint"]
 ```
 
-See [staged agent filesystems](docs/product-spec.md#staged-agent-filesystems)
-for the full contract.
+The harness image is built locally from
+[`images/<harness>/Dockerfile`](images/); it is not yet published. See
+[staged agent filesystems](docs/product-spec.md#staged-agent-filesystems)
+for the full contract and [harness images](docs/harness-images.md) for the
+image definitions and publication gating.
 
 ## Revising your own files
 

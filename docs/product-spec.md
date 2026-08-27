@@ -440,17 +440,25 @@ complete runnable filesystem tree at canonical paths for an existing OCI
 builder:
 
 ```dockerfile
-FROM <tenon harness image> AS build
+FROM ghcr.io/alee792/tenon/codex:${TENON_VERSION} AS build   # not yet published; see docs/harness-images.md
 COPY . /agent
 RUN tenon stage /agent --harness codex --output /out/agent
 
-FROM DOCUMENTED_COMPATIBLE_BASE
+FROM docker.io/library/ubuntu:24.04
 COPY --from=build /out/agent/opt/ /opt/
 COPY --from=build --chown=65532:65532 /out/agent/workspace/ /workspace/
 COPY --from=build --chown=65532:65532 /out/agent/home/tenon/ /home/tenon/
 USER 65532:65532
 ENTRYPOINT ["/opt/tenon/bin/agent-entrypoint"]
 ```
+
+`ghcr.io/alee792/tenon/codex` is not yet published; build the harness image
+locally from [`images/codex/Dockerfile`](../images/codex/Dockerfile) (or
+[`images/claude/Dockerfile`](../images/claude/Dockerfile)) instead. The
+final base is a pinned Ubuntu LTS platform manifest, `linux/amd64`, glibc —
+never Alpine or another musl base without a separately built musl payload.
+See [harness images](harness-images.md) for the full compatible-base
+contract, both journeys, and what gates publication.
 
 The staged tree carries tenon, the selected harness, immutable agent source,
 the generated integration and apply record, an entrypoint, an artifact
