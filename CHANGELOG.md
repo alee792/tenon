@@ -9,6 +9,11 @@ The first release, v0.1.0, ships the core described in
 
 ### Added
 
+- `tenon drift` reports per-file divergence between a workspace and its
+  apply record without mutating anything, and `tenon apply --discard-local`
+  explicitly overwrites modified tenon-owned files (hand-authored files stay
+  refused).
+
 - `tenon apply` and `tenon validate` compile one filesystem-authored agent
   project (`instructions.md`, `skills/`, `plugins/`, `tools/`,
   `subagents/`, `connections/`, `schedules/`, `harnesses/`)
