@@ -13,8 +13,9 @@ import (
 var linkPattern = regexp.MustCompile(`\]\(([^)\s]+)\)`)
 
 // TestRelativeLinksResolve walks every Markdown file under docs/ plus the
-// root README.md and AGENTS.md, and fails if any relative link target does
-// not exist on disk.
+// root README.md, AGENTS.md, CHANGELOG.md, CONTRIBUTING.md, SECURITY.md,
+// and examples/README.md, and fails if any relative link target does not
+// exist on disk.
 func TestRelativeLinksResolve(t *testing.T) {
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -24,6 +25,10 @@ func TestRelativeLinksResolve(t *testing.T) {
 	files := []string{
 		filepath.Join(root, "README.md"),
 		filepath.Join(root, "AGENTS.md"),
+		filepath.Join(root, "CHANGELOG.md"),
+		filepath.Join(root, "CONTRIBUTING.md"),
+		filepath.Join(root, "SECURITY.md"),
+		filepath.Join(root, "examples", "README.md"),
 	}
 	err = filepath.WalkDir(filepath.Join(root, "docs"), func(path string, d fs.DirEntry, err error) error {
 		if err != nil {

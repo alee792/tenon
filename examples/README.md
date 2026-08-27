@@ -17,12 +17,9 @@ told.
 
 Applying and serving `mixed-tools` locally (`tenon apply`, `tenon mcp
 serve`) already exercises all three languages. Staging it into a deployable
-OCI image is narrower today: per
+OCI image does not yet run any of them end to end: per
 [ADR 0021](../docs/adr/0021-execute-authored-tools-from-a-self-contained-closure.md),
-only the Go closure is landed end to end. The Python closure (a pinned,
-checksum-verified standalone CPython) and the TypeScript closure (`deno
-compile` or a pruned self-contained `deno` executable) are staged with the
-ADR's own per-language work; until each lands, staging refuses that
-language with a named diagnostic rather than emitting a tree that cannot
-run. This is recorded honestly rather than hidden, per the specification's
-failure-and-safety principle.
+staging cannot yet serve authored tools end to end in any language. Issues
+#14–#17 land the per-language closures, starting with Go reachability and
+named refusals for Python and TypeScript. This is recorded honestly rather
+than hidden, per the specification's failure-and-safety principle.
