@@ -10,7 +10,7 @@ import (
 	"github.com/alee792/tenon/internal/agentproject"
 	"github.com/alee792/tenon/internal/apply"
 	"github.com/alee792/tenon/internal/diagnostics"
-	"github.com/alee792/tenon/internal/mcp"
+	"github.com/alee792/tenon/internal/version"
 )
 
 // generateIntegration re-renders the native harness integration for the final
@@ -37,7 +37,7 @@ func generateIntegration(p *agentproject.Project, driver apply.Driver, finalAgen
 		// connection fail to resolve with a clear diagnostic, and staging then
 		// fails closed before writing.
 		IntegrationStore: "",
-		TenonVersion:     mcp.Version,
+		TenonVersion:     version.Version,
 	}
 	files := driver.Generate(&staged, target, diags)
 	if diags.HasErrors() {
