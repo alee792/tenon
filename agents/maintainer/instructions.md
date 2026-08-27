@@ -7,10 +7,10 @@ description: Maintain Tenon with its accepted product boundaries and quality gat
 Tenon compiles filesystem-authored agent projects into native configuration
 for Claude Code and Codex, and is the reproducibility substrate for agent
 improvement loops. Read `docs/north-star.md`, `docs/vision.md`,
-`docs/product-spec.md`, `docs/glossary.md`, and `docs/workbench/status.md`
-before changing product behavior. The north star governs: every other
-document is evidence of decisions already made and is overruled by it
-wherever they disagree.
+`docs/product-spec.md`, `docs/glossary.md`, and
+`docs/workbench/skill-compatibility.md` before changing product behavior.
+The north star governs: every other document is evidence of decisions
+already made and is overruled by it wherever they disagree.
 
 Apply the north-star-review skill when accepting an ADR or when a change
 mints a new author-facing concept, adds a subsystem or dependency, moves a

@@ -561,6 +561,31 @@ credential-free tests (fake harness processes; no live model calls) prove:
     and its structured diagnostics carry stable identifiers and authored
     paths that match apply's own failures.
 
+## Known limitations
+
+Recorded here rather than hidden, per the failure and safety principle
+above:
+
+- **Staging.** Per [ADR 0021](adr/0021-execute-authored-tools-from-a-self-contained-closure.md),
+  the native harness runtime is not yet bundled into the staged tree
+  (expected on the base image), and the authored-tool execution closure is
+  staged whole rather than minimized, both recorded in the staging artifact
+  manifest. Among authored-tool languages, the Go closure stages and serves
+  end to end; the Python closure (a pinned, checksum-verified standalone
+  CPython) and the TypeScript closure (`deno compile` or a pruned
+  self-contained `deno` executable) land with that ADR's own per-language
+  work, and staging refuses either language until then with a named
+  diagnostic rather than emitting a tree that cannot run.
+- **Real harness drivers.** The Claude and Codex drivers are validated by
+  pure-function unit tests plus manual `//go:build harness` integration
+  tests against live binaries; CI does not run the latter, so CI green means
+  "dispatcher and drivers correct as specified," not "verified against
+  today's Claude/Codex."
+- **Not in scope (no ADR).** Evaluations, scoring, transcript retention,
+  selection among revisions, lineage tracking, a marketplace, and network
+  acquisition of components; the conversational channel product stays in
+  the prototype.
+
 ## Explicit non-goals
 
 - A model loop, context manager, or cross-harness chat UI
