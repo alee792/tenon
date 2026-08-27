@@ -115,8 +115,17 @@ type Record struct {
 	// Manifest is the supplied manifest's identity, a provenance join key
 	// present only when a manifest was supplied to apply. It is omitted
 	// otherwise so an unsupplied manifest leaves the record byte-identical.
-	Manifest string               `json:"manifest,omitempty"`
-	Files    map[string]OwnedFile `json:"files"`
+	Manifest string `json:"manifest,omitempty"`
+	// ClosureRoot names the tool runtime closure this record's setup was
+	// prepared against, as a path relative to Workspace (e.g.
+	// "../opt/tenon/runtimes/tools"). It is set only by `tenon stage`
+	// (ADR 0021): staging prepares the closure at its own final canonical
+	// location rather than the workspace cache, so the staged apply record
+	// must name that location for serving to find it. A normal workspace
+	// apply record — the one `tenon apply` writes — omits it, and serving
+	// then falls back to the ordinary workspace-cache layout unchanged.
+	ClosureRoot string               `json:"closure_root,omitempty"`
+	Files       map[string]OwnedFile `json:"files"`
 }
 
 // OwnedFile is the recorded state of one owned generated file: content hash
@@ -356,6 +365,18 @@ func Verify(p *agentproject.Project, workspace, harness string) error {
 		}
 	}
 	return nil
+}
+
+// RecordFor reads the apply record for workspace and harness, exactly as
+// Verify does internally, so a caller that has already verified can also
+// consult record fields Verify itself does not report (currently
+// ClosureRoot). It returns nil, nil when no record exists.
+func RecordFor(workspace, harness string) (*Record, error) {
+	ws, err := filepath.Abs(workspace)
+	if err != nil {
+		return nil, fmt.Errorf("resolving workspace: %w", err)
+	}
+	return readRecord(RecordPath(ws, harness))
 }
 
 // OwnershipKind classifies one workspace path's tenon-ownership standing
