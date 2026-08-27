@@ -32,6 +32,15 @@ type Diagnostic struct {
 	Path string `json:"path"`
 	// Rule states the exact rule violated, with the violating specifics.
 	Rule string `json:"rule"`
+	// Detail is an optional, bounded multi-line payload a finding may carry
+	// beyond Rule's single bounded prose line — e.g. drift's unified diff.
+	// It is JSONL-only: WriteProse's one-line-per-diagnostic rendering never
+	// includes it (embedding a multi-line diff there would defeat the
+	// bounded-single-line prose contract every other diagnostic keeps), so a
+	// caller that wants it in prose too renders it itself, separately, the
+	// way drift does. Empty for every existing diagnostic; omitempty keeps
+	// their JSON encoding byte-identical.
+	Detail string `json:"detail,omitempty"`
 }
 
 func (d Diagnostic) String() string {
