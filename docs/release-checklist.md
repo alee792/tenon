@@ -18,10 +18,20 @@ triggering it; "manual" means a person must run and record it themselves.
 ./scripts/check.sh
 ```
 
-Automated (CI runs the same gate on every push and pull request); requires
-only the Go toolchain pinned in `go.mod`. Formats (`gofmt`), vets, and runs
-the full test suite with `-race`. No credentials, network, or Docker
-required — every test is credential-free per `AGENTS.md`.
+Automated: CI runs `./scripts/check.sh` on every push to `main` and every
+pull request. Formats (`gofmt`), vets, and runs the full test suite with
+`-race`; every test is credential-free per `AGENTS.md`, so no credentials
+are required, and Docker is never required. Network *is* required when
+`uv` is present on the machine: the Python-tool tests exercise real
+Python-closure preparation, which fetches the pinned standalone CPython
+interpreter (see the Python entry in `CHANGELOG.md`'s Known limitations —
+this is not cached, and happens on every run). CI installs Deno and pins
+`uv` to `0.8.17`, and sets `TENON_REQUIRE_TOOLCHAINS=1` so a missing
+toolchain fails the run instead of silently skipping it; a local run on a
+Go-only machine will silently skip the Python/TypeScript-dependent tests
+rather than fail, so a faithful local reproduction of the CI gate needs
+both toolchains installed and `TENON_REQUIRE_TOOLCHAINS=1` set, not just
+`go` on `PATH`.
 
 ## 2. Reproducibility job green
 
@@ -34,24 +44,34 @@ the commit that will be tagged, not merely on `main` at some earlier point.
 
 ## 3. Container acceptance gate
 
-**Manual.** Build and exercise both harness images locally (neither is
-published — see [harness images](harness-images.md) and issue #19):
+**Manual, and conditional — out of scope for v0.1.0 as a hard gate.**
+Publishing either harness image is separate, explicitly authorized work
+(issue #19), not required to cut v0.1.0, and currently unsatisfiable as a
+gate: as of this writing, `images/inputs.json` carries thirteen unresolved
+`TODO-pin-before-first-build`/`TODO-decide-before-first-build` values —
+`target.base.digest`; `target.runtime.certificate_source_component`; and,
+per component, `go`'s and `uv`'s `sha256`, plus `deno`'s, `claude`'s, and
+`codex`'s `version`, `url`, and `sha256` in full — so
+`images/codex/Dockerfile` and `images/claude/Dockerfile` "cannot produce a
+usable image" (`docs/harness-images.md`'s own words) until every one of
+those is resolved to a real, checksum-verified value — building them
+today is a known-broken build, not a check. The Claude image additionally
+awaits an Anthropic terms review before it may be published at all,
+independent of pin state.
 
-```sh
-docker build -f images/codex/Dockerfile -t tenon-codex-check .
-docker build -f images/claude/Dockerfile -t tenon-claude-check .
-```
-
-Record a transcript showing each image builds and that `tenon stage`'s
-output runs inside it per the [two-stage journey](harness-images.md#two-journeys).
-Requires Docker and, per `images/inputs.json`, every
-`TODO-pin-before-first-build` pin (`go` and `uv`'s digests; `deno`,
-`claude`, and `codex`'s version, URL, and digest) resolved to a real,
-checksum-verified value first — the Dockerfiles cannot produce a usable
-image until then. Publishing either image is separate, explicitly
-authorized work and is out of scope for this checklist; the Claude image
-additionally awaits an Anthropic terms review before it may be published
-at all.
+The actual container acceptance evidence for v0.1.0 is the per-language
+probe gate issue #17 defines: `scripts/check-staged-images.sh` stages
+each supported language's tool agent onto the documented compatible base
+(`docs/harness-images.md`'s pinned Ubuntu LTS/glibc/uid 65532 contract),
+runs it with `--network none`, and proves a real tool call round-trips —
+proof that a staged tree actually serves, independent of either harness
+image ever being published. That script is being landed from a parallel
+worktree and is not present on this checklist's writing base; once it
+lands, reference it here as this step's actual gate and run it in place
+of the placeholder Docker builds above. Until it lands or the
+`images/inputs.json` pins are resolved (whichever comes first), this step
+is satisfied by recording that state explicitly in the release notes
+rather than by a green check, and does not block step 8.
 
 ## 4. Codex driver live validation
 
@@ -98,9 +118,12 @@ checkout:
 ```sh
 curl -LO https://github.com/alee792/tenon/releases/download/v0.1.0-rc.1/tenon_0.1.0-rc.1_<os>_<arch>.tar.gz
 curl -LO https://github.com/alee792/tenon/releases/download/v0.1.0-rc.1/tenon_0.1.0-rc.1_SHA256SUMS
-sha256sum -c tenon_0.1.0-rc.1_SHA256SUMS --ignore-missing
+sha256sum -c tenon_0.1.0-rc.1_SHA256SUMS --ignore-missing   # linux
+shasum -a 256 -c tenon_0.1.0-rc.1_SHA256SUMS                # darwin (no --ignore-missing; ignore other-platform "No such file" lines)
 tar -xzf tenon_0.1.0-rc.1_<os>_<arch>.tar.gz
-./tenon version                       # reports v0.1.0-rc.1
+./tenon version                       # reports 0.1.0-rc.1 (no leading "v" —
+                                       # scripts/release.sh strips the tag's
+                                       # leading v before stamping the binary)
 ```
 
 Then, per issue #22:
@@ -137,7 +160,8 @@ and `stage`).
 
 ## 8. Tag v0.1.0
 
-Only after every step above is green and recorded:
+Only after every step above is green and recorded, except step 3, which is
+conditional per its own entry and does not block this tag:
 
 ```sh
 git tag v0.1.0

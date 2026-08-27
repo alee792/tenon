@@ -9,16 +9,29 @@ The first release, v0.1.0, ships the core described in
 
 ### Added
 
+- `tenon stage` never emits a Go tool tree that verifies but cannot serve
+  (issue #14): the staged apply record now names the closure root relative
+  to the workspace, and `tenon mcp serve` honors it when present, so a
+  staged Go-tool tree serves tool calls directly with no workspace tool
+  cache ever prepared. The generated Go host's `go.mod` replace directive
+  now names the agent source relative to its own build directory, so the
+  build-machine path is never embedded in the built binary in the first
+  place (previously visible via `go version -m` even after a `-trimpath`
+  build). Staging refuses a Python- or TypeScript-bearing agent with a
+  named diagnostic (`stage.tools.runtime-unsupported`) before any
+  mutation; `apply`/`validate`/`mcp serve` are unaffected and continue to
+  work locally for every language.
+
 - Python authored tools run from a self-contained execution closure (ADR
   0021): preparation installs a pinned, checksum-verified standalone
   CPython plus the project's `uv export --locked` dependencies flat beside
   it, with no venv, no `pyvenv.cfg`, and no interpreter symlink — `uv` never
   runs at serve time, and launch execs the closure's own interpreter
   directly, identically for `tenon apply`/`tenon mcp serve` and for a
-  staged tree. `tenon stage` now stages and serves Python-tool agents (Go
-  and Python both stage today; TypeScript remains refused with a named
-  diagnostic pending its own rendering spike). The staged manifest records
-  the interpreter's identity and ABI (for example
+  staged tree. `tenon stage` now stages and serves Python-tool agents too
+  (Go and Python both stage and serve today; TypeScript remains refused
+  with a named diagnostic pending its own rendering spike, issue #16). The
+  staged manifest records the interpreter's identity and ABI (for example
   `cpython-3.11.13-linux-x86_64-gnu`). Preparing a Python-tool agent
   requires the network on every run, not only the first (`uv` does not
   cache the interpreter download itself); the exact interpreter installed
@@ -58,12 +71,13 @@ The first release, v0.1.0, ships the core described in
   the clock — and CI's "Release build is reproducible" job builds the real
   release path twice against a throwaway tag and fails if the checksums
   differ. `scripts/release.sh` builds the archives; the `Release` GitHub
-  Actions workflow runs on an exact `vX.Y.Z` tag push and publishes them,
-  marking a pre-release-suffixed tag (`v0.1.0-rc.1`) as a GitHub
-  pre-release automatically. `tenon version` reports the version stamped
-  at build time from the tag, closing the gap where every binary
-  previously reported a hardcoded `0.1.0-dev` regardless of what an agent
-  manifest's `tenon_version` pin expected.
+  Actions workflow triggers on any pushed tag matching `v*.*.*` (which
+  also matches a pre-release-suffixed rehearsal tag like `v0.1.0-rc.1`,
+  not only a clean `vX.Y.Z`) and publishes them, marking the suffixed
+  case as a GitHub pre-release automatically. `tenon version` reports the
+  version stamped at build time from the tag, closing the gap where every
+  binary previously reported a hardcoded `0.1.0-dev` regardless of what an
+  agent manifest's `tenon_version` pin expected.
 
 - `docs/harness-images.md` and `images/<claude|codex>/Dockerfile` define
   the compatible-base contract, the two build journeys (direct apply, and
@@ -71,6 +85,14 @@ The first release, v0.1.0, ships the core described in
   publication of each harness image; neither image is published yet, and
   publication of the Claude image additionally awaits an Anthropic terms
   review (issue #19).
+
+- `tenon fingerprint show` reports an agent's source fingerprint and its
+  per-file digests without applying anything; `tenon apply` records the
+  clean working tree's git commit SHA alongside the apply record when the
+  source is a clean git checkout; and `apply`/`validate` accept
+  `--diagnostics jsonl` to emit a single structured JSON summary line
+  (agent, harness, workspace, fingerprint, files written/removed, managed
+  tools) instead of prose, for scripted and outer-loop consumption.
 
 - `tenon apply` and `tenon validate` compile one filesystem-authored agent
   project (`instructions.md`, `skills/`, `plugins/`, `tools/`,

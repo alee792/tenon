@@ -74,7 +74,8 @@ archive per supported platform (`darwin-arm64`, `linux-amd64`,
 ```sh
 curl -LO https://github.com/alee792/tenon/releases/download/v0.1.0/tenon_0.1.0_linux_amd64.tar.gz
 curl -LO https://github.com/alee792/tenon/releases/download/v0.1.0/tenon_0.1.0_SHA256SUMS
-sha256sum -c tenon_0.1.0_SHA256SUMS --ignore-missing
+sha256sum -c tenon_0.1.0_SHA256SUMS --ignore-missing   # linux
+shasum -a 256 -c tenon_0.1.0_SHA256SUMS                # darwin (no --ignore-missing; ignore other-platform "No such file" lines)
 tar -xzf tenon_0.1.0_linux_amd64.tar.gz
 install -m 0755 tenon /usr/local/bin/tenon   # or anywhere else on PATH
 tenon version                                # reports 0.1.0
