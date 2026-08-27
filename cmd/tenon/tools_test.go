@@ -389,11 +389,18 @@ func requireToolchain(t *testing.T, name string) string {
 
 // lockDependencies resolves the fixture's own locked dependencies with its
 // native toolchain, exactly as an author would before committing the lock.
+// A failure here (cold cache, no network) is the same silent-skip risk as a
+// missing toolchain binary, so it is gated the same way: TENON_REQUIRE_TOOLCHAINS=1
+// turns it into a named failure instead of letting the test quietly skip.
 func lockDependencies(t *testing.T, dir string, name string, args ...string) {
 	t.Helper()
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
 	if output, err := cmd.CombinedOutput(); err != nil {
+		if os.Getenv("TENON_REQUIRE_TOOLCHAINS") == "1" {
+			t.Fatalf("%s %s could not resolve the fixture's locked dependencies but TENON_REQUIRE_TOOLCHAINS=1 requires it: %v\n%s",
+				name, strings.Join(args, " "), err, output)
+		}
 		t.Skipf("%s could not resolve the fixture's locked dependencies (a warm cache or network is needed): %v\n%s",
 			name, err, output)
 	}
