@@ -40,13 +40,36 @@ var (
 	goVersionPattern = regexp.MustCompile(`(?m)^\s*go\s+(\d+\.\d+(?:\.\d+)?)`)
 )
 
+// pythonRequiresPattern and pythonVersionNumberPattern read the minor Python
+// version out of the agent's own pyproject.toml, when no .python-version
+// file pins one more precisely. pythonInterpreterDirPattern recognizes the
+// directory name `uv python install` creates for one installed interpreter
+// (for example "cpython-3.11.13-linux-x86_64-gnu"), from which the exact
+// patch and platform the closure actually carries is read back rather than
+// assumed.
+var (
+	pythonRequiresPattern       = regexp.MustCompile(`(?m)^\s*requires-python\s*=\s*"([^"]*)"`)
+	pythonVersionNumberPattern  = regexp.MustCompile(`\d+\.\d+`)
+	pythonInterpreterDirPattern = regexp.MustCompile(`^cpython-(\d+\.\d+\.\d+)-(.+)$`)
+)
+
 // environmentAllowlist is every inherited variable a language toolchain may
 // see. Anything else is dropped. The CA entries let a toolchain find the
 // operator's certificate authority in a proxied or custom-CA environment:
 // SSL_CERT_FILE/SSL_CERT_DIR for the OpenSSL-based tools, and DENO_CERT for
-// Deno, which reads its CA from that variable rather than the SSL_CERT_* pair.
+// Deno, which reads its CA from that variable rather than the SSL_CERT_*
+// pair. The proxy entries are the other half of "a proxied environment":
+// the CA lets a toolchain trust the proxy's certificate, but without the
+// proxy variables themselves a mandatory-proxy environment still can't
+// reach the network at all — uv (python install's own fetch, deno's module
+// resolution) and go all honor the standard HTTP_PROXY/HTTPS_PROXY/NO_PROXY
+// trio, and both the upper- and lower-case forms are read in practice
+// (curl-style tooling conventionally prefers lower-case for all but
+// HTTPS_PROXY, to avoid the legacy CGI HTTP_PROXY footgun), so both are
+// allowed through.
 var environmentAllowlist = []string{
 	"PATH", "HOME", "TMPDIR", "LANG", "SSL_CERT_FILE", "SSL_CERT_DIR", "DENO_CERT", "GOROOT", "GOPATH",
+	"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
 }
 
 // Prepare materializes and inspects the tool runtime for cfg. It is safe to
@@ -114,12 +137,7 @@ func prepareLanguage(ctx context.Context, cfg Config, dir, language string, exec
 		if err != nil {
 			return err
 		}
-		executables["uv"] = uv
-		return run(ctx, language, "uv sync",
-			exec.CommandContext(ctx, uv, "sync", "--locked", "--project", cfg.Source),
-			cfg.Source, hostEnv(
-				"UV_PROJECT_ENVIRONMENT="+filepath.Join(dir, "python-venv"),
-				"PYTHONDONTWRITEBYTECODE=1"))
+		return prepareClosurePython(ctx, cfg, dir, uv)
 
 	case Go:
 		goDir := filepath.Join(dir, "go")
@@ -172,6 +190,267 @@ func prepareLanguage(ctx context.Context, cfg Config, dir, language string, exec
 			"-o", filepath.Join(goDir, "host"), "."), goDir, env)
 	}
 	return prepareFailure(language, "%q is not an authored tool language", language)
+}
+
+// prepareClosurePython installs a pinned standalone CPython into dir/cpython
+// and lays the project's own `uv export --locked` dependencies flat into
+// dir/site (ADR 0021). No venv is created — no pyvenv.cfg, no activation
+// scripts, no interpreter symlink — so launch (hostCommand) execs the
+// installed interpreter directly with the dependency directory added as a
+// site directory, and uv never runs at serve time.
+func prepareClosurePython(ctx context.Context, cfg Config, dir, uv string) error {
+	spec, err := pythonVersionSpec(cfg.Source)
+	if err != nil {
+		return err
+	}
+	cpythonRoot := filepath.Join(dir, "cpython")
+	if err := os.MkdirAll(cpythonRoot, 0o700); err != nil {
+		return prepareFailure(Python, "the python interpreter directory could not be created")
+	}
+	env := hostEnv("PYTHONDONTWRITEBYTECODE=1")
+	// The exact patch is not chosen here: it is whatever this pinned uv
+	// release resolves the requested minor version to, the same fetch
+	// digest-pinned by uv itself, so two prepares against the same uv
+	// version agree. The installed directory name, read back below, names
+	// the exact patch and platform the closure actually carries.
+	if err := run(ctx, Python, "uv python install", exec.CommandContext(ctx, uv,
+		"python", "install", "--no-bin", "--install-dir", cpythonRoot, spec), dir, env); err != nil {
+		return err
+	}
+
+	requirements := filepath.Join(dir, "requirements.txt")
+	if err := run(ctx, Python, "uv export", exec.CommandContext(ctx, uv,
+		"export", "--locked", "--no-dev", "--no-emit-project", "--format", "requirements.txt",
+		"--project", cfg.Source, "-o", requirements), dir, env); err != nil {
+		return err
+	}
+
+	siteDir := filepath.Join(dir, "site")
+	if err := os.MkdirAll(siteDir, 0o700); err != nil {
+		return prepareFailure(Python, "the python dependency directory could not be created")
+	}
+	interpBin, _, _, err := pythonClosureLayout(dir)
+	if err != nil {
+		return prepareFailure(Python, "the installed python interpreter could not be found after `uv python install`")
+	}
+	if err := run(ctx, Python, "uv pip install", exec.CommandContext(ctx, uv,
+		"pip", "install", "--python", interpBin, "--target", siteDir,
+		"--require-hashes", "--no-deps", "-r", requirements), dir, env); err != nil {
+		return err
+	}
+
+	// requirements.txt is a preparation intermediate: uv annotates it with the
+	// exact command line that produced it, including this machine's own
+	// throwaway preparation paths, so it never survives into the closure.
+	if err := os.Remove(requirements); err != nil {
+		return prepareFailure(Python, "the intermediate requirements file could not be removed")
+	}
+
+	return normalizePythonClosure(cpythonRoot, filepath.Dir(filepath.Dir(interpBin)), siteDir)
+}
+
+// ResolvePythonVersionSpec resolves the Python version specification a
+// project's own pin names — a `.python-version` file's exact pin, or the
+// floor of pyproject.toml's `requires-python` range — without installing or
+// fetching anything. It is exported so the agent manifest's tool-runtime
+// resolution (cmd/tenon) can pin what preparation will install without
+// duplicating this parsing: manifest resolution runs before tool
+// preparation (ADR: a supplied manifest is verified before any workspace
+// mutation), so it cannot yet read the exact patch and ABI
+// `uv python install` will actually resolve to — see prepareClosurePython
+// and pythonClosureLayout for that identity, which is what the staged
+// artifact manifest carries once preparation has actually run.
+func ResolvePythonVersionSpec(source string) (string, error) {
+	return pythonVersionSpec(source)
+}
+
+// pythonVersionSpec resolves the Python version to install: a `.python-version`
+// file names it exactly; otherwise the minor version is read from
+// pyproject.toml's `requires-python` constraint, and the exact patch is left
+// to `uv python install`'s own deterministic resolution for the pinned uv
+// release (see prepareClosurePython).
+func pythonVersionSpec(source string) (string, error) {
+	if raw, err := os.ReadFile(filepath.Join(source, ".python-version")); err == nil {
+		if v := strings.TrimSpace(string(raw)); v != "" {
+			return v, nil
+		}
+	}
+	raw, err := os.ReadFile(filepath.Join(source, "pyproject.toml"))
+	if err != nil {
+		return "", prepareFailure(Python, "python tools require a readable pyproject.toml at the agent root")
+	}
+	match := pythonRequiresPattern.FindSubmatch(raw)
+	if match == nil {
+		return "", prepareFailure(Python,
+			"python tools require a requires-python constraint in pyproject.toml, or a .python-version file")
+	}
+	version := pythonVersionNumberPattern.FindString(string(match[1]))
+	if version == "" {
+		return "", prepareFailure(Python, "the requires-python constraint %q names no version number", string(match[1]))
+	}
+	return version, nil
+}
+
+// pythonClosureLayout resolves the installed interpreter binary, the
+// closure's dependency (site) directory, and the interpreter's own identity
+// (for example "cpython-3.11.13-linux-x86_64-gnu") from an already prepared
+// Python closure at dir. It reads dir/cpython back from disk rather than
+// re-deriving anything from cfg, so it agrees with whatever
+// prepareClosurePython actually installed, and is shared by preparation,
+// launch (hostCommand), and cache verification (verifyCache).
+func pythonClosureLayout(dir string) (interpBin, siteDir, identity string, err error) {
+	cpythonRoot := filepath.Join(dir, "cpython")
+	entries, rerr := os.ReadDir(cpythonRoot)
+	if rerr != nil {
+		return "", "", "", staleCache
+	}
+	var found string
+	for _, e := range entries {
+		if e.IsDir() && pythonInterpreterDirPattern.MatchString(e.Name()) {
+			if found != "" {
+				return "", "", "", staleCache
+			}
+			found = e.Name()
+		}
+	}
+	if found == "" {
+		return "", "", "", staleCache
+	}
+	match := pythonInterpreterDirPattern.FindStringSubmatch(found)
+	parts := strings.SplitN(match[1], ".", 3)
+	bin := filepath.Join(cpythonRoot, found, "bin", "python"+parts[0]+"."+parts[1])
+	info, serr := os.Stat(bin)
+	if serr != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return "", "", "", staleCache
+	}
+	site := filepath.Join(dir, "site")
+	if info, serr := os.Stat(site); serr != nil || !info.IsDir() {
+		return "", "", "", staleCache
+	}
+	return bin, site, found, nil
+}
+
+// normalizePythonClosure removes everything the closure does not need to
+// launch: the interpreter's own convenience symlinks (never referenced —
+// launch execs the versioned interpreter binary directly, per
+// pythonClosureLayout), the terminfo and man-page trees, and any
+// console-script shims a dependency install placed under the site
+// directory's own bin/. copyTree refuses a symlink outright, so the closure
+// must already be symlink-free before it can ever be staged; local
+// apply/serve normalizes exactly the same way, per ADR 0021's "one
+// contract, not a staging mode".
+// cpythonRoot is the --install-dir uv python install was given (the parent
+// of interpDir, the one versioned interpreter directory it installed).
+//
+// Symlink removal walks cpythonRoot and siteDir themselves, exhaustively,
+// rather than enumerating the specific symlinks a known uv release
+// produces: uv 0.8.17 (this repo's pinned release, and what every other
+// comment here was written against) lays every one of its own
+// convenience symlinks inside interpDir, but uv 0.12.6 additionally
+// creates a minor-version symlink as interpDir's own SIBLING —
+// cpython/cpython-3.11-linux-x86_64-gnu -> cpython/cpython-3.11.13-linux-x86_64-gnu/
+// — outside anything an interpDir-scoped walk ever visits, and CI hitting
+// exactly that shape (an unpinned setup-uv resolving "latest") is what
+// first surfaced this. Walking cpythonRoot itself, not interpDir, tolerates
+// a layout change like that instead of chasing it: whatever a future uv
+// release names its own symlinks or wherever it places them within the
+// closure, they are found and removed.
+func normalizePythonClosure(cpythonRoot, interpDir, siteDir string) error {
+	for _, p := range []string{
+		filepath.Join(interpDir, "share", "terminfo"),
+		filepath.Join(interpDir, "share", "man"),
+		filepath.Join(siteDir, "bin"),
+		// uv's own bookkeeping at the install-dir and target-dir roots
+		// (its cross-process install lock, a scratch .temp/ directory it
+		// uses mid-install, and a .gitignore convenience for the
+		// directory) — never referenced by anything on tenon's launch
+		// path, and no more tenon's to ship than the uv binary itself.
+		filepath.Join(cpythonRoot, ".lock"),
+		filepath.Join(cpythonRoot, ".temp"),
+		filepath.Join(cpythonRoot, ".gitignore"),
+		filepath.Join(siteDir, ".lock"),
+		filepath.Join(siteDir, ".temp"),
+		filepath.Join(siteDir, ".gitignore"),
+	} {
+		if err := os.RemoveAll(p); err != nil {
+			return prepareFailure(Python, "the python closure could not be normalized: %v", err)
+		}
+	}
+	closureRoots := []string{cpythonRoot, siteDir}
+	for _, root := range closureRoots {
+		if err := removePythonClosureSymlinks(root, closureRoots); err != nil {
+			return prepareFailure(Python, "the python closure could not be normalized: %v", err)
+		}
+	}
+	// Defense in depth, and the proof this normalization actually worked:
+	// copyTree refuses a symlink at staging time regardless, but that
+	// failure names only "a non-regular entry" from a much later, less
+	// specific caller. Asserting here, right after normalization, fails
+	// closed with a diagnostic that names the exact survivor and points at
+	// the layout that produced it.
+	for _, root := range closureRoots {
+		if err := assertPythonClosureHasNoSymlinks(root); err != nil {
+			return prepareFailure(Python, "the python closure could not be normalized: %v", err)
+		}
+	}
+	return nil
+}
+
+// removePythonClosureSymlinks deletes every symlink under root, whatever its
+// name or position, PROVIDED its target resolves inside one of
+// closureRoots: none of CPython's own internal symlinks known today (
+// bin/python, bin/python3, python3-config, pydoc3, 2to3, idle3, the
+// lib/libpython*.so link, the pkgconfig links, uv 0.12.6's own
+// minor-version directory link) are referenced anywhere on tenon's launch
+// path, so none needs to be materialized in its place — but a symlink this
+// closure did not expect, pointing somewhere outside itself, is exactly the
+// kind of thing a future, further uv layout change could introduce and
+// that blind deletion should not paper over: it fails closed instead,
+// naming the offending path and its target, rather than guess whether
+// deleting it is safe.
+func removePythonClosureSymlinks(root string, closureRoots []string) error {
+	return filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.Type()&os.ModeSymlink == 0 {
+			return nil
+		}
+		target, rerr := os.Readlink(path)
+		if rerr != nil {
+			return fmt.Errorf("reading the symlink %s: %w", path, rerr)
+		}
+		resolved := target
+		if !filepath.IsAbs(resolved) {
+			resolved = filepath.Join(filepath.Dir(path), resolved)
+		}
+		resolved = filepath.Clean(resolved)
+		inside := false
+		for _, closureRoot := range closureRoots {
+			if resolved == closureRoot || strings.HasPrefix(resolved, closureRoot+string(filepath.Separator)) {
+				inside = true
+				break
+			}
+		}
+		if !inside {
+			return fmt.Errorf("the symlink %s targets %q, outside the python closure; refusing to guess whether removing it is safe",
+				path, target)
+		}
+		return os.Remove(path)
+	})
+}
+
+// assertPythonClosureHasNoSymlinks fails if any symlink survives under root.
+func assertPythonClosureHasNoSymlinks(root string) error {
+	return filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("a symlink survived normalization at %s", path)
+		}
+		return nil
+	})
 }
 
 // goHostData is the rendered Go host's template input.
@@ -396,15 +675,17 @@ func copyRegularFile(src, dst string) error {
 // executables is the recorded absolute path of every toolchain executable
 // serving needs. Serving never consults PATH: the operator's PATH at apply
 // time is what was validated, and a harness may start the server with another.
+// Python carries no entry: `uv` is a preparation-time tool only — the launch
+// command execs the closure's own interpreter directly (ADR 0021) — so
+// serving never stats it.
 type executables struct {
 	Deno string `json:"deno,omitempty"`
-	UV   string `json:"uv,omitempty"`
 }
 
 func executablesPath(dir string) string { return filepath.Join(dir, "executables.json") }
 
 func writeExecutables(dir string, resolved map[string]string) error {
-	content, err := json.MarshalIndent(executables{Deno: resolved["deno"], UV: resolved["uv"]}, "", "  ")
+	content, err := json.MarshalIndent(executables{Deno: resolved["deno"]}, "", "  ")
 	if err != nil {
 		return prepareFailure("", "the resolved tool executables could not be encoded")
 	}
@@ -420,8 +701,6 @@ func readExecutables(dir string, languages []string) (map[string]string, error) 
 		switch language {
 		case TypeScript:
 			needed["deno"] = true
-		case Python:
-			needed["uv"] = true
 		}
 	}
 	if len(needed) == 0 {
@@ -443,7 +722,7 @@ func readExecutables(dir string, languages []string) (map[string]string, error) 
 		return nil, staleCache
 	}
 
-	resolved := map[string]string{"deno": recorded.Deno, "uv": recorded.UV}
+	resolved := map[string]string{"deno": recorded.Deno}
 	for name := range needed {
 		path := resolved[name]
 		if !filepath.IsAbs(path) {

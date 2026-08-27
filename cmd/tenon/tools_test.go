@@ -9,6 +9,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -106,6 +107,15 @@ def execute(input: Input, context: dict) -> Output:
     calls += 1
     return Output(words=len(input.text.split()), calls=calls)
 `
+
+// writePythonTool gives an agent one Python tool and its native dependency
+// files, ready for `uv lock` to resolve.
+func writePythonTool(t *testing.T, agent string) {
+	t.Helper()
+	writeFile(t, agent, "pyproject.toml", []byte("[project]\nname = \"my-agent\"\nversion = \"0.0.0\"\n"+
+		"requires-python = \">=3.11\"\ndependencies = [\"pydantic>=2\"]\n\n[tool.uv]\npackage = false\n"), 0o644)
+	writeFile(t, agent, "tools/count_words.py", []byte(pythonToolFile), 0o644)
+}
 
 // writeGoTool gives an agent one Go tool and the module it belongs to.
 func writeGoTool(t *testing.T, agent, source string) {
@@ -670,5 +680,124 @@ func TestStageGoToolImportsOwnModulePackageOutsideTools(t *testing.T) {
 	result := callResult(t, responses[1])
 	if result["shouted"] != "HI" {
 		t.Fatalf("shout-text output = %#v", result)
+	}
+}
+
+// TestPythonToolIsPreparedByApplyAndServedFromTheClosure is the authored-tool
+// journey end to end for Python under ADR 0021's closure model: apply
+// installs a pinned standalone CPython and the locked dependencies into the
+// workspace cache with no venv, and the managed server launches that
+// interpreter directly — never `uv run` — lists the tool, and round-trips a
+// call across two invocations of the same long-lived host process.
+func TestPythonToolIsPreparedByApplyAndServedFromTheClosure(t *testing.T) {
+	uv := requireToolchain(t, "uv")
+	agent := writeAgent(t, "my-agent", validInstructions)
+	writePythonTool(t, agent)
+	lockDependencies(t, agent, uv, "lock")
+	ws := t.TempDir()
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("apply exit %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "managed tools: echo, count-words via MCP") {
+		t.Fatalf("apply must report the authored tool after the built-ins: %q", stdout.String())
+	}
+
+	// The prepared closure carries the pinned interpreter and no venv: no
+	// pyvenv.cfg, no interpreter symlink pointing at the preparation
+	// machine's own python3.
+	cache := filepath.Join(ws, ".tenon", "cache", "tools")
+	entries, err := os.ReadDir(cache)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("apply must prepare exactly one tool cache: %v, %v", entries, err)
+	}
+	closure := filepath.Join(cache, entries[0].Name())
+	if _, err := os.Stat(filepath.Join(closure, "python-venv")); !os.IsNotExist(err) {
+		t.Fatalf("the closure must carry no venv, found python-venv (or a stat error): %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(closure, "cpython")); err != nil {
+		t.Fatalf("the closure must carry the installed interpreter: %v", err)
+	}
+	var pyvenvCfg bool
+	_ = filepath.WalkDir(closure, func(path string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && d.Name() == "pyvenv.cfg" {
+			pyvenvCfg = true
+		}
+		return nil
+	})
+	if pyvenvCfg {
+		t.Fatal("the closure must carry no pyvenv.cfg")
+	}
+
+	responses := serveManaged(t, agent, "claude", ws, listRequest,
+		toolCall(2, "count-words", `{"text":"one two three"}`),
+		toolCall(3, "count-words", `{"text":"one"}`))
+
+	listed := listedTool(t, responses[0], "count-words")
+	if listed["description"] != "Count the words in bounded text." {
+		t.Fatalf("description = %v", listed["description"])
+	}
+	first := callResult(t, responses[1])
+	if first["words"] != float64(3) || first["calls"] != float64(1) {
+		t.Fatalf("count-words output = %#v", first)
+	}
+	if second := callResult(t, responses[2]); second["calls"] != float64(2) {
+		t.Fatalf("second call count = %v, want 2 from the same host process", second["calls"])
+	}
+}
+
+// TestServeCallsAPythonToolFromAStagedTree is ADR 0021's acceptance shape for
+// Python: stage a Python-tool agent, verify the staged tree, then serve from
+// the staged workspace and staged closure with no workspace tool cache ever
+// prepared there — proving the launch command execs the closure's own
+// interpreter directly rather than `uv run`, since the staged tree carries
+// no `uv` at all.
+func TestServeCallsAPythonToolFromAStagedTree(t *testing.T) {
+	uv := requireToolchain(t, "uv")
+	agent := writeAgent(t, "staged-python-tool-agent", validInstructions)
+	writePythonTool(t, agent)
+	lockDependencies(t, agent, uv, "lock")
+	out := filepath.Join(t.TempDir(), "staged")
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"stage", agent, "--harness", "claude", "--output", out}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("stage exit %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+	}
+
+	artifact := filepath.Join(out, "opt", "tenon", "artifact.json")
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"stage", "verify", "--artifact", artifact, "--prefix", out}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("a staged Python-tool tree must verify: exit %d\nstderr: %s", code, stderr.String())
+	}
+
+	// The staged closure carries no `uv` executable anywhere: launch must
+	// therefore exec the interpreter directly, not `uv run`.
+	closure := filepath.Join(out, "opt", "tenon", "runtimes", "tools")
+	_ = filepath.WalkDir(closure, func(path string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && d.Name() == "uv" {
+			t.Fatalf("the staged closure must carry no uv executable, found one at %s", path)
+		}
+		return nil
+	})
+
+	stagedSource := filepath.Join(out, "opt", "tenon", "agents", "staged-python-tool-agent")
+	stagedWorkspace := filepath.Join(out, "workspace")
+
+	if _, err := os.Stat(filepath.Join(stagedWorkspace, ".tenon", "cache", "tools")); !os.IsNotExist(err) {
+		t.Fatalf("the staged workspace must carry no tool cache, found one (or a stat error): %v", err)
+	}
+
+	responses := serveManaged(t, stagedSource, "claude", stagedWorkspace, listRequest,
+		toolCall(2, "count-words", `{"text":"one two three"}`))
+
+	listed := listedTool(t, responses[0], "count-words")
+	if listed["description"] != "Count the words in bounded text." {
+		t.Fatalf("description = %v", listed["description"])
+	}
+	result := callResult(t, responses[1])
+	if result["words"] != float64(3) {
+		t.Fatalf("count-words output = %#v", result)
 	}
 }

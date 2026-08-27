@@ -15,10 +15,12 @@ type Resolver struct {
 	// HarnessVersion returns the version string of the named harness executable
 	// (e.g. Claude "2.1.240", Codex "0.144.1").
 	HarnessVersion func(harness string) (string, error)
-	// ToolRuntimes returns the Deno, uv, and Go runtime versions for the
+	// ToolRuntimes returns the Deno, uv, Go, and Python runtime pins for the
 	// languages the project's tools use; a language the project does not use is
-	// returned empty.
-	ToolRuntimes func() (deno, uv, goVer string, err error)
+	// returned empty. python is the resolved version SPECIFICATION (see
+	// ToolRuntimes.Python's doc), not the installed interpreter's exact patch
+	// and ABI.
+	ToolRuntimes func() (deno, uv, goVer, python string, err error)
 	// PackageIdentities returns the {id, manifest_sha256} identity of every
 	// integration package the project selects on the harness, in any order.
 	PackageIdentities func(harness string) ([]PackageIdentity, error)
@@ -45,7 +47,7 @@ func Resolve(p *agentproject.Project, harness, tenonVersion string, r Resolver) 
 		return nil, errorf("manifest.resolve.harness-version",
 			"the %s harness version could not be resolved: %v", harness, err)
 	}
-	deno, uv, goVer, err := r.ToolRuntimes()
+	deno, uv, goVer, python, err := r.ToolRuntimes()
 	if err != nil {
 		return nil, errorf("manifest.resolve.tool-runtimes",
 			"the authored tool runtimes could not be resolved: %v", err)
@@ -67,7 +69,7 @@ func Resolve(p *agentproject.Project, harness, tenonVersion string, r Resolver) 
 			harness: {
 				HarnessVersion:      harnessVersion,
 				IntegrationPackages: packages,
-				ToolRuntimes:        ToolRuntimes{Deno: deno, UV: uv, Go: goVer},
+				ToolRuntimes:        ToolRuntimes{Deno: deno, UV: uv, Go: goVer, Python: python},
 			},
 		},
 	}, nil
@@ -179,6 +181,7 @@ func verifyRuntimes(name string, sup, cur ToolRuntimes) error {
 		{"deno", sup.Deno, cur.Deno},
 		{"uv", sup.UV, cur.UV},
 		{"go", sup.Go, cur.Go},
+		{"python", sup.Python, cur.Python},
 	} {
 		if rt.supplied != rt.current {
 			return errorf("manifest.drift.tool-runtime",

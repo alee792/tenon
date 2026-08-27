@@ -72,10 +72,24 @@ type PackageIdentity struct {
 // ToolRuntimes pins the authored-tool runtime versions for the languages the
 // project's tools actually use. A language the project does not use stays empty
 // and is omitted from the canonical encoding.
+//
+// Python is the resolved Python version SPECIFICATION a project's own pin
+// names (a `.python-version` file's exact pin, or the floor of
+// pyproject.toml's `requires-python` range) — not the exact interpreter
+// patch and ABI `uv python install` resolves it to at preparation (for
+// example "cpython-3.11.13-linux-x86_64-gnu"). Per ADR 0021 that fuller
+// identity belongs on the resolved closure, and the staged artifact
+// manifest already carries it once preparation has actually run
+// (internal/stage.RuntimeInfo.Interpreters); it is not available here
+// because a supplied manifest is verified before any workspace mutation —
+// before tool preparation ever runs — so this pin cannot yet read what
+// preparation will install. What it can and does catch as drift is the
+// project's own pin changing.
 type ToolRuntimes struct {
-	Deno string `json:"deno,omitempty"`
-	UV   string `json:"uv,omitempty"`
-	Go   string `json:"go,omitempty"`
+	Deno   string `json:"deno,omitempty"`
+	UV     string `json:"uv,omitempty"`
+	Go     string `json:"go,omitempty"`
+	Python string `json:"python,omitempty"`
 }
 
 // Error is a typed manifest error carrying a stable dotted code and a bounded

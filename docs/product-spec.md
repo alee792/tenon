@@ -597,10 +597,25 @@ above:
   the native harness runtime is not yet bundled into the staged tree
   (expected on the base image), and the authored-tool execution closure is
   staged whole rather than minimized, both recorded in the staging artifact
-  manifest. No authored tool serves from a staged tree yet: the staged
-  closure is not yet reachable from the apply record. Landing Go
-  reachability and named per-language refusals for Python and TypeScript is
-  ADR 0021's committed follow-up.
+  manifest. Go and Python authored tools stage and serve from the staged
+  tree today: the closure is a self-contained Go host binary, or a pinned
+  standalone CPython interpreter with the project's locked dependencies laid
+  flat beside it (no venv), reachable from the staged apply record's
+  `closure_root`. TypeScript remains refused with a named diagnostic
+  (`stage.tools.runtime-unsupported`) pending its own bounded rendering
+  spike (issue #16).
+- **Python tool preparation requires the network, every run.** `tenon
+  validate` and `tenon apply` for a Python-tool agent fetch the pinned
+  standalone CPython interpreter (`uv python install`, roughly 90MB) even
+  when it was already fetched by a previous run: `uv` does not cache the
+  downloaded interpreter tarball itself (only its already-installed,
+  already-normalized closure is cached, per source fingerprint), so a
+  network-restricted machine needs the pinned interpreter artifact
+  reachable through whatever channel supplies tenon's other pinned inputs,
+  on every prepare, not only the first. A `requires-python` constraint in
+  `pyproject.toml` installs the *floor* of the range (`>=3.11,<3.13`
+  installs 3.11, not 3.12); a `.python-version` file, when present, names
+  the version exactly and takes precedence over `requires-python`.
 - **Real harness drivers.** The Claude and Codex drivers are validated by
   pure-function unit tests plus manual `//go:build harness` integration
   tests against live binaries; CI does not run the latter, so CI green means

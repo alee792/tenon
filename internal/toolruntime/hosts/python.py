@@ -21,6 +21,7 @@ import importlib
 import inspect
 import json
 import os
+import site
 import sys
 
 # max_line_bytes bounds one request line, matching tenon's own bound.
@@ -179,6 +180,13 @@ def main():
     if len(sys.argv) < 2:
         sys.exit(2)
     source_dir = sys.argv[1]
+    # The closure carries no venv: the dependency directory locked at
+    # preparation is added as a site directory here, at launch, so its
+    # .pth files (namespace packages, editable-install shims) are honored
+    # exactly as they would be inside a venv's site-packages.
+    site_dir = os.environ.get("TENON_PYTHON_SITE")
+    if site_dir:
+        site.addsitedir(site_dir)
     sys.path.insert(0, source_dir)
     instance_id = "python:%d" % os.getpid()
 

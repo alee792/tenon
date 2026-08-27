@@ -69,27 +69,18 @@ func TestStageCLIJourney(t *testing.T) {
 	}
 }
 
-// TestStageRefusesPythonAndTypeScriptButOtherCommandsStillWork proves ADR
-// 0021's staging refusal end to end through the CLI: `tenon stage` reports
-// the stable stage.tools.runtime-unsupported diagnostic and writes no output
-// directory for a Python- or TypeScript-bearing agent, while `tenon
-// validate` and `tenon apply` keep working locally for the very same agent —
-// only staging refuses.
-func TestStageRefusesPythonAndTypeScriptButOtherCommandsStillWork(t *testing.T) {
+// TestStageRefusesTypeScriptButOtherCommandsStillWork proves ADR 0021's
+// staging refusal end to end through the CLI: `tenon stage` reports the
+// stable stage.tools.runtime-unsupported diagnostic and writes no output
+// directory for a TypeScript-bearing agent, while `tenon validate` and
+// `tenon apply` keep working locally for the very same agent — only staging
+// refuses. Go and Python tools both stage today; only TypeScript is refused.
+func TestStageRefusesTypeScriptButOtherCommandsStillWork(t *testing.T) {
 	cases := []struct {
 		name     string
 		language string
 		setup    func(t *testing.T, agent string)
 	}{
-		{
-			name:     "python",
-			language: "Python",
-			setup: func(t *testing.T, agent string) {
-				writeFile(t, agent, "pyproject.toml", []byte("[project]\nname = \"x\"\n"), 0o644)
-				writeFile(t, agent, "uv.lock", []byte(""), 0o644)
-				writeFile(t, agent, "tools/count_words.py", []byte(pythonToolFile), 0o644)
-			},
-		},
 		{
 			name:     "typescript",
 			language: "TypeScript",
@@ -169,5 +160,46 @@ func TestStageUnderGithubStyledPathStagesCleanly(t *testing.T) {
 	stderr.Reset()
 	if code := run([]string{"stage", "verify", "--artifact", artifact, "--prefix", out}, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("a staged tree under a github.com/-styled path must verify: exit %d\nstderr: %s", code, stderr.String())
+	}
+}
+
+// TestStageUnderGithubStyledPathStagesCleanlyWithAPythonClosure is the same
+// false-positive proof as TestStageUnderGithubStyledPathStagesCleanly, but
+// with a Python closure present. It once produced 211
+// stage.tree.build-path-leaked diagnostics from this exact fixture shape:
+// the build-machine-path scan routed every file by whether its own bytes
+// looked binary, and CPython's standalone interpreter ships roughly four
+// thousand ordinary TEXT files (its stdlib and C headers) free to carry
+// short, ordinary-looking tokens — "github", "runner" (GitHub Actions'
+// own default /home/runner/work path), "project", the agent's own
+// directory ancestry — that collide with a real agent's path components by
+// pure coincidence, exactly the class of false positive component matching
+// exists to avoid for a compiled binary's data. Provenance, not
+// looks-binary, is what must route a carried-in payload tree to joined
+// matching (see carriedPayload in internal/stage), and this proves the fix
+// against the real interpreter tree, not a synthetic stand-in.
+func TestStageUnderGithubStyledPathStagesCleanlyWithAPythonClosure(t *testing.T) {
+	uv := requireToolchain(t, "uv")
+	agent := filepath.Join(t.TempDir(), "github.com", "someowner", "py-agent")
+	writeFile(t, agent, "instructions.md", []byte(validInstructions), 0o644)
+	writePythonTool(t, agent)
+	lockDependencies(t, agent, uv, "lock")
+
+	out := filepath.Join(t.TempDir(), "staged")
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"stage", agent, "--harness", "claude", "--output", out, "--diagnostics", "jsonl"},
+		nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("stage exit %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+	}
+	if got := filterDiags(parseDiagLines(t, stdout.String()), "stage.tree.build-path-leaked"); len(got) != 0 {
+		t.Fatalf("staging a python closure under a github.com/-styled path must not false-positive (got %d): %v",
+			len(got), got)
+	}
+
+	artifact := filepath.Join(out, "opt", "tenon", "artifact.json")
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"stage", "verify", "--artifact", artifact, "--prefix", out}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("a staged python-closure tree under a github.com/-styled path must verify: exit %d\nstderr: %s", code, stderr.String())
 	}
 }

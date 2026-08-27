@@ -22,7 +22,7 @@ func withFakeResolver(t *testing.T, harnessVersion string, pkgs []manifest.Packa
 	manifestResolverFor = func(_ *agentproject.Project, _, _ string) manifest.Resolver {
 		return manifest.Resolver{
 			HarnessVersion:    func(string) (string, error) { return harnessVersion, nil },
-			ToolRuntimes:      func() (string, string, string, error) { return "", "", "", nil },
+			ToolRuntimes:      func() (string, string, string, string, error) { return "", "", "", "", nil },
 			PackageIdentities: func(string) ([]manifest.PackageIdentity, error) { return pkgs, nil },
 		}
 	}
