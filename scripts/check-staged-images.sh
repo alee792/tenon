@@ -58,7 +58,17 @@
 #   - `ENTRYPOINT ["/opt/tenon/bin/agent-entrypoint"]` is present exactly
 #     as documented, so the entrypoint's own verification path is real and
 #     checked below — every other check in this script overrides it with
-#     `--entrypoint` for its own direct command.
+#     `--entrypoint` for its own direct command;
+#   - the RUN step also removes a stray default "ubuntu" account (and its
+#     /home/ubuntu) if the pulled base image carries one: recent
+#     docker.io/library/ubuntu:24.04 builds ship a non-root uid-1000
+#     "ubuntu" user with a mode-700 home directory, which the staged
+#     identity (uid 65532) cannot traverse, tripping the hygiene walk
+#     below on a directory that has nothing to do with the staged tree.
+#     This is base-image drift the pinned digest (once `target.base.digest`
+#     is resolved, issue #19) would freeze against; until then this keeps
+#     the gate honest about what it actually staged instead of failing on
+#     an unrelated stock account.
 #
 # This proves the staged tree and the documented compatible base (short of
 # the certificate clause above), not the harness image Dockerfiles
@@ -134,6 +144,7 @@ ENV HOME=/home/tenon \\
 # outbound TLS connection, so this does not weaken the proof, but the
 # certificate clause of the compatible-base contract is NOT exercised here.
 RUN set -eu; \\
+    if id ubuntu >/dev/null 2>&1; then userdel --remove ubuntu 2>/dev/null || rm -rf /home/ubuntu; fi; \\
     groupadd --gid 65532 tenon; \\
     useradd --uid 65532 --gid 65532 --home-dir /home/tenon --shell /bin/sh --no-create-home --no-log-init tenon; \\
     mkdir -p /home/tenon /workspace; \\
