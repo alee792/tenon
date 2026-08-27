@@ -1,6 +1,10 @@
 # ADR 0023: Relay managed connections through per-connection shims
 
-- Status: proposed
+- Status: proposed — appetite, not architecture (tenet 4). Acceptance
+  trigger: the first real consumer — an improvement loop or operator —
+  wants a third-party connection's calls in the audit stream and cannot
+  get them. No relay code lands before that trigger fires; if it never
+  fires, this record is rejected with reasons.
 - Amends: the reference rendering of
   [ADR 0016](0016-author-generic-native-mcp-connections.md) for stdio
   connections; the product specification's managed-boundary claims as

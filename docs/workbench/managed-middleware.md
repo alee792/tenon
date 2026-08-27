@@ -135,6 +135,13 @@ audit surface.
 
 ## Slices
 
+Build order is demand-gated, not scheduled: slices 1 and 2 land together as
+one change the day slice 2 has a named consumer (the first improvement loop
+or operator that would read the structured audit); nothing below it is
+built before its own trigger. A chain with one middleware is ceremony, and
+every observability case has a cheaper harness-side substitute until the
+fingerprint-joined audit stream has a reader.
+
 1. **Internal seam.** The middleware type, the widened `call`, the backend
    interface; existing behavior becomes the chain's base; proven by existing
    tests, zero behavior change.
@@ -144,9 +151,10 @@ audit surface.
    from GenAI semconv.
 3. **Trace propagation.** `_meta` ingestion per the seam rules, minted span
    contexts, the host-envelope member, and re-emission upstream by the
-   relay.
-4. **The relay** (ADR 0023, proposed) — where the chain starts covering
-   third-party connections.
+   relay. Deferred hardest: its value requires an upstream sender or a
+   collector actually running, and today there is neither.
+4. **The relay** (ADR 0023, proposed with its own acceptance trigger) —
+   where the chain starts covering third-party connections.
 5. **Deferred until a concrete case exists:** rate limits, circuit breaking,
    any declarative middleware settings. Agent-level settings have a home
    when needed: root `instructions.md` frontmatter, the `friction-notes`
