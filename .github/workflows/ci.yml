@@ -36,7 +36,9 @@ jobs:
           go-version-file: go.mod
 
       # Deno and uv let the polyglot authored-tool tests run rather than
-      # skip; the suite stays green without them.
+      # skip. This job requires them to actually run (TENON_REQUIRE_TOOLCHAINS
+      # below) so green here means the polyglot paths executed; a local run
+      # without the variable still skips gracefully when they are absent.
       - name: Set up Deno
         uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
@@ -47,6 +49,11 @@ jobs:
         uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
 
       - name: Run repository checks
+        # With both toolchains installed above, a skipped polyglot test would
+        # be a silently broken setup step, not a passing check. Require them
+        # so CI fails loudly instead of shrinking coverage without signal.
+        env:
+          TENON_REQUIRE_TOOLCHAINS: "1"
         run: ./scripts/check.sh
 
   reproducible:
