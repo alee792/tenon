@@ -1,8 +1,8 @@
 package toolruntime
 
-// The catalog contract, the cache identity, and the recorded executables are
-// proven here without starting a language toolchain: what a host reports is
-// held to the same rules whoever produced it.
+// The catalog contract and the cache identity are proven here without
+// starting a language toolchain: what a host reports is held to the same
+// rules whoever produced it.
 
 import (
 	"encoding/json"
@@ -119,57 +119,6 @@ func TestCacheDirTracksSourceAndHosts(t *testing.T) {
 	throwaway := Config{Workspace: "/ws", Fingerprint: "sha256:abc", CacheRoot: "/tmp/scratch"}
 	if filepath.Dir(throwaway.CacheDir()) != "/tmp/scratch" {
 		t.Fatalf("an overridden cache root must be honored: %s", throwaway.CacheDir())
-	}
-}
-
-// TestRecordedExecutablesAreReadStrictly proves serving never depends on PATH
-// and never trusts a cache file it did not write.
-func TestRecordedExecutablesAreReadStrictly(t *testing.T) {
-	dir := t.TempDir()
-	shell, err := os.Stat("/bin/sh")
-	if err != nil || !shell.Mode().IsRegular() {
-		t.Skip("no /bin/sh to stand in for a resolved executable")
-	}
-
-	if err := writeExecutables(dir, map[string]string{"deno": "/bin/sh"}); err != nil {
-		t.Fatal(err)
-	}
-	info, err := os.Stat(executablesPath(dir))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("recorded executables must be owner-only: %v", info.Mode())
-	}
-	resolved, err := readExecutables(dir, []string{TypeScript})
-	if err != nil || resolved["deno"] != "/bin/sh" {
-		t.Fatalf("readExecutables = %v, %v", resolved, err)
-	}
-
-	// A project with no toolchain-launched host needs no record at all.
-	if _, err := readExecutables(t.TempDir(), []string{Go}); err != nil {
-		t.Fatalf("go alone needs no recorded executable: %v", err)
-	}
-
-	for name, content := range map[string]string{
-		"unknown field": `{"deno":"/bin/sh","node":"/usr/bin/node"}`,
-		"relative path": `{"deno":"sh"}`,
-		"missing entry": `{}`,
-		"not a file":    `{"deno":"/"}`,
-		"trailing json": `{"deno":"/bin/sh"} {}`,
-	} {
-		if err := os.WriteFile(executablesPath(dir), []byte(content), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := readExecutables(dir, []string{TypeScript}); err == nil {
-			t.Fatalf("%s must fail closed", name)
-		}
-	}
-	if err := os.Remove(executablesPath(dir)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := readExecutables(dir, []string{TypeScript}); err == nil {
-		t.Fatal("a missing record must fail closed")
 	}
 }
 

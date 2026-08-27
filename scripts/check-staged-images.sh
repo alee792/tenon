@@ -6,9 +6,8 @@
 # Linux/amd64 host, and must be run by a human before an exact `vX.Y.Z`
 # release tag, per docs/staged-acceptance.md.
 #
-# For each supported authored-tool language (go, python today; typescript
-# stays refused pending its own rendering spike, issue #16 — see the
-# refusal check below, and add a case here once it stages) this:
+# For each supported authored-tool language (go, python, and typescript,
+# ADR 0021, issue #16) this:
 #
 #   1. writes a minimal probe agent carrying one authored tool in that
 #      language,
@@ -28,9 +27,7 @@
 #   6. asserts tree hygiene (zero non-regular files, and that /workspace and
 #      /home/tenon are writable by the runtime identity).
 #
-# It also stages and images a tool-free agent (empty runtime record) and
-# proves the TypeScript refusal (stage exits 1 with a named diagnostic and
-# publishes no output directory).
+# It also stages and images a tool-free agent (empty runtime record).
 #
 # Deliberate deviations from ADR 0012's two-stage example and images/'s own
 # Dockerfiles, both rooted in the same cause: images/inputs.json pins every
@@ -97,6 +94,10 @@ command -v uv >/dev/null 2>&1 || {
   echo "FAIL prerequisites: uv is required to stage a Python-tool agent (ADR 0021)" >&2
   exit 1
 }
+command -v deno >/dev/null 2>&1 || {
+  echo "FAIL prerequisites: deno is required to stage a TypeScript-tool agent (ADR 0021)" >&2
+  exit 1
+}
 command -v timeout >/dev/null 2>&1 || {
   echo "FAIL prerequisites: timeout (GNU coreutils) is required to bound each container MCP call" >&2
   exit 1
@@ -110,7 +111,7 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/tenon-check-staged-images.XXXXXX")
 # The three image tags this gate ever builds, fixed ahead of time so cleanup
 # can remove them unconditionally (a missing tag is a silent no-op) without
 # tracking what actually got built on a failed run.
-built_images="tenon-staged-tool-free:acceptance tenon-staged-go:acceptance tenon-staged-python:acceptance"
+built_images="tenon-staged-tool-free:acceptance tenon-staged-go:acceptance tenon-staged-python:acceptance tenon-staged-typescript:acceptance"
 cleanup() {
   rm -rf -- "$work"
   # shellcheck disable=SC2086
@@ -294,38 +295,6 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# TypeScript refusal (ADR 0021): staging refuses a TypeScript-bearing agent
-# with a named diagnostic and publishes no output directory. No Docker
-# needed for this leg — the refusal happens before any image is built.
-# ---------------------------------------------------------------------------
-echo "==> typescript refusal"
-ts_agent="$work/agents/typescript-probe"
-write_instructions "$ts_agent" "TypeScript-tool refusal probe."
-mkdir -p "$ts_agent/tools"
-cp "$repo_root/examples/mixed-tools/deno.json" "$ts_agent/deno.json"
-cp "$repo_root/examples/mixed-tools/deno.lock" "$ts_agent/deno.lock"
-cp "$repo_root/examples/mixed-tools/tools/shout.ts" "$ts_agent/tools/shout.ts"
-ts_out="$work/staged-typescript"
-set +e
-"$tenon" stage "$ts_agent" --harness claude --output "$ts_out" --diagnostics jsonl >"$work/stage-typescript.out" 2>&1
-ts_code=$?
-set -e
-if [ "$ts_code" -eq 0 ]; then
-  echo "FAIL typescript-refusal: tenon stage unexpectedly succeeded for a TypeScript-bearing agent" >&2
-  exit 1
-fi
-grep -F '"id":"stage.tools.runtime-unsupported"' "$work/stage-typescript.out" >/dev/null || {
-  echo "FAIL typescript-refusal: the stable stage.tools.runtime-unsupported diagnostic was not reported" >&2
-  cat "$work/stage-typescript.out" >&2
-  exit 1
-}
-if [ -e "$ts_out" ]; then
-  echo "FAIL typescript-refusal: a refused stage must publish no output directory" >&2
-  exit 1
-fi
-echo "PASS typescript-refusal: stage exits 1, names stage.tools.runtime-unsupported, publishes nothing"
-
-# ---------------------------------------------------------------------------
 # Tool-free agent: proves the empty runtime record and otherwise runs the
 # same hygiene/verify proof as a language leg.
 # ---------------------------------------------------------------------------
@@ -361,11 +330,9 @@ check_hygiene_and_container_verify "$free_image" "tool-free"
 check_entrypoint_verify "$free_image" "tool-free"
 
 # ---------------------------------------------------------------------------
-# Language legs: go, python today. Add typescript here once its rendering
-# lands (ADR 0021, issue #16) — everything below is already keyed by
-# language name so a new case is the only change needed.
+# Language legs: go, python, typescript (ADR 0021, issue #16).
 # ---------------------------------------------------------------------------
-for lang in go python; do
+for lang in go python typescript; do
   echo "==> $lang probe"
   agent_name="$lang-probe"
   agent_dir="$work/agents/$agent_name"
@@ -393,6 +360,20 @@ for lang in go python; do
       cp "$repo_root/examples/mixed-tools/pyproject.toml" "$agent_dir/pyproject.toml"
       cp "$repo_root/examples/mixed-tools/uv.lock" "$agent_dir/uv.lock"
       cp "$repo_root/examples/mixed-tools/tools/wordcount.py" "$agent_dir/tools/wordcount.py"
+      ;;
+    typescript)
+      tool_name=shout
+      call_arguments='{"text":"tenon"}'
+      expect_grep='"shouted":"TENON!"'
+      # A cold container reads the staged deno executable (issue #16's
+      # fallback: deno copied whole into the closure) plus resolves the
+      # pruned, cached-only DENO_DIR's npm package cache off disk for the
+      # first time.
+      mcp_timeout=30
+      mkdir -p "$agent_dir/tools"
+      cp "$repo_root/examples/mixed-tools/deno.json" "$agent_dir/deno.json"
+      cp "$repo_root/examples/mixed-tools/deno.lock" "$agent_dir/deno.lock"
+      cp "$repo_root/examples/mixed-tools/tools/shout.ts" "$agent_dir/tools/shout.ts"
       ;;
   esac
 
@@ -431,6 +412,21 @@ for lang in go python; do
       fi
       echo "PASS exclusivity(python): the manifest records the pinned cpython identity, and cpython is staged"
       ;;
+    typescript)
+      grep -A3 '"languages"' "$artifact" | grep -F '"typescript"' >/dev/null || {
+        echo "FAIL exclusivity(typescript): runtime.languages must record typescript" >&2
+        exit 1
+      }
+      if [ -z "$(find "$staged_dir/opt/tenon/runtimes" -path '*/deno/bin/deno' -print -quit)" ]; then
+        echo "FAIL exclusivity(typescript): a TypeScript closure must carry its own deno executable" >&2
+        exit 1
+      fi
+      if [ -n "$(find "$staged_dir/opt/tenon/runtimes" -path '*/deno-dir/*' \( -name 'check_cache*' -o -name 'gen' -o -name 'node_compat_bin' \) -print -quit)" ]; then
+        echo "FAIL exclusivity(typescript): the staged DENO_DIR must carry no derived, path-keyed cache entries" >&2
+        exit 1
+      fi
+      echo "PASS exclusivity(typescript): the manifest records typescript, deno is staged, and DENO_DIR's derived caches are pruned"
+      ;;
   esac
 
   image="tenon-staged-$lang:acceptance"
@@ -446,4 +442,4 @@ for lang in go python; do
   check_mcp_call "$image" "$lang" "$agent_name" "$tool_name" "$call_arguments" "$expect_grep" "$mcp_timeout"
 done
 
-printf '%s\n' "PASS check-staged-images: TypeScript refusal, tool-free, Go-only, and Python-only staged images all verified"
+printf '%s\n' "PASS check-staged-images: tool-free, Go-only, Python-only, and TypeScript-only staged images all verified"

@@ -4,8 +4,8 @@ package toolruntime
 // mutated, and again — against a throwaway cache — for every validate, so both
 // commands report the same failures. It writes tenon's own hosts into the
 // cache, drives each language's native toolchain against the author's own
-// lockfiles, records the absolute executables serving will need, and then
-// inspects the result by starting each host once and reading its catalog.
+// lockfiles, and then inspects the result by starting each host once and
+// reading its catalog.
 //
 // Subprocesses run with a minimal environment allowlist. A toolchain that
 // inherited the operator's whole environment would make apply depend on
@@ -14,10 +14,7 @@ package toolruntime
 import (
 	"bytes"
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -85,14 +82,10 @@ func Prepare(ctx context.Context, cfg Config) error {
 		return prepareFailure("", "the tool cache directory could not be created")
 	}
 
-	executables := map[string]string{}
 	for _, language := range cfg.languages() {
-		if err := prepareLanguage(ctx, cfg, dir, language, executables); err != nil {
+		if err := prepareLanguage(ctx, cfg, dir, language); err != nil {
 			return err
 		}
-	}
-	if err := writeExecutables(dir, executables); err != nil {
-		return err
 	}
 
 	// Inspection is the proof that preparation produced a real tool surface:
@@ -105,7 +98,28 @@ func Prepare(ctx context.Context, cfg Config) error {
 	return nil
 }
 
-func prepareLanguage(ctx context.Context, cfg Config, dir, language string, executables map[string]string) error {
+// PruneDenoDirClosureCache discards a prepared TypeScript closure's
+// derived, path-keyed DENO_DIR caches (see pruneDenoCache), leaving only
+// the actually downloaded package cache a `--cached-only` run needs. It is
+// exported for staging (internal/stage), not called by Prepare itself: a
+// local `tenon apply`'s persistent workspace cache is never scanned for a
+// leaked build-machine path (that scan is staging's own, ADR 0021) and
+// verifyCache never checks DENO_DIR's pruning state, so nothing about local
+// correctness needs it pruned — only staging does, for the same reason
+// Python's closure needs rewritePythonSysconfigData before it is carried
+// into a staged tree. Pruning DENO_DIR unconditionally inside Prepare once
+// discarded a local apply's warm cache on every single run, forcing an
+// otherwise avoidable TypeScript recompilation at the next real launch.
+// Callers must run this after the source Prepare call has returned (its own
+// inspection launch is itself a `deno run` that repopulates whatever
+// derived caches it needs, keyed to preparation's own paths — pruning
+// before that launch runs leaves it undone, the discovery that first
+// surfaced this ordering requirement).
+func PruneDenoDirClosureCache(closureDir string) error {
+	return pruneDenoCache(filepath.Join(closureDir, "deno-dir"))
+}
+
+func prepareLanguage(ctx context.Context, cfg Config, dir, language string) error {
 	switch language {
 	case TypeScript:
 		hostPath := filepath.Join(dir, "typescript.ts")
@@ -116,7 +130,7 @@ func prepareLanguage(ctx context.Context, cfg Config, dir, language string, exec
 		if err != nil {
 			return err
 		}
-		executables["deno"] = deno
+		denoDir := filepath.Join(dir, "deno-dir")
 		// Type-checking the host together with every authored tool proves
 		// the tools compile and populates the cache the frozen, cache-only
 		// serving run depends on.
@@ -126,8 +140,16 @@ func prepareLanguage(ctx context.Context, cfg Config, dir, language string, exec
 				args = append(args, filepath.Join(cfg.Source, filepath.FromSlash(tool.SourcePath)))
 			}
 		}
-		return run(ctx, language, "deno check", exec.CommandContext(ctx, deno, args...),
-			cfg.Source, hostEnv("DENO_DIR="+filepath.Join(dir, "deno-dir")))
+		if err := run(ctx, language, "deno check", exec.CommandContext(ctx, deno, args...),
+			cfg.Source, hostEnv("DENO_DIR="+denoDir)); err != nil {
+			return err
+		}
+		// Copying deno into the closure now, ahead of Prepare's inspection
+		// launch below, is what lets hostCommand exec it. DENO_DIR is left
+		// unpruned here: only staging needs it pruned, and only after
+		// Prepare's own inspection launch has run (see
+		// PruneDenoDirClosureCache).
+		return copyClosureDeno(dir, deno)
 
 	case Python:
 		if err := writeCacheFile(filepath.Join(dir, "python.py"), pythonHost, 0o600); err != nil {
@@ -190,6 +212,105 @@ func prepareLanguage(ctx context.Context, cfg Config, dir, language string, exec
 			"-o", filepath.Join(goDir, "host"), "."), goDir, env)
 	}
 	return prepareFailure(language, "%q is not an authored tool language", language)
+}
+
+// maxClosureExecutableBytes bounds a toolchain executable copied whole into
+// the closure (today, only deno). Large enough for a real toolchain binary,
+// small enough that a surprising file fails closed rather than exhausts
+// staging disk space.
+const maxClosureExecutableBytes = 256 << 20
+
+// copyClosureDeno copies deno's own executable into the closure at a fixed,
+// closure-relative location (ADR 0021's prototype-proven fallback — the
+// closure carries the runtime itself rather than a path back to the machine
+// that prepared it, exactly like the Go host binary and the Python
+// interpreter), so launch (hostCommand) execs it directly rather than
+// depending on PATH.
+func copyClosureDeno(dir, deno string) error {
+	binDir := filepath.Join(dir, "deno", "bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		return prepareFailure(TypeScript, "the deno closure directory could not be created")
+	}
+	return copyClosureExecutable(filepath.Join(binDir, "deno"), deno)
+}
+
+// copyClosureExecutable resolves source (a build tool commonly found on
+// PATH as a symlink, e.g. a Homebrew install) and writes its bytes to dest,
+// verifying a bounded, regular, executable file first.
+func copyClosureExecutable(dest, source string) error {
+	resolved, err := filepath.EvalSymlinks(source)
+	if err != nil {
+		return prepareFailure(TypeScript, "the deno executable could not be resolved")
+	}
+	info, err := os.Stat(resolved)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 || info.Size() > maxClosureExecutableBytes {
+		return prepareFailure(TypeScript, "the deno executable must be a bounded regular executable file")
+	}
+	data, err := os.ReadFile(resolved)
+	if err != nil {
+		return prepareFailure(TypeScript, "the deno executable could not be read")
+	}
+	return writeCacheFile(dest, data, 0o755)
+}
+
+// denoCacheEntryPrefixes are DENO_DIR entries `deno check`/`deno run` derive
+// from the source files' own absolute paths at preparation time: type-check
+// and code-generation caches keyed by preparation-time specifiers, which
+// relocation invalidates regardless (ADR 0021: preparation may write
+// machine-local paths, but publication may not carry them). None of them
+// are required to launch: deno regenerates them locally, with no network,
+// the first time a `--cached-only` run needs them again. Matched by prefix
+// rather than a fixed Deno-release file list: Deno 2.9's on-disk cache
+// format (flat "*_v2" files, some with SQLite "-shm"/"-wal" siblings) is
+// already a different shape than an older Deno release produced (the
+// directory-and-registry.json-per-module shape the prototype this ports
+// from was built against), and a future release changing the shape again
+// should still be caught by name rather than silently kept.
+var denoCacheEntryPrefixes = []string{
+	"check_cache", "dep_analysis_cache", "fast_check_cache", "node_analysis_cache", "v8_code_cache",
+	"gen", "registry.json",
+}
+
+// pruneDenoCache discards derived, path-keyed entries from a prepared
+// DENO_DIR, keeping only the actually downloaded package cache ("npm/", and
+// any future remote-module cache) a `--cached-only` run needs.
+// node_compat_bin, created lazily only for `node:` specifier imports,
+// carries a symlink back to the build-time deno executable; os.RemoveAll
+// discards the directory entry without following it, so no separate
+// symlink-tolerant removal is needed. The final walk is defense in depth,
+// the same proof normalizePythonClosure applies to the Python closure:
+// copyTree refuses a symlink at staging time regardless, but this fails
+// closed here with a diagnostic that names the exact survivor.
+func pruneDenoCache(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return prepareFailure(TypeScript, "the prepared deno cache is missing")
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		prune := name == "node_compat_bin"
+		for _, prefix := range denoCacheEntryPrefixes {
+			if strings.HasPrefix(name, prefix) {
+				prune = true
+				break
+			}
+		}
+		if !prune {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(dir, name)); err != nil {
+			return prepareFailure(TypeScript, "the deno build cache could not be discarded")
+		}
+	}
+	return filepath.WalkDir(dir, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return prepareFailure(TypeScript, "the deno cache could not be inspected after pruning")
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			return prepareFailure(TypeScript, "a symlink survived deno cache pruning at %q", filepath.Base(path))
+		}
+		return nil
+	})
 }
 
 // prepareClosurePython installs a pinned standalone CPython into dir/cpython
@@ -587,6 +708,14 @@ func writeCacheFile(path string, content []byte, mode os.FileMode) error {
 	if err := os.WriteFile(path, content, mode); err != nil {
 		return prepareFailure("", "the tool cache file %s could not be written", filepath.Base(path))
 	}
+	// os.WriteFile only applies mode when it creates the file; a re-run
+	// overwriting a path some earlier partial or tampered run left at a
+	// different mode (the executable bit on a copied closure runtime,
+	// concretely) must still land at exactly mode, not silently inherit
+	// whatever was already there.
+	if err := os.Chmod(path, mode); err != nil {
+		return prepareFailure("", "the tool cache file %s could not be secured", filepath.Base(path))
+	}
 	return nil
 }
 
@@ -670,70 +799,6 @@ func copyRegularFile(src, dst string) error {
 		return err
 	}
 	return os.WriteFile(dst, content, info.Mode().Perm())
-}
-
-// executables is the recorded absolute path of every toolchain executable
-// serving needs. Serving never consults PATH: the operator's PATH at apply
-// time is what was validated, and a harness may start the server with another.
-// Python carries no entry: `uv` is a preparation-time tool only — the launch
-// command execs the closure's own interpreter directly (ADR 0021) — so
-// serving never stats it.
-type executables struct {
-	Deno string `json:"deno,omitempty"`
-}
-
-func executablesPath(dir string) string { return filepath.Join(dir, "executables.json") }
-
-func writeExecutables(dir string, resolved map[string]string) error {
-	content, err := json.MarshalIndent(executables{Deno: resolved["deno"]}, "", "  ")
-	if err != nil {
-		return prepareFailure("", "the resolved tool executables could not be encoded")
-	}
-	return writeCacheFile(executablesPath(dir), append(content, '\n'), 0o600)
-}
-
-// readExecutables reads the recorded executables strictly: an unknown field, a
-// relative path, or an entry that is not a regular executable file fails
-// closed the same way a missing cache does.
-func readExecutables(dir string, languages []string) (map[string]string, error) {
-	needed := map[string]bool{}
-	for _, language := range languages {
-		switch language {
-		case TypeScript:
-			needed["deno"] = true
-		}
-	}
-	if len(needed) == 0 {
-		return map[string]string{}, nil
-	}
-
-	raw, err := os.ReadFile(executablesPath(dir))
-	if err != nil {
-		return nil, staleCache
-	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	var recorded executables
-	if err := decoder.Decode(&recorded); err != nil {
-		return nil, staleCache
-	}
-	var extra any
-	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-		return nil, staleCache
-	}
-
-	resolved := map[string]string{"deno": recorded.Deno}
-	for name := range needed {
-		path := resolved[name]
-		if !filepath.IsAbs(path) {
-			return nil, staleCache
-		}
-		info, err := os.Stat(path)
-		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
-			return nil, staleCache
-		}
-	}
-	return resolved, nil
 }
 
 // hostEnv builds a subprocess environment from the allowlist plus the caller's

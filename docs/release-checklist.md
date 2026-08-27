@@ -132,8 +132,7 @@ Then, per issue #22:
   apply cleanly.
 - `tenon schedule trigger` against a schedule file, confirming it dispatches.
 - `tenon stage` an agent, per staging's ADR-0021-truthful state at cut
-  time (Go and Python tool agents stage and serve; a TypeScript-tool agent
-  is refused with `stage.tools.runtime-unsupported`).
+  time (Go, Python, and TypeScript tool agents all stage and serve).
 
 Record the transcript of each platform run as release acceptance evidence.
 Requires one real machine per platform (or an equivalent clean VM/container)

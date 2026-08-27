@@ -17,10 +17,11 @@ The first release, v0.1.0, ships the core described in
   now names the agent source relative to its own build directory, so the
   build-machine path is never embedded in the built binary in the first
   place (previously visible via `go version -m` even after a `-trimpath`
-  build). Staging refuses a TypeScript-bearing agent with a named
-  diagnostic (`stage.tools.runtime-unsupported`) before any mutation;
-  `apply`/`validate`/`mcp serve` are unaffected and continue to work
-  locally for every language.
+  build). Staging refused a TypeScript-bearing agent with a named
+  diagnostic (`stage.tools.runtime-unsupported`) before any mutation, until
+  TypeScript's own closure landed (see below); `apply`/`validate`/`mcp
+  serve` were unaffected throughout and continued to work locally for
+  every language.
 
 - Python authored tools run from a self-contained execution closure (ADR
   0021): preparation installs a pinned, checksum-verified standalone
@@ -29,8 +30,7 @@ The first release, v0.1.0, ships the core described in
   runs at serve time, and launch execs the closure's own interpreter
   directly, identically for `tenon apply`/`tenon mcp serve` and for a
   staged tree. `tenon stage` now stages and serves Python-tool agents too
-  (Go and Python both stage and serve today; TypeScript remains refused
-  with a named diagnostic pending its own rendering spike, issue #16). The
+  (Go and Python both stage and serve; TypeScript follows below). The
   staged manifest records the interpreter's identity and ABI (for example
   `cpython-3.11.13-linux-x86_64-gnu`). Preparing a Python-tool agent
   requires the network on every run, not only the first (`uv` does not
@@ -57,6 +57,32 @@ The first release, v0.1.0, ships the core described in
   pinned 0.8.17 surfaced a minor-version symlink beside the versioned
   interpreter directory that the narrower, enumerated walk missed. CI's
   `setup-uv` step is now pinned to `0.8.17`, matching `images/inputs.json`.
+
+- TypeScript authored tools run from a self-contained execution closure too
+  (ADR 0021, issue #16), lifting the `stage.tools.runtime-unsupported`
+  refusal: a bounded spike weighed `deno compile` against the
+  prototype-proven fallback and landed the fallback (the spike's decisive
+  `deno compile` unknown — whether `--include`d source resolves once the
+  closure relocates — could not be verified in a sandboxed environment
+  that denies Deno's own egress). Preparation copies the resolved `deno`
+  executable whole into the closure, then, once inspection's own launch
+  has started and stopped the host (itself a `deno run` that regenerates
+  whatever derived caches it needs, keyed to preparation's own paths),
+  prunes `DENO_DIR` back down to its actually-downloaded package cache —
+  hctl's prototype prune list ported forward and corrected for a newer
+  Deno release's on-disk cache format (flat `check_cache_v2`-style files
+  rather than a `gen/`-and-per-module-`registry.json` tree), still
+  discarding `node_compat_bin`'s link back to the build-time executable.
+  Launch execs the closure's own `deno` directly, at a fixed
+  closure-relative path resolved fresh from the closure's current
+  location rather than a path recorded at preparation, matching Go's and
+  Python's closures (the `deno`-path entry in the tool cache's recorded
+  executables — a preparation-machine absolute path, unusable once a
+  closure relocates — is gone along with the mechanism that carried it).
+  `tenon stage` now stages and serves TypeScript-tool agents too (Go,
+  Python, and TypeScript all stage and serve today). The build-machine-path
+  scan's carried-payload routing and its one-file size bound both extend to
+  cover the copied `deno` executable and the pruned `DENO_DIR`.
 
 - `tenon drift` reports per-file divergence between a workspace and its
   apply record without mutating anything, and `tenon apply --discard-local`
@@ -123,10 +149,6 @@ The first release, v0.1.0, ships the core described in
 See [the specification's known limitations](docs/product-spec.md#known-limitations)
 for the full list. Notably:
 
-- Staging serves Go and Python authored tools end to end from the staged
-  tree today (ADR 0021); TypeScript remains refused with a named
-  diagnostic (`stage.tools.runtime-unsupported`) pending its own bounded
-  rendering spike (issue #16).
 - Python tool preparation fetches the pinned standalone CPython
   interpreter on every `validate`/`apply` run, not only the first, because
   `uv` does not cache the interpreter download itself; a network-restricted

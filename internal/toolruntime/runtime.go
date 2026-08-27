@@ -41,20 +41,16 @@ func Open(cfg Config) (*Runtime, error) {
 	if err := verifyCache(cfg, dir); err != nil {
 		return nil, err
 	}
-	executables, err := readExecutables(dir, cfg.languages())
-	if err != nil {
-		return nil, err
-	}
-	return launch(cfg, dir, executables)
+	return launch(cfg, dir)
 }
 
 // launch starts every present language host, reads each catalog once, and
 // cross-checks the merged surface against discovery.
-func launch(cfg Config, dir string, executables map[string]string) (*Runtime, error) {
+func launch(cfg Config, dir string) (*Runtime, error) {
 	rt := &Runtime{routes: map[string]*host{}}
 	expected := cfg.expected()
 	for _, language := range cfg.languages() {
-		cmd, err := hostCommand(cfg, dir, language, executables)
+		cmd, err := hostCommand(cfg, dir, language)
 		if err != nil {
 			rt.Close()
 			return nil, err
@@ -194,13 +190,17 @@ func (r *Runtime) Close() {
 }
 
 // hostCommand builds one language host's launch command. Serving never
-// depends on PATH: the executables were resolved once at preparation and
-// recorded absolutely.
-func hostCommand(cfg Config, dir, language string, executables map[string]string) (*exec.Cmd, error) {
+// depends on PATH: every language execs its own closure-local executable,
+// found at a fixed location under dir rather than a path recorded at
+// preparation (ADR 0021) — deno and the Go host binary are both copied into
+// the closure at prepare time; the Python interpreter's closure-relative
+// location is resolved by pythonClosureLayout the same way.
+func hostCommand(cfg Config, dir, language string) (*exec.Cmd, error) {
 	var cmd *exec.Cmd
 	switch language {
 	case TypeScript:
-		cmd = exec.Command(executables["deno"], "run", "--quiet", "--cached-only", "--frozen",
+		deno := filepath.Join(dir, "deno", "bin", "deno")
+		cmd = exec.Command(deno, "run", "--quiet", "--cached-only", "--frozen",
 			"--config", filepath.Join(cfg.Source, "deno.json"),
 			"--allow-read="+cfg.Source+","+cfg.Workspace,
 			filepath.Join(dir, "typescript.ts"), cfg.Source)
@@ -241,6 +241,18 @@ func verifyCache(cfg Config, dir string) error {
 		switch language {
 		case TypeScript:
 			if !sameFile(filepath.Join(dir, "typescript.ts"), typescriptHost) {
+				return staleCache
+			}
+			info, err := os.Stat(filepath.Join(dir, "deno", "bin", "deno"))
+			if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+				return staleCache
+			}
+			// hostCommand launches with DENO_DIR pointed here unconditionally;
+			// a missing cache directory would otherwise surface as a raw Deno
+			// module-resolution error at launch instead of the uniform
+			// "run tenon apply" message every other missing-cache condition
+			// produces.
+			if info, err := os.Stat(filepath.Join(dir, "deno-dir")); err != nil || !info.IsDir() {
 				return staleCache
 			}
 		case Python:
