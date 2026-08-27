@@ -111,6 +111,22 @@ func Stage(ctx context.Context, opts Options) (*Result, *diagnostics.List, error
 		return nil, diags, nil
 	}
 
+	// Refuse a Python- or TypeScript-bearing agent before any mutation: their
+	// execution closures do not land until ADR 0021's per-language work, and a
+	// tree staged for them today would verify while unable to serve. Go tools
+	// stage today; apply/validate/serve keep working for every language
+	// locally, only staging refuses.
+	for _, lang := range []string{toolruntime.Python, toolruntime.TypeScript} {
+		if projectHasLanguage(p, lang) {
+			diags.Errorf("stage.tools.runtime-unsupported", "tools",
+				"%s tools cannot be staged yet: Go tools stage today, while Python and TypeScript execution closures land with ADR 0021's per-language work (docs/adr/0021-execute-authored-tools-from-a-self-contained-closure.md)",
+				languageLabel(lang))
+		}
+	}
+	if diags.HasErrors() {
+		return nil, diags, nil
+	}
+
 	absOutput, err := filepath.Abs(opts.Output)
 	if err != nil {
 		return nil, diags, fmt.Errorf("resolving output: %w", err)
@@ -161,6 +177,15 @@ func Stage(ctx context.Context, opts Options) (*Result, *diagnostics.List, error
 
 	finalAgentSource := finalAgentsRoot + "/" + p.Name
 
+	// The final canonical directory the tool runtime closure will be staged
+	// under, or "" for a tool-free agent. Computed here, before the tree
+	// exists, so both the regenerated apply record (which names it) and the
+	// later copy step (which populates it) agree on the identical path.
+	var closureRootFinal string
+	if closureDir != "" {
+		closureRootFinal = finalRuntimes + "/tools"
+	}
+
 	// Directories that structure the tree. Ownership is recorded as intent;
 	// /opt is root-owned and read-only at runtime, /workspace and /home/tenon
 	// are owned by the non-root runtime identity.
@@ -189,7 +214,7 @@ func Stage(ctx context.Context, opts Options) (*Result, *diagnostics.List, error
 
 	// Step: generate the native integration for the final paths, writing the
 	// physical files under <tmp>/workspace while embedding /opt and /workspace.
-	genErr := generateIntegration(p, opts.Driver, finalAgentSource, tmp, diags)
+	genErr := generateIntegration(p, opts.Driver, finalAgentSource, closureRootFinal, tmp, diags)
 	if genErr != nil {
 		return nil, diags, genErr
 	}
@@ -220,8 +245,9 @@ func Stage(ctx context.Context, opts Options) (*Result, *diagnostics.List, error
 	// Step: carry the tool execution closure into /opt/tenon/runtimes.
 	runtimeInfo := RuntimeInfo{Bundled: false, Minimized: false}
 	if closureDir != "" {
-		dest := finalRuntimes + "/tools/" + filepath.Base(closureDir)
-		if err := copyTree(closureDir, physical(tmp, dest)); err != nil {
+		dest := closureRootFinal + "/" + filepath.Base(closureDir)
+		physDest := physical(tmp, dest)
+		if err := copyTree(closureDir, physDest); err != nil {
 			return nil, diags, fmt.Errorf("staging the tool runtime closure: %w", err)
 		}
 		runtimeInfo = RuntimeInfo{
@@ -289,6 +315,31 @@ func Stage(ctx context.Context, opts Options) (*Result, *diagnostics.List, error
 		Fingerprint:      p.Fingerprint,
 		RuntimeLanguages: languages,
 	}, diags, nil
+}
+
+// projectHasLanguage reports whether any of p's discovered tools are written
+// in lang.
+func projectHasLanguage(p *agentproject.Project, lang string) bool {
+	for _, t := range p.Tools {
+		if t.Language == lang {
+			return true
+		}
+	}
+	return false
+}
+
+// languageLabel renders a toolruntime language constant for prose.
+func languageLabel(lang string) string {
+	switch lang {
+	case toolruntime.Python:
+		return "Python"
+	case toolruntime.TypeScript:
+		return "TypeScript"
+	case toolruntime.Go:
+		return "Go"
+	default:
+		return lang
+	}
 }
 
 // harnessPlaceholderNote states plainly that the native harness runtime is not

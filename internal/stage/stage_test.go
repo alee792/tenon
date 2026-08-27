@@ -2,6 +2,7 @@ package stage
 
 import (
 	"context"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -379,3 +380,140 @@ func Execute(ctx context.Context, in Input) (Output, error) {
 	return Output{Hex: hex.EncodeToString(sum[:])}, nil
 }
 `
+
+// TestStageRefusesPythonTools proves staging refuses a Python-bearing agent
+// with the stable stage.tools.runtime-unsupported diagnostic, before any
+// mutation: the output directory is never created.
+func TestStageRefusesPythonTools(t *testing.T) {
+	agent := writeAgent(t, "python-tool-agent")
+	writeFile(t, agent, "pyproject.toml", "[project]\nname = \"x\"\n")
+	writeFile(t, agent, "uv.lock", "")
+	writeFile(t, agent, "tools/count_words.py", "description = 'x'\n")
+	exe := fakeExecutable(t)
+
+	out := filepath.Join(t.TempDir(), "staged")
+	res, diags, err := Stage(context.Background(), Options{
+		AgentDir: agent, Harness: "claude", Output: out, Executable: exe, Driver: claude.Driver{},
+	})
+	if err != nil {
+		t.Fatalf("stage error: %v", err)
+	}
+	if res != nil {
+		t.Fatalf("a refused stage must report no result, got %v", res)
+	}
+	found := false
+	for _, d := range diags.All() {
+		if d.ID == "stage.tools.runtime-unsupported" {
+			found = true
+			if !strings.Contains(d.Rule, "Python") {
+				t.Fatalf("the diagnostic must name the language: %q", d.Rule)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected stage.tools.runtime-unsupported, got %v", diags.All())
+	}
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Fatal("a refused stage must leave no output directory")
+	}
+}
+
+// TestStageRefusesTypeScriptTools mirrors TestStageRefusesPythonTools for
+// TypeScript.
+func TestStageRefusesTypeScriptTools(t *testing.T) {
+	agent := writeAgent(t, "ts-tool-agent")
+	writeFile(t, agent, "deno.json", "{}\n")
+	writeFile(t, agent, "deno.lock", "{}\n")
+	writeFile(t, agent, "tools/shout_text.ts", "export default {}\n")
+	exe := fakeExecutable(t)
+
+	out := filepath.Join(t.TempDir(), "staged")
+	res, diags, err := Stage(context.Background(), Options{
+		AgentDir: agent, Harness: "claude", Output: out, Executable: exe, Driver: claude.Driver{},
+	})
+	if err != nil {
+		t.Fatalf("stage error: %v", err)
+	}
+	if res != nil {
+		t.Fatalf("a refused stage must report no result, got %v", res)
+	}
+	found := false
+	for _, d := range diags.All() {
+		if d.ID == "stage.tools.runtime-unsupported" {
+			found = true
+			if !strings.Contains(d.Rule, "TypeScript") {
+				t.Fatalf("the diagnostic must name the language: %q", d.Rule)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected stage.tools.runtime-unsupported, got %v", diags.All())
+	}
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Fatal("a refused stage must leave no output directory")
+	}
+}
+
+// TestStageGoClosureCarriesNoBuildMachinePath scans the entire staged Go-tool
+// tree for the physical build-machine paths this test's own fixture used
+// (the agent source directory and the fake tenon executable's directory,
+// which stand in for whatever directories a real preparation machine would
+// use) and fails if any staged file's content contains one. It also proves
+// the staged tree still passes stage verify, so the fix this proves does not
+// disturb it.
+//
+// Without the fix this once failed: the generated Go host's go.mod named its
+// replace target with the absolute preparation-machine agent source path
+// (toolruntime.renderGoHost embedded cfg.Source verbatim), and `go build
+// -trimpath` does not scrub a module replace target the way it scrubs
+// recorded source-file paths, so the built host binary's embedded module
+// info (visible via `go version -m`, read by runtime/debug.ReadBuildInfo)
+// carried the same absolute path even after go.mod itself was rewritten.
+// renderGoHost now names the replace target relative to the directory its
+// go.mod is written into, so the absolute path is never embedded in the
+// first place, in either the go.mod source or the binary's own build info —
+// the smaller true fix, over rewriting or deleting the file after the fact.
+func TestStageGoClosureCarriesNoBuildMachinePath(t *testing.T) {
+	agent := writeAgent(t, "scan-go-tool-agent")
+	writeFile(t, agent, "go.mod", "module example.com/scan-go-tool-agent\n\ngo 1.24\n")
+	writeFile(t, agent, "tools/hash_text/tool.go", goTool)
+	exe := fakeExecutable(t)
+
+	out := filepath.Join(t.TempDir(), "staged")
+	res, diags, err := Stage(context.Background(), Options{
+		AgentDir: agent, Harness: "codex", Output: out, Executable: exe, Driver: codex.Driver{},
+	})
+	if err != nil {
+		t.Fatalf("stage error: %v", err)
+	}
+	if diags.HasErrors() {
+		t.Fatalf("stage diagnostics: %v", diags.All())
+	}
+	if len(res.RuntimeLanguages) != 1 || res.RuntimeLanguages[0] != "go" {
+		t.Fatalf("expected a go runtime closure, got %v", res.RuntimeLanguages)
+	}
+
+	buildPaths := []string{agent, filepath.Dir(exe)}
+	err = filepath.WalkDir(out, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !d.Type().IsRegular() {
+			return err
+		}
+		content, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return rerr
+		}
+		for _, bad := range buildPaths {
+			if strings.Contains(string(content), bad) {
+				return fmt.Errorf("%s embeds the build-machine path %s", path, bad)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Verify(filepath.Join(out, "opt", "tenon", "artifact.json"), out); err != nil {
+		t.Fatalf("the normalized staged tree must still verify: %v", err)
+	}
+}

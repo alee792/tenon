@@ -126,7 +126,7 @@ func prepareLanguage(ctx context.Context, cfg Config, dir, language string, exec
 		if err := os.MkdirAll(goDir, 0o700); err != nil {
 			return prepareFailure(language, "the go host directory could not be created")
 		}
-		main, mod, err := renderGoHost(cfg)
+		main, mod, err := renderGoHost(cfg, goDir)
 		if err != nil {
 			return err
 		}
@@ -170,8 +170,14 @@ type goHostImport struct {
 
 // renderGoHost renders the generated host's main.go and go.mod for cfg. The
 // authored module supplies its own path and go directive; tenon adds no
-// dependency to it and writes nothing into it.
-func renderGoHost(cfg Config) ([]byte, []byte, error) {
+// dependency to it and writes nothing into it. goDir is the directory the
+// rendered go.mod will be written into: the go.mod replace directive names
+// cfg.Source relative to it rather than as an absolute path, so the built
+// host binary's embedded module info (which `go build -trimpath` does not
+// touch — it strips recorded source-file paths, not module replace targets)
+// never carries the preparation machine's absolute directory layout, in
+// either a workspace cache or a staged closure.
+func renderGoHost(cfg Config, goDir string) ([]byte, []byte, error) {
 	raw, err := os.ReadFile(filepath.Join(cfg.Source, "go.mod"))
 	if err != nil {
 		return nil, nil, prepareFailure(Go, "go tools require a readable go.mod at the agent root")
@@ -189,11 +195,16 @@ func renderGoHost(cfg Config) ([]byte, []byte, error) {
 		version = string(versionMatch[1])
 	}
 
+	sourceDir := cfg.Source
+	if rel, relErr := filepath.Rel(goDir, cfg.Source); relErr == nil {
+		sourceDir = rel
+	}
+
 	data := goHostData{
 		HostModule: hostModule,
 		Module:     module,
 		GoVersion:  version,
-		SourceDir:  cfg.Source,
+		SourceDir:  sourceDir,
 	}
 	for i, tool := range cfg.goToolDirs() {
 		entry := goHostImport{

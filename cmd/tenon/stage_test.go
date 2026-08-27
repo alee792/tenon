@@ -68,3 +68,71 @@ func TestStageCLIJourney(t *testing.T) {
 		t.Fatalf("verify failure must be reported on stderr: %s", stderr.String())
 	}
 }
+
+// TestStageRefusesPythonAndTypeScriptButOtherCommandsStillWork proves ADR
+// 0021's staging refusal end to end through the CLI: `tenon stage` reports
+// the stable stage.tools.runtime-unsupported diagnostic and writes no output
+// directory for a Python- or TypeScript-bearing agent, while `tenon
+// validate` and `tenon apply` keep working locally for the very same agent —
+// only staging refuses.
+func TestStageRefusesPythonAndTypeScriptButOtherCommandsStillWork(t *testing.T) {
+	cases := []struct {
+		name     string
+		language string
+		setup    func(t *testing.T, agent string)
+	}{
+		{
+			name:     "python",
+			language: "Python",
+			setup: func(t *testing.T, agent string) {
+				writeFile(t, agent, "pyproject.toml", []byte("[project]\nname = \"x\"\n"), 0o644)
+				writeFile(t, agent, "uv.lock", []byte(""), 0o644)
+				writeFile(t, agent, "tools/count_words.py", []byte(pythonToolFile), 0o644)
+			},
+		},
+		{
+			name:     "typescript",
+			language: "TypeScript",
+			setup: func(t *testing.T, agent string) {
+				writeFile(t, agent, "deno.json", []byte("{}\n"), 0o644)
+				writeFile(t, agent, "deno.lock", []byte(`{"version":"4"}`+"\n"), 0o644)
+				writeFile(t, agent, "tools/shout_text.ts", []byte(typescriptToolFile), 0o644)
+			},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			agent := writeAgent(t, c.name+"-tool-agent", validInstructions)
+			c.setup(t, agent)
+			out := filepath.Join(t.TempDir(), "staged")
+
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"stage", agent, "--harness", "claude", "--output", out, "--diagnostics", "jsonl"},
+				nil, &stdout, &stderr)
+			if code == 0 {
+				t.Fatalf("staging a %s-bearing agent must fail: %q", c.language, stdout.String())
+			}
+			got := filterDiags(parseDiagLines(t, stdout.String()), "stage.tools.runtime-unsupported")
+			if len(got) != 1 {
+				t.Fatalf("expected exactly one stage.tools.runtime-unsupported, got %q", stdout.String())
+			}
+			if !strings.Contains(got[0].Rule, c.language) {
+				t.Fatalf("the diagnostic must name %s: %q", c.language, got[0].Rule)
+			}
+			if _, err := os.Stat(out); !os.IsNotExist(err) {
+				t.Fatal("a refused stage must leave no output directory")
+			}
+
+			// Only staging refuses: validate never carries staging's own
+			// diagnostic for the identical agent, whatever it otherwise
+			// reports (a missing local deno/uv toolchain is this
+			// environment's business, not staging's refusal).
+			stdout.Reset()
+			stderr.Reset()
+			run([]string{"validate", agent, "--harness", "claude", "--diagnostics", "jsonl"}, nil, &stdout, &stderr)
+			if got := filterDiags(parseDiagLines(t, stdout.String()), "stage.tools.runtime-unsupported"); len(got) != 0 {
+				t.Fatalf("validate must never report stage's own diagnostic: %v", got)
+			}
+		})
+	}
+}

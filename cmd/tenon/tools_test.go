@@ -513,3 +513,51 @@ func TestToolShapeViolationsFailInspectionNamingTheFile(t *testing.T) {
 		})
 	}
 }
+
+// TestServeCallsAGoToolFromAStagedTree is ADR 0021's acceptance shape for Go:
+// stage a Go-tool agent, then serve from the staged workspace and staged
+// closure directly, with no workspace tool cache ever prepared there, and
+// prove a tools/list and a tools/call round-trip. Before the ADR 0021 fix,
+// the closure staged at /opt/tenon/runtimes/tools/<key> was unreachable from
+// the staged workspace's own apply record, so this failed closed with "tool
+// runtime is missing or changed; run tenon apply" even though `tenon stage
+// verify` reported the tree clean.
+func TestServeCallsAGoToolFromAStagedTree(t *testing.T) {
+	agent := writeAgent(t, "staged-tool-agent", validInstructions)
+	writeGoTool(t, agent, goToolFile)
+	out := filepath.Join(t.TempDir(), "staged")
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"stage", agent, "--harness", "claude", "--output", out}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("stage exit %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+	}
+
+	artifact := filepath.Join(out, "opt", "tenon", "artifact.json")
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"stage", "verify", "--artifact", artifact, "--prefix", out}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("a staged Go-tool tree must verify: exit %d\nstderr: %s", code, stderr.String())
+	}
+
+	stagedSource := filepath.Join(out, "opt", "tenon", "agents", "staged-tool-agent")
+	stagedWorkspace := filepath.Join(out, "workspace")
+
+	// No workspace tool cache exists anywhere in the staged tree: serving
+	// must reach the closure staged under opt/tenon/runtimes, not a
+	// re-prepared workspace cache.
+	if _, err := os.Stat(filepath.Join(stagedWorkspace, ".tenon", "cache", "tools")); !os.IsNotExist(err) {
+		t.Fatalf("the staged workspace must carry no tool cache, found one (or a stat error): %v", err)
+	}
+
+	responses := serveManaged(t, stagedSource, "claude", stagedWorkspace, listRequest,
+		toolCall(2, "hash-text", `{"text":"hi"}`))
+
+	listed := listedTool(t, responses[0], "hash-text")
+	if listed["description"] != "Hash bounded text with SHA-256." {
+		t.Fatalf("description = %v", listed["description"])
+	}
+	result := callResult(t, responses[1])
+	if result["hex"] != "8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4" {
+		t.Fatalf("hash-text output = %#v", result)
+	}
+}

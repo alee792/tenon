@@ -24,7 +24,14 @@ import (
 // under <tmp>/workspace, so this deliberately does not call apply.Apply, which
 // would require an existing workspace and would record the physical source
 // path: internal/apply's workspace semantics are left intact.
-func generateIntegration(p *agentproject.Project, driver apply.Driver, finalAgentSource, tmp string, diags *diagnostics.List) error {
+//
+// closureRootFinal is the final canonical directory the tool runtime closure
+// is staged under (finalRuntimes+"/tools"), or "" for a tool-free agent. When
+// set, it is recorded on the apply record as a path relative to the final
+// workspace (ADR 0021): the staged apply record names the closure root it was
+// published with, so serving can honor it instead of assuming the ordinary
+// workspace-cache layout.
+func generateIntegration(p *agentproject.Project, driver apply.Driver, finalAgentSource, closureRootFinal, tmp string, diags *diagnostics.List) error {
 	staged := *p
 	staged.Root = finalAgentSource
 
@@ -53,6 +60,13 @@ func generateIntegration(p *agentproject.Project, driver apply.Driver, finalAgen
 		Fingerprint: p.Fingerprint,
 		GitCommit:   apply.CleanHeadCommit(p.Root),
 		Files:       map[string]apply.OwnedFile{},
+	}
+	if closureRootFinal != "" {
+		rel, err := filepath.Rel(finalWorkspace, closureRootFinal)
+		if err != nil {
+			return fmt.Errorf("relating the closure root to the workspace: %w", err)
+		}
+		record.ClosureRoot = filepath.ToSlash(rel)
 	}
 	for _, f := range files {
 		mode := os.FileMode(0o644)
