@@ -36,6 +36,14 @@ The first release, v0.1.0, ships the core described in
   interpreter identity, which is not yet known at manifest-resolve time —
   manifest verification runs before tool preparation — and which the
   staged artifact manifest already carries once preparation has run).
+  Python closure symlink removal now walks the whole `cpython/` install
+  root exhaustively (deleting any symlink whose target resolves inside the
+  closure, failing closed on one that does not, and asserting none survive)
+  instead of enumerating specific paths a known uv release produces: an
+  unpinned CI `setup-uv` step resolving uv 0.12.6 instead of this repo's
+  pinned 0.8.17 surfaced a minor-version symlink beside the versioned
+  interpreter directory that the narrower, enumerated walk missed. CI's
+  `setup-uv` step is now pinned to `0.8.17`, matching `images/inputs.json`.
 
 - `tenon drift` reports per-file divergence between a workspace and its
   apply record without mutating anything, and `tenon apply --discard-local`

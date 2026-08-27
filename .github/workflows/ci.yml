@@ -47,6 +47,19 @@ jobs:
 
       - name: Set up uv
         uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          # Pinned to the same uv release images/inputs.json pins for the
+          # runtime image build. An unpinned setup-uv falls back to
+          # whatever "latest" is on the day CI runs — this repo's Python
+          # closure determinism depends on (uv version, requested spec)
+          # resolving to the same exact interpreter patch across machines
+          # and time (see prepareClosurePython), and a drifting CI uv
+          # silently breaks that on a schedule nobody controls. It also
+          # silently changed `uv python install`'s own on-disk layout
+          # between 0.8.17 and 0.12.6 (a minor-version symlink alongside
+          # the patch directory) and broke staging's symlink-free
+          # guarantee in exactly that way once already.
+          version: "0.8.17"
 
       - name: Run repository checks
         # With both toolchains installed above, a skipped polyglot test would

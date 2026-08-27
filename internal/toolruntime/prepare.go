@@ -341,6 +341,20 @@ func pythonClosureLayout(dir string) (interpBin, siteDir, identity string, err e
 // contract, not a staging mode".
 // cpythonRoot is the --install-dir uv python install was given (the parent
 // of interpDir, the one versioned interpreter directory it installed).
+//
+// Symlink removal walks cpythonRoot and siteDir themselves, exhaustively,
+// rather than enumerating the specific symlinks a known uv release
+// produces: uv 0.8.17 (this repo's pinned release, and what every other
+// comment here was written against) lays every one of its own
+// convenience symlinks inside interpDir, but uv 0.12.6 additionally
+// creates a minor-version symlink as interpDir's own SIBLING —
+// cpython/cpython-3.11-linux-x86_64-gnu -> cpython/cpython-3.11.13-linux-x86_64-gnu/
+// — outside anything an interpDir-scoped walk ever visits, and CI hitting
+// exactly that shape (an unpinned setup-uv resolving "latest") is what
+// first surfaced this. Walking cpythonRoot itself, not interpDir, tolerates
+// a layout change like that instead of chasing it: whatever a future uv
+// release names its own symlinks or wherever it places them within the
+// closure, they are found and removed.
 func normalizePythonClosure(cpythonRoot, interpDir, siteDir string) error {
 	for _, p := range []string{
 		filepath.Join(interpDir, "share", "terminfo"),
@@ -362,26 +376,78 @@ func normalizePythonClosure(cpythonRoot, interpDir, siteDir string) error {
 			return prepareFailure(Python, "the python closure could not be normalized: %v", err)
 		}
 	}
-	for _, root := range []string{interpDir, siteDir} {
-		if err := removePythonClosureSymlinks(root); err != nil {
+	closureRoots := []string{cpythonRoot, siteDir}
+	for _, root := range closureRoots {
+		if err := removePythonClosureSymlinks(root, closureRoots); err != nil {
+			return prepareFailure(Python, "the python closure could not be normalized: %v", err)
+		}
+	}
+	// Defense in depth, and the proof this normalization actually worked:
+	// copyTree refuses a symlink at staging time regardless, but that
+	// failure names only "a non-regular entry" from a much later, less
+	// specific caller. Asserting here, right after normalization, fails
+	// closed with a diagnostic that names the exact survivor and points at
+	// the layout that produced it.
+	for _, root := range closureRoots {
+		if err := assertPythonClosureHasNoSymlinks(root); err != nil {
 			return prepareFailure(Python, "the python closure could not be normalized: %v", err)
 		}
 	}
 	return nil
 }
 
-// removePythonClosureSymlinks deletes every symlink under root. None of
-// CPython's own internal symlinks (bin/python, bin/python3, python3-config,
-// pydoc3, 2to3, idle3, the lib/libpython*.so link, the pkgconfig links) are
-// referenced anywhere on tenon's launch path, so none needs to be
-// materialized in its place.
-func removePythonClosureSymlinks(root string) error {
+// removePythonClosureSymlinks deletes every symlink under root, whatever its
+// name or position, PROVIDED its target resolves inside one of
+// closureRoots: none of CPython's own internal symlinks known today (
+// bin/python, bin/python3, python3-config, pydoc3, 2to3, idle3, the
+// lib/libpython*.so link, the pkgconfig links, uv 0.12.6's own
+// minor-version directory link) are referenced anywhere on tenon's launch
+// path, so none needs to be materialized in its place — but a symlink this
+// closure did not expect, pointing somewhere outside itself, is exactly the
+// kind of thing a future, further uv layout change could introduce and
+// that blind deletion should not paper over: it fails closed instead,
+// naming the offending path and its target, rather than guess whether
+// deleting it is safe.
+func removePythonClosureSymlinks(root string, closureRoots []string) error {
+	return filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.Type()&os.ModeSymlink == 0 {
+			return nil
+		}
+		target, rerr := os.Readlink(path)
+		if rerr != nil {
+			return fmt.Errorf("reading the symlink %s: %w", path, rerr)
+		}
+		resolved := target
+		if !filepath.IsAbs(resolved) {
+			resolved = filepath.Join(filepath.Dir(path), resolved)
+		}
+		resolved = filepath.Clean(resolved)
+		inside := false
+		for _, closureRoot := range closureRoots {
+			if resolved == closureRoot || strings.HasPrefix(resolved, closureRoot+string(filepath.Separator)) {
+				inside = true
+				break
+			}
+		}
+		if !inside {
+			return fmt.Errorf("the symlink %s targets %q, outside the python closure; refusing to guess whether removing it is safe",
+				path, target)
+		}
+		return os.Remove(path)
+	})
+}
+
+// assertPythonClosureHasNoSymlinks fails if any symlink survives under root.
+func assertPythonClosureHasNoSymlinks(root string) error {
 	return filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.Type()&os.ModeSymlink != 0 {
-			return os.Remove(path)
+			return fmt.Errorf("a symlink survived normalization at %s", path)
 		}
 		return nil
 	})
