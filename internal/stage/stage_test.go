@@ -1,9 +1,7 @@
 package stage
 
 import (
-	"bytes"
 	"context"
-	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -500,27 +498,17 @@ func TestStageGoClosureCarriesNoBuildMachinePath(t *testing.T) {
 		t.Fatalf("expected a go runtime closure, got %v", res.RuntimeLanguages)
 	}
 
-	needles := buildMachineNeedles(agent, filepath.Dir(exe), nil)
-	if len(needles) == 0 {
-		t.Fatal("the fixture's own agent and executable directories must yield at least one dangerous component to check against; the test proves nothing otherwise")
+	componentNeedles := buildMachineNeedles(agent, filepath.Dir(exe), nil)
+	joinedNeedles := buildMachineJoinedNeedles(agent, filepath.Dir(exe), nil)
+	if len(componentNeedles) == 0 && len(joinedNeedles) == 0 {
+		t.Fatal("the fixture's own agent and executable directories must yield at least one dangerous needle to check against; the test proves nothing otherwise")
 	}
-	err = filepath.WalkDir(out, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !d.Type().IsRegular() {
-			return err
-		}
-		content, rerr := os.ReadFile(path)
-		if rerr != nil {
-			return rerr
-		}
-		for _, needle := range needles {
-			if bytes.Contains(content, needle) {
-				return fmt.Errorf("%s embeds the build-machine path component %q", path, needle)
-			}
-		}
-		return nil
-	})
-	if err != nil {
+	scanDiags := &diagnostics.List{}
+	if err := rejectBuildMachinePaths(out, componentNeedles, joinedNeedles, scanDiags); err != nil {
 		t.Fatal(err)
+	}
+	if scanDiags.HasErrors() {
+		t.Fatalf("the staged tree embeds a build-machine path: %v", scanDiags.All())
 	}
 
 	if err := Verify(filepath.Join(out, "opt", "tenon", "artifact.json"), out); err != nil {
@@ -562,7 +550,7 @@ func TestRejectBuildMachinePathsFiresOnALeak(t *testing.T) {
 		t.Fatal(err)
 	}
 	diags := &diagnostics.List{}
-	if err := rejectBuildMachinePaths(clean, needles, diags); err != nil {
+	if err := rejectBuildMachinePaths(clean, needles, nil, diags); err != nil {
 		t.Fatalf("scanning a clean tree: %v", err)
 	}
 	if diags.HasErrors() {
@@ -575,7 +563,7 @@ func TestRejectBuildMachinePathsFiresOnALeak(t *testing.T) {
 		t.Fatal(err)
 	}
 	diags = &diagnostics.List{}
-	if err := rejectBuildMachinePaths(leaking, needles, diags); err != nil {
+	if err := rejectBuildMachinePaths(leaking, needles, nil, diags); err != nil {
 		t.Fatalf("scanning a leaking tree: %v", err)
 	}
 	found := false
@@ -594,4 +582,118 @@ func TestRejectBuildMachinePathsFiresOnALeak(t *testing.T) {
 	if !found {
 		t.Fatalf("expected stage.tree.build-path-leaked, got %v", diags.All())
 	}
+}
+
+// TestRejectBuildMachinePathsIgnoresBareComponentsInABinary proves the
+// heart of the binary/text split: a compiled binary embedding a dangerous
+// component only as a bare, isolated token (the exact shape a Go module's
+// own domain-style import prefix, owner segment, or a standard-library
+// package name legitimately takes in any binary's own build info) is not
+// flagged, where the same bytes in a text file would be.
+func TestRejectBuildMachinePathsIgnoresBareComponentsInABinary(t *testing.T) {
+	componentNeedles := [][]byte{[]byte("github.com"), []byte("someowner")}
+
+	textDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(textDir, "notes.txt"),
+		[]byte("see github.com/someowner for details"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	diags := &diagnostics.List{}
+	if err := rejectBuildMachinePaths(textDir, componentNeedles, nil, diags); err != nil {
+		t.Fatalf("scanning text: %v", err)
+	}
+	if !diags.HasErrors() {
+		t.Fatal("a text file embedding a dangerous component must still be flagged")
+	}
+
+	binDir := t.TempDir()
+	// A NUL byte is looksBinary's simplest reliable signal; the rest of the
+	// content is the same bare component a Go binary's own module data
+	// would legitimately carry.
+	binContent := append([]byte{0}, []byte("dep github.com/someowner/thing v1.0.0")...)
+	if err := os.WriteFile(filepath.Join(binDir, "host"), binContent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	diags = &diagnostics.List{}
+	if err := rejectBuildMachinePaths(binDir, componentNeedles, nil, diags); err != nil {
+		t.Fatalf("scanning a binary: %v", err)
+	}
+	if diags.HasErrors() {
+		t.Fatalf("bare components must not be checked against a binary file: %v", diags.All())
+	}
+}
+
+// TestRejectBuildMachinePathsFiresOnAJoinedLeakInABinary proves binaries are
+// not simply exempt from the scan: a binary embedding a dangerous
+// directory's full path, or its "../"+basename relative form, still fails
+// closed.
+func TestRejectBuildMachinePathsFiresOnAJoinedLeakInABinary(t *testing.T) {
+	cases := []struct {
+		name    string
+		content []byte
+	}{
+		{"absolute", []byte("...replace target => /tmp/x/sessionsuffix123456 ...")},
+		{"relative", []byte("...replace target => ../sessionsuffix123456 ...")},
+	}
+	joinedNeedles := buildMachineJoinedNeedles("/tmp/x/sessionsuffix123456", "", nil)
+	if len(joinedNeedles) < 2 {
+		t.Fatalf("expected both an absolute and a relative joined needle, got %v", joinedNeedles)
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			binContent := append([]byte{0}, c.content...)
+			if err := os.WriteFile(filepath.Join(dir, "host"), binContent, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			diags := &diagnostics.List{}
+			if err := rejectBuildMachinePaths(dir, nil, joinedNeedles, diags); err != nil {
+				t.Fatalf("scanning: %v", err)
+			}
+			found := false
+			for _, d := range diags.All() {
+				if d.ID == "stage.tree.build-path-leaked" {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("expected the scan to fire on a binary embedding a joined leak, got %v", diags.All())
+			}
+		})
+	}
+}
+
+// TestBuildMachineJoinedNeedles proves the joined-needle construction: each
+// dangerous directory's own full path is always a needle, and its
+// "../"+basename relative form is a needle only when that basename clears
+// the same length and vocabulary bar component matching uses.
+func TestBuildMachineJoinedNeedles(t *testing.T) {
+	got := buildMachineJoinedNeedles("/a/b/sessionsuffix123456", "", nil)
+	want := map[string]bool{
+		"/a/b/sessionsuffix123456": true,
+		"../sessionsuffix123456":   true,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("buildMachineJoinedNeedles = %v, want exactly %v", asStrings(got), want)
+	}
+	for _, n := range got {
+		if !want[string(n)] {
+			t.Fatalf("unexpected needle %q", n)
+		}
+	}
+
+	// A short or safe-listed basename yields no relative-join needle, only
+	// the full path.
+	got = buildMachineJoinedNeedles("/a/b/opt", "", nil)
+	if len(got) != 1 || string(got[0]) != "/a/b/opt" {
+		t.Fatalf("buildMachineJoinedNeedles with a safe basename = %v", asStrings(got))
+	}
+}
+
+func asStrings(bs [][]byte) []string {
+	out := make([]string, len(bs))
+	for i, b := range bs {
+		out[i] = string(b)
+	}
+	return out
 }

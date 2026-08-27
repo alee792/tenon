@@ -126,19 +126,26 @@ func prepareLanguage(ctx context.Context, cfg Config, dir, language string, exec
 		if err := os.MkdirAll(goDir, 0o700); err != nil {
 			return prepareFailure(language, "the go host directory could not be created")
 		}
-		// Build against a copy of the Go tool source at a directory name
-		// that is fixed regardless of where the agent source physically
-		// lives: the generated go.mod names its replace target relative to
-		// goDir, and a fixed sibling name makes that target a machine-
-		// independent constant ("../agent-source") rather than a path
-		// shaped by this machine's directory layout. This matters at build
-		// time, not just after: `go build -trimpath` does not scrub a
-		// module's replace target the way it scrubs recorded source-file
+		// Build against a copy of the agent's whole module at a directory
+		// name that is fixed regardless of where the agent source
+		// physically lives: the generated go.mod names its replace target
+		// relative to goDir, and a fixed sibling name makes that target a
+		// machine-independent constant ("../agent-source") rather than a
+		// path shaped by this machine's directory layout. This matters at
+		// build time, not just after: `go build -trimpath` does not scrub
+		// a module's replace target the way it scrubs recorded source-file
 		// paths, so the built host binary's own embedded module info (read
 		// by `go version -m` and runtime/debug.ReadBuildInfo) carries
 		// whatever the compiler saw, verbatim.
+		//
+		// The copy is the whole module, not only tools/: a Go tool may
+		// import any package inside its own module
+		// (docs/product-spec.md constrains only tools/'s own shape, not
+		// what a tool imports), so building against anything narrower
+		// silently breaks an import that compiles fine against the real
+		// agent source.
 		sourceCopy := filepath.Join(dir, "agent-source")
-		if err := copyGoToolSource(cfg, sourceCopy); err != nil {
+		if err := copyGoModuleSource(cfg, sourceCopy); err != nil {
 			return err
 		}
 		main, mod, err := renderGoHost(cfg, goDir, sourceCopy)
@@ -304,34 +311,67 @@ func writeCacheFile(path string, content []byte, mode os.FileMode) error {
 	return nil
 }
 
-// copyGoToolSource copies exactly what building the Go host needs — the
-// agent's go.mod, its optional go.sum, and each Go tool's own directory
-// under tools/ (ADR 0013 already bounds this exact inventory at discovery,
-// see agentproject.loadTools) — into dest, a directory whose name never
-// varies with the agent source's physical location. Building against dest
-// rather than cfg.Source directly is what keeps the generated go.mod's
-// replace target, and the compiled host binary's own embedded module info,
-// free of the preparation machine's directory layout (ADR 0021).
-func copyGoToolSource(cfg Config, dest string) error {
+// maxGoModuleCopyBytes bounds the whole-module copy copyGoModuleSource
+// makes to build the Go host offline. It mirrors the tool-source
+// inventory's own aggregate ceiling (ADR 0013, agentproject.
+// MaxToolInventoryBytes): a Go tool may import any package within its own
+// module, not only its own tools/ directory, so preparation copies the
+// whole module rather than assume the shape of what it imports, and this
+// bounds that wider copy the same hard way discovery already bounds the
+// narrower tool inventory.
+const maxGoModuleCopyBytes = 64 << 20
+
+// copyGoModuleSource copies the agent's whole module — everything under
+// cfg.Source except the workspace-state .tenon directory — into dest, a
+// directory whose name never varies with the agent source's physical
+// location (see prepareLanguage's Go case). A Go tool may import any
+// package inside its own module (docs/product-spec.md constrains only
+// tools/'s own shape, not what a tool imports), so building against
+// anything narrower than the whole module silently breaks an import that
+// compiles fine against the real agent source — copying only tools/ and
+// the two dependency files once did exactly that. Symlinks are refused,
+// matching every other copy in tenon, and the aggregate copy is bounded so
+// an unexpectedly large agent source fails closed rather than stalls
+// preparation.
+func copyGoModuleSource(cfg Config, dest string) error {
 	if err := os.MkdirAll(dest, 0o700); err != nil {
 		return prepareFailure(Go, "the go build source directory could not be created")
 	}
-	if err := copyRegularFile(filepath.Join(cfg.Source, "go.mod"), filepath.Join(dest, "go.mod")); err != nil {
-		return prepareFailure(Go, "the agent go.mod could not be copied for the go build")
-	}
-	if info, err := os.Lstat(filepath.Join(cfg.Source, "go.sum")); err == nil && info.Mode().IsRegular() {
-		if err := copyRegularFile(filepath.Join(cfg.Source, "go.sum"), filepath.Join(dest, "go.sum")); err != nil {
-			return prepareFailure(Go, "the agent go.sum could not be copied for the go build")
+	var total int64
+	return filepath.WalkDir(cfg.Source, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
 		}
-	}
-	for _, tool := range cfg.goToolDirs() {
-		src := filepath.Join(cfg.Source, "tools", filepath.FromSlash(tool[0]))
-		dst := filepath.Join(dest, "tools", filepath.FromSlash(tool[0]))
-		if err := copyRegularFileTree(src, dst); err != nil {
-			return prepareFailure(Go, "the go tool source %q could not be copied for the go build", tool[0])
+		rel, relErr := filepath.Rel(cfg.Source, path)
+		if relErr != nil {
+			return relErr
 		}
-	}
-	return nil
+		if rel == "." {
+			return nil
+		}
+		if rel == ".tenon" && d.IsDir() {
+			return filepath.SkipDir
+		}
+		target := filepath.Join(dest, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o700)
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			return prepareFailure(Go, "the go build source copy refuses a symlink at %q", filepath.ToSlash(rel))
+		}
+		if !d.Type().IsRegular() {
+			return prepareFailure(Go, "the go build source copy refuses a non-regular entry at %q", filepath.ToSlash(rel))
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		total += info.Size()
+		if total > maxGoModuleCopyBytes {
+			return prepareFailure(Go, "the agent module exceeds the %d byte bound the go build source copy allows", maxGoModuleCopyBytes)
+		}
+		return copyRegularFile(path, target)
+	})
 }
 
 // copyRegularFile copies one regular file's bytes and mode, refusing a
@@ -351,25 +391,6 @@ func copyRegularFile(src, dst string) error {
 		return err
 	}
 	return os.WriteFile(dst, content, info.Mode().Perm())
-}
-
-// copyRegularFileTree copies a directory tree of regular files (a validated
-// Go tool directory, one level deep, per agentproject.loadGoToolDir), never
-// following a symlink.
-func copyRegularFileTree(src, dst string) error {
-	entries, err := os.ReadDir(src)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(dst, 0o700); err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		if err := copyRegularFile(filepath.Join(src, entry.Name()), filepath.Join(dst, entry.Name())); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // executables is the recorded absolute path of every toolchain executable

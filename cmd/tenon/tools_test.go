@@ -114,6 +114,45 @@ func writeGoTool(t *testing.T, agent, source string) {
 	writeFile(t, agent, "tools/hash_text/tool.go", []byte(source), 0o644)
 }
 
+// writeGoToolWithOwnModuleImport gives an agent one Go tool that imports a
+// sibling package from its own module outside tools/ — permitted by
+// docs/product-spec.md (which constrains only tools/'s own shape, not what
+// a tool imports) — proving the build source toolruntime prepares against
+// carries the whole module, not only the tool's own directory.
+func writeGoToolWithOwnModuleImport(t *testing.T, agent string) {
+	t.Helper()
+	module := "example.com/" + filepath.Base(agent)
+	writeFile(t, agent, "go.mod", []byte("module "+module+"\n\ngo 1.24\n"), 0o644)
+	writeFile(t, agent, "internal/shout/shout.go", []byte(`package shout
+
+import "strings"
+
+func Text(s string) string { return strings.ToUpper(s) }
+`), 0o644)
+	writeFile(t, agent, "tools/shout_text/tool.go", []byte(`package shout_text
+
+import (
+	"context"
+
+	"`+module+`/internal/shout"
+)
+
+var Description = "Shout bounded text."
+
+type Input struct {
+	Text string `+"`json:\"text\"`"+`
+}
+
+type Output struct {
+	Shouted string `+"`json:\"shouted\"`"+`
+}
+
+func Execute(ctx context.Context, in Input) (Output, error) {
+	return Output{Shouted: shout.Text(in.Text)}, nil
+}
+`), 0o644)
+}
+
 // serveManaged runs one managed session over the given request lines and
 // returns the decoded responses.
 func serveManaged(t *testing.T, agent, harness, workspace string, requests ...string) []map[string]any {
@@ -559,5 +598,60 @@ func TestServeCallsAGoToolFromAStagedTree(t *testing.T) {
 	result := callResult(t, responses[1])
 	if result["hex"] != "8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4" {
 		t.Fatalf("hash-text output = %#v", result)
+	}
+}
+
+// TestGoToolImportsOwnModulePackageOutsideTools proves a Go tool that
+// imports a sibling package from its own module outside tools/ — a shape
+// docs/product-spec.md permits (it constrains only tools/'s own shape) and
+// that `go build ./...` against the real agent source always accepted —
+// still prepares, applies, and serves. It once regressed: preparation
+// narrowed the directory it built the Go host against to only tools/ and
+// the two native dependency files, so an import like this failed inside
+// toolruntime with a diagnostic that told the author to run the toolchain
+// directly against their own source to see the failure, where it in fact
+// succeeds.
+func TestGoToolImportsOwnModulePackageOutsideTools(t *testing.T) {
+	agent := writeAgent(t, "own-module-import-agent", validInstructions)
+	writeGoToolWithOwnModuleImport(t, agent)
+	ws := t.TempDir()
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("apply exit %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+	}
+
+	responses := serveManaged(t, agent, "claude", ws, listRequest, toolCall(2, "shout-text", `{"text":"hi"}`))
+	listed := listedTool(t, responses[0], "shout-text")
+	if listed["description"] != "Shout bounded text." {
+		t.Fatalf("description = %v", listed["description"])
+	}
+	result := callResult(t, responses[1])
+	if result["shouted"] != "HI" {
+		t.Fatalf("shout-text output = %#v", result)
+	}
+}
+
+// TestStageGoToolImportsOwnModulePackageOutsideTools is the same proof
+// through the stage path: the same agent stages cleanly and the staged
+// closure serves the tool, so the whole-module build source copy fixes the
+// import for staging too, not only for the local apply/serve path.
+func TestStageGoToolImportsOwnModulePackageOutsideTools(t *testing.T) {
+	agent := writeAgent(t, "staged-own-module-import-agent", validInstructions)
+	writeGoToolWithOwnModuleImport(t, agent)
+	out := filepath.Join(t.TempDir(), "staged")
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"stage", agent, "--harness", "claude", "--output", out}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("stage exit %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+	}
+
+	stagedSource := filepath.Join(out, "opt", "tenon", "agents", "staged-own-module-import-agent")
+	stagedWorkspace := filepath.Join(out, "workspace")
+
+	responses := serveManaged(t, stagedSource, "claude", stagedWorkspace, listRequest, toolCall(2, "shout-text", `{"text":"hi"}`))
+	result := callResult(t, responses[1])
+	if result["shouted"] != "HI" {
+		t.Fatalf("shout-text output = %#v", result)
 	}
 }

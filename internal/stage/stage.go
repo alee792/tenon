@@ -24,6 +24,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/alee792/tenon/internal/agentproject"
 	"github.com/alee792/tenon/internal/apply"
@@ -264,22 +265,6 @@ func Stage(ctx context.Context, opts Options) (*Result, *diagnostics.List, error
 		runtimeInfo.Note = "the agent declares no authored tools, so no language runtime is staged"
 	}
 
-	// Step: fail closed if any build-machine path survives anywhere in the
-	// staged tree (ADR 0021's normalize-then-prove-relocatability step,
-	// widened from the prototype's generated-configuration-only
-	// rejectBuildPaths scan to the whole tree): the authored agent source
-	// directory and every throwaway root staging or tool preparation
-	// created must leave no trace once the tree is complete, whatever wrote
-	// it and however it was embedded — a rewritten go.mod (ADR 0021's own
-	// named example) proved a joined-absolute-string check insufficient, so
-	// this is component-based instead.
-	if err := rejectBuildMachinePaths(tmp, buildMachineNeedles(p.Root, tmp, prepRoots), diags); err != nil {
-		return nil, diags, fmt.Errorf("scanning the staged tree for build-machine paths: %w", err)
-	}
-	if diags.HasErrors() {
-		return nil, diags, nil
-	}
-
 	// Step: build and write the artifact manifest last, over everything staged
 	// so far, then publish with one rename.
 	artifact := &Artifact{
@@ -317,6 +302,29 @@ func Stage(ctx context.Context, opts Options) (*Result, *diagnostics.List, error
 	}
 	if err := os.Chmod(physical(tmp, finalArtifact), 0o644); err != nil {
 		return nil, diags, fmt.Errorf("securing the artifact manifest: %w", err)
+	}
+
+	// Step: fail closed if any build-machine path survives anywhere in the
+	// staged tree, the artifact manifest included (ADR 0021's normalize-
+	// then-prove-relocatability step, widened from the prototype's
+	// generated-configuration-only rejectBuildPaths scan to the whole
+	// tree): the authored agent source directory and every throwaway root
+	// staging or tool preparation created must leave no trace once the
+	// tree is complete, whatever wrote it and however it was embedded — a
+	// rewritten go.mod (ADR 0021's own named example) proved a
+	// joined-absolute-string check insufficient on its own for text, so
+	// text is checked component by component; a compiled binary's own
+	// data is checked only for the fuller joined-path forms instead, since
+	// bare-component matching against it produces false positives no
+	// author-chosen path can dodge (see buildMachineJoinedNeedles).
+	if err := rejectBuildMachinePaths(tmp,
+		buildMachineNeedles(p.Root, tmp, prepRoots),
+		buildMachineJoinedNeedles(p.Root, tmp, prepRoots),
+		diags); err != nil {
+		return nil, diags, fmt.Errorf("scanning the staged tree for build-machine paths: %w", err)
+	}
+	if diags.HasErrors() {
+		return nil, diags, nil
 	}
 
 	if err := os.Rename(tmp, absOutput); err != nil {
@@ -485,12 +493,15 @@ func buildPathComponents(dir string, skipLast bool) []string {
 }
 
 // buildMachineNeedles collects every dangerous path component the
-// build-machine-path scan should search for: every segment of the authored
-// agent source directory except its own final segment (the agent name,
-// expected in canonical output), plus every segment of every throwaway
-// preparation root (the staging build directory and whatever roots tool
-// preparation used) — none of which may ever legitimately survive inside
-// the published tree.
+// build-machine-path scan should search for in a text file: every segment
+// of the authored agent source directory except its own final segment (the
+// agent name, expected in canonical output), plus every segment of every
+// throwaway preparation root (the staging build directory and whatever
+// roots tool preparation used) — none of which may ever legitimately
+// survive inside the published tree.
+//
+// This component-by-component form is deliberately not used against a
+// binary file — see buildMachineJoinedNeedles and looksBinary.
 func buildMachineNeedles(agentRoot, stageTmp string, prepRoots []string) [][]byte {
 	seen := map[string]bool{}
 	var needles [][]byte
@@ -511,16 +522,72 @@ func buildMachineNeedles(agentRoot, stageTmp string, prepRoots []string) [][]byt
 	return needles
 }
 
+// buildMachineJoinedNeedles collects the joined-path forms the
+// build-machine-path scan searches a binary file for: each dangerous
+// directory's own full path, unsplit, plus the single-level relative
+// reference ("../" + its own final segment) the same shape a fixed-name
+// build-source copy would take if it ever pointed at that directory
+// directly instead of its own safe constant name (see
+// toolruntime.copyGoModuleSource). Unlike buildMachineNeedles, these are
+// not filtered component by component: a real leak embeds a directory as
+// one contiguous run, and checking for that contiguous run is what makes
+// this safe to run against a binary's own data (see looksBinary) — a
+// compiled binary legitimately carries countless short, ordinary-looking
+// tokens (Go standard library package names, a module's own domain-style
+// import prefix and its owner segment) that collide with common directory
+// names by pure chance when matched component by component, but essentially
+// never reproduce a specific multi-segment directory path by coincidence.
+func buildMachineJoinedNeedles(agentRoot, stageTmp string, prepRoots []string) [][]byte {
+	seen := map[string]bool{}
+	var needles [][]byte
+	add := func(needle string) {
+		if needle == "" || seen[needle] {
+			return
+		}
+		seen[needle] = true
+		needles = append(needles, []byte(needle))
+	}
+	for _, dir := range append([]string{agentRoot, stageTmp}, prepRoots...) {
+		if dir == "" {
+			continue
+		}
+		clean := filepath.Clean(dir)
+		add(clean)
+		base := filepath.Base(clean)
+		if len(base) >= minBuildPathComponentLen && !buildPathSafeComponents[strings.ToLower(base)] {
+			add(".." + string(filepath.Separator) + base)
+		}
+	}
+	return needles
+}
+
+// looksBinary reports whether content is binary rather than text, by the
+// same signal most "file"-style tools use: a NUL byte, or bytes that are
+// not valid UTF-8. The build-machine-path scan uses this to choose which
+// needle set to search a file with — component matching for text, joined
+// matching for binary — because a compiled binary's own data legitimately
+// contains short generic-looking tokens a text file would not.
+func looksBinary(content []byte) bool {
+	if bytes.IndexByte(content, 0) >= 0 {
+		return true
+	}
+	return !utf8.Valid(content)
+}
+
 // rejectBuildMachinePaths fails closed if any regular file inside root
-// embeds one of needles: preparation may write machine-local paths, but
-// publication may not carry them (ADR 0021). It is component-based rather
-// than a joined-absolute-string check, so a rewritten relative path
-// fragment that omits an absolute prefix still trips it. Every match is
-// reported as a diagnostic naming the offending staged path and the exact
-// leaked component, so a caller sees every leak in one run rather than
-// stopping at the first.
-func rejectBuildMachinePaths(root string, needles [][]byte, diags *diagnostics.List) error {
-	if len(needles) == 0 {
+// embeds a dangerous build-machine path: preparation may write
+// machine-local paths, but publication may not carry them (ADR 0021). A
+// text file is checked component by component (componentNeedles); a binary
+// file is checked only for the fuller joined-path forms (joinedNeedles) —
+// bare-component matching against a compiled binary's own data produces the
+// class of false positive an agent living under, say, a `github.com/<org>/`
+// path or a directory named `context` or `internal` triggers by pure
+// coincidence with the binary's own embedded Go module and package data.
+// Every match is reported as a diagnostic naming the offending staged path
+// and the exact leaked text, so a caller sees every leak in one run rather
+// than stopping at the first.
+func rejectBuildMachinePaths(root string, componentNeedles, joinedNeedles [][]byte, diags *diagnostics.List) error {
+	if len(componentNeedles) == 0 && len(joinedNeedles) == 0 {
 		return nil
 	}
 	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -545,10 +612,14 @@ func rejectBuildMachinePaths(root string, needles [][]byte, diags *diagnostics.L
 		if err != nil {
 			return err
 		}
+		needles := componentNeedles
+		if looksBinary(content) {
+			needles = joinedNeedles
+		}
 		for _, needle := range needles {
 			if bytes.Contains(content, needle) {
 				diags.Errorf("stage.tree.build-path-leaked", filepath.ToSlash(rel),
-					"the staged file embeds the build-machine path component %q; staging fails closed rather than publish a tree that verifies but carries preparation-machine detail",
+					"the staged file embeds the build-machine path %q; staging fails closed rather than publish a tree that verifies but carries preparation-machine detail",
 					string(needle))
 			}
 		}

@@ -136,3 +136,38 @@ func TestStageRefusesPythonAndTypeScriptButOtherCommandsStillWork(t *testing.T) 
 		})
 	}
 }
+
+// TestStageUnderGithubStyledPathStagesCleanly proves the build-machine-path
+// scan does not false-positive on an entirely ordinary agent location: a
+// path under a "github.com/<owner>/" directory, the shape any agent
+// checked out from a real GitHub clone naturally has. It once refused to
+// stage such an agent: the copied tenon executable's own embedded module
+// data legitimately carries "github.com" and its own module's owner
+// segment (tenon's own module path is github.com/alee792/tenon, and this
+// test binary — copied into the tree by resolveExecutable exactly as the
+// real tenon executable would be — carries that same identity), and the
+// scan's bare-component matching could not tell that apart from a real
+// leak of the agent's own directory ancestry.
+func TestStageUnderGithubStyledPathStagesCleanly(t *testing.T) {
+	agent := filepath.Join(t.TempDir(), "github.com", "someowner", "leaky-agent")
+	writeFile(t, agent, "instructions.md", []byte(validInstructions), 0o644)
+	writeFile(t, agent, "go.mod", []byte("module example.com/leaky-agent\n\ngo 1.24\n"), 0o644)
+	writeFile(t, agent, "tools/hash_text/tool.go", []byte(goToolFile), 0o644)
+
+	out := filepath.Join(t.TempDir(), "staged")
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"stage", agent, "--harness", "claude", "--output", out, "--diagnostics", "jsonl"},
+		nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("stage exit %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+	}
+	if got := filterDiags(parseDiagLines(t, stdout.String()), "stage.tree.build-path-leaked"); len(got) != 0 {
+		t.Fatalf("staging under a github.com/-styled path must not false-positive: %v", got)
+	}
+
+	artifact := filepath.Join(out, "opt", "tenon", "artifact.json")
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"stage", "verify", "--artifact", artifact, "--prefix", out}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("a staged tree under a github.com/-styled path must verify: exit %d\nstderr: %s", code, stderr.String())
+	}
+}
