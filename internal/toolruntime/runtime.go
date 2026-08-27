@@ -241,7 +241,7 @@ func verifyCache(cfg Config, dir string) error {
 				return staleCache
 			}
 		case Go:
-			main, _, err := renderGoHost(cfg, filepath.Join(dir, "go"))
+			main, _, err := renderGoHost(cfg, filepath.Join(dir, "go"), filepath.Join(dir, "agent-source"))
 			if err != nil {
 				return staleCache
 			}

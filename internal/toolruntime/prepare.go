@@ -126,7 +126,22 @@ func prepareLanguage(ctx context.Context, cfg Config, dir, language string, exec
 		if err := os.MkdirAll(goDir, 0o700); err != nil {
 			return prepareFailure(language, "the go host directory could not be created")
 		}
-		main, mod, err := renderGoHost(cfg, goDir)
+		// Build against a copy of the Go tool source at a directory name
+		// that is fixed regardless of where the agent source physically
+		// lives: the generated go.mod names its replace target relative to
+		// goDir, and a fixed sibling name makes that target a machine-
+		// independent constant ("../agent-source") rather than a path
+		// shaped by this machine's directory layout. This matters at build
+		// time, not just after: `go build -trimpath` does not scrub a
+		// module's replace target the way it scrubs recorded source-file
+		// paths, so the built host binary's own embedded module info (read
+		// by `go version -m` and runtime/debug.ReadBuildInfo) carries
+		// whatever the compiler saw, verbatim.
+		sourceCopy := filepath.Join(dir, "agent-source")
+		if err := copyGoToolSource(cfg, sourceCopy); err != nil {
+			return err
+		}
+		main, mod, err := renderGoHost(cfg, goDir, sourceCopy)
 		if err != nil {
 			return err
 		}
@@ -171,13 +186,19 @@ type goHostImport struct {
 // renderGoHost renders the generated host's main.go and go.mod for cfg. The
 // authored module supplies its own path and go directive; tenon adds no
 // dependency to it and writes nothing into it. goDir is the directory the
-// rendered go.mod will be written into: the go.mod replace directive names
-// cfg.Source relative to it rather than as an absolute path, so the built
-// host binary's embedded module info (which `go build -trimpath` does not
-// touch — it strips recorded source-file paths, not module replace targets)
-// never carries the preparation machine's absolute directory layout, in
-// either a workspace cache or a staged closure.
-func renderGoHost(cfg Config, goDir string) ([]byte, []byte, error) {
+// rendered go.mod will be written into and moduleDir is the directory that
+// holds (or will hold) the replace target's own go.mod: the go.mod replace
+// directive names moduleDir relative to goDir rather than as an absolute
+// path. Callers pass a moduleDir whose own path is machine-independent (a
+// fixed sibling name under the same cache directory as goDir, never
+// cfg.Source directly) so the relative target renders as a constant like
+// "../agent-source" — a real absolute path would still leak even relative to
+// goDir, and `go build -trimpath` does not scrub a module's replace target
+// the way it scrubs recorded source-file paths, so whatever the compiler
+// sees here is exactly what survives in the built host binary's own
+// embedded module info (read by `go version -m` and
+// runtime/debug.ReadBuildInfo).
+func renderGoHost(cfg Config, goDir, moduleDir string) ([]byte, []byte, error) {
 	raw, err := os.ReadFile(filepath.Join(cfg.Source, "go.mod"))
 	if err != nil {
 		return nil, nil, prepareFailure(Go, "go tools require a readable go.mod at the agent root")
@@ -195,8 +216,8 @@ func renderGoHost(cfg Config, goDir string) ([]byte, []byte, error) {
 		version = string(versionMatch[1])
 	}
 
-	sourceDir := cfg.Source
-	if rel, relErr := filepath.Rel(goDir, cfg.Source); relErr == nil {
+	sourceDir := moduleDir
+	if rel, relErr := filepath.Rel(goDir, moduleDir); relErr == nil {
 		sourceDir = rel
 	}
 
@@ -279,6 +300,74 @@ func resolveExecutable(language, name string) (string, error) {
 func writeCacheFile(path string, content []byte, mode os.FileMode) error {
 	if err := os.WriteFile(path, content, mode); err != nil {
 		return prepareFailure("", "the tool cache file %s could not be written", filepath.Base(path))
+	}
+	return nil
+}
+
+// copyGoToolSource copies exactly what building the Go host needs — the
+// agent's go.mod, its optional go.sum, and each Go tool's own directory
+// under tools/ (ADR 0013 already bounds this exact inventory at discovery,
+// see agentproject.loadTools) — into dest, a directory whose name never
+// varies with the agent source's physical location. Building against dest
+// rather than cfg.Source directly is what keeps the generated go.mod's
+// replace target, and the compiled host binary's own embedded module info,
+// free of the preparation machine's directory layout (ADR 0021).
+func copyGoToolSource(cfg Config, dest string) error {
+	if err := os.MkdirAll(dest, 0o700); err != nil {
+		return prepareFailure(Go, "the go build source directory could not be created")
+	}
+	if err := copyRegularFile(filepath.Join(cfg.Source, "go.mod"), filepath.Join(dest, "go.mod")); err != nil {
+		return prepareFailure(Go, "the agent go.mod could not be copied for the go build")
+	}
+	if info, err := os.Lstat(filepath.Join(cfg.Source, "go.sum")); err == nil && info.Mode().IsRegular() {
+		if err := copyRegularFile(filepath.Join(cfg.Source, "go.sum"), filepath.Join(dest, "go.sum")); err != nil {
+			return prepareFailure(Go, "the agent go.sum could not be copied for the go build")
+		}
+	}
+	for _, tool := range cfg.goToolDirs() {
+		src := filepath.Join(cfg.Source, "tools", filepath.FromSlash(tool[0]))
+		dst := filepath.Join(dest, "tools", filepath.FromSlash(tool[0]))
+		if err := copyRegularFileTree(src, dst); err != nil {
+			return prepareFailure(Go, "the go tool source %q could not be copied for the go build", tool[0])
+		}
+	}
+	return nil
+}
+
+// copyRegularFile copies one regular file's bytes and mode, refusing a
+// non-regular source (a symlink included): tool source was already proven
+// symlink-free at discovery, and this copy stays that strict rather than
+// trust the earlier proof silently.
+func copyRegularFile(src, dst string) error {
+	info, err := os.Lstat(src)
+	if err != nil || !info.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", src)
+	}
+	content, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(dst, content, info.Mode().Perm())
+}
+
+// copyRegularFileTree copies a directory tree of regular files (a validated
+// Go tool directory, one level deep, per agentproject.loadGoToolDir), never
+// following a symlink.
+func copyRegularFileTree(src, dst string) error {
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dst, 0o700); err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if err := copyRegularFile(filepath.Join(src, entry.Name()), filepath.Join(dst, entry.Name())); err != nil {
+			return err
+		}
 	}
 	return nil
 }

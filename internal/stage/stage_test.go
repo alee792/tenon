@@ -1,6 +1,7 @@
 package stage
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io/fs"
@@ -12,6 +13,7 @@ import (
 	"github.com/alee792/tenon/internal/apply"
 	"github.com/alee792/tenon/internal/claude"
 	"github.com/alee792/tenon/internal/codex"
+	"github.com/alee792/tenon/internal/diagnostics"
 )
 
 const validInstructions = `---
@@ -454,25 +456,30 @@ func TestStageRefusesTypeScriptTools(t *testing.T) {
 	}
 }
 
-// TestStageGoClosureCarriesNoBuildMachinePath scans the entire staged Go-tool
-// tree for the physical build-machine paths this test's own fixture used
-// (the agent source directory and the fake tenon executable's directory,
-// which stand in for whatever directories a real preparation machine would
-// use) and fails if any staged file's content contains one. It also proves
-// the staged tree still passes stage verify, so the fix this proves does not
-// disturb it.
+// TestStageGoClosureCarriesNoBuildMachinePath stages a real Go-tool agent and
+// proves no staged file embeds a build-machine path component of the
+// fixture's own physical directories — matched exactly the way Stage's own
+// build-machine-path scan matches, component by component, not by looking
+// for the joined absolute string. A joined-absolute-string check is not
+// equivalent: it passes by construction against a relative path fragment
+// that omits the absolute prefix entirely while still leaking a directory
+// name from partway up the chain, which is exactly the shape a relative
+// go.mod replace target could take.
 //
-// Without the fix this once failed: the generated Go host's go.mod named its
-// replace target with the absolute preparation-machine agent source path
-// (toolruntime.renderGoHost embedded cfg.Source verbatim), and `go build
-// -trimpath` does not scrub a module replace target the way it scrubs
-// recorded source-file paths, so the built host binary's embedded module
-// info (visible via `go version -m`, read by runtime/debug.ReadBuildInfo)
-// carried the same absolute path even after go.mod itself was rewritten.
-// renderGoHost now names the replace target relative to the directory its
-// go.mod is written into, so the absolute path is never embedded in the
-// first place, in either the go.mod source or the binary's own build info —
-// the smaller true fix, over rewriting or deleting the file after the fact.
+// The real defect this once caught: the generated Go host's go.mod named
+// its replace target with the absolute preparation-machine agent source
+// path (toolruntime.renderGoHost embedded cfg.Source verbatim), and `go
+// build -trimpath` does not scrub a module replace target the way it
+// scrubs recorded source-file paths, so the built host binary's own
+// embedded module info (visible via `go version -m`, read by
+// runtime/debug.ReadBuildInfo) carried the same absolute path even after a
+// hypothetical post-build go.mod rewrite. The fix is upstream in two parts:
+// toolruntime.renderGoHost now names the replace target relative to the
+// directory its go.mod is written into, and preparation now builds against
+// a copy of the tool source at a fixed directory name rather than cfg.Source
+// directly, so that relative target renders as a machine-independent
+// constant ("../agent-source") instead of a relative path shaped by this
+// machine's own directory layout.
 func TestStageGoClosureCarriesNoBuildMachinePath(t *testing.T) {
 	agent := writeAgent(t, "scan-go-tool-agent")
 	writeFile(t, agent, "go.mod", "module example.com/scan-go-tool-agent\n\ngo 1.24\n")
@@ -493,7 +500,10 @@ func TestStageGoClosureCarriesNoBuildMachinePath(t *testing.T) {
 		t.Fatalf("expected a go runtime closure, got %v", res.RuntimeLanguages)
 	}
 
-	buildPaths := []string{agent, filepath.Dir(exe)}
+	needles := buildMachineNeedles(agent, filepath.Dir(exe), nil)
+	if len(needles) == 0 {
+		t.Fatal("the fixture's own agent and executable directories must yield at least one dangerous component to check against; the test proves nothing otherwise")
+	}
 	err = filepath.WalkDir(out, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() || !d.Type().IsRegular() {
 			return err
@@ -502,9 +512,9 @@ func TestStageGoClosureCarriesNoBuildMachinePath(t *testing.T) {
 		if rerr != nil {
 			return rerr
 		}
-		for _, bad := range buildPaths {
-			if strings.Contains(string(content), bad) {
-				return fmt.Errorf("%s embeds the build-machine path %s", path, bad)
+		for _, needle := range needles {
+			if bytes.Contains(content, needle) {
+				return fmt.Errorf("%s embeds the build-machine path component %q", path, needle)
 			}
 		}
 		return nil
@@ -515,5 +525,73 @@ func TestStageGoClosureCarriesNoBuildMachinePath(t *testing.T) {
 
 	if err := Verify(filepath.Join(out, "opt", "tenon", "artifact.json"), out); err != nil {
 		t.Fatalf("the normalized staged tree must still verify: %v", err)
+	}
+}
+
+// TestBuildPathComponentsExcludesExpectedVocabulary proves the scan's
+// component extraction behaves as designed: tenon's own canonical
+// vocabulary and short segments (a Go test harness's own "001"-style
+// TempDir counters among them) never register as dangerous, a directory's
+// own final segment is dropped when skipLast names an intentionally
+// published identity (the agent name, expected in canonical output), and a
+// genuinely distinguishing segment survives either way.
+func TestBuildPathComponentsExcludesExpectedVocabulary(t *testing.T) {
+	dir := "/home/tenon/workspace/opt/go/003/sessionsuffix123456/my-agent"
+
+	got := buildPathComponents(dir, true)
+	if len(got) != 1 || got[0] != "sessionsuffix123456" {
+		t.Fatalf("buildPathComponents(skipLast) = %v, want [\"sessionsuffix123456\"]", got)
+	}
+
+	full := buildPathComponents(dir, false)
+	if len(full) != 2 || full[0] != "sessionsuffix123456" || full[1] != "my-agent" {
+		t.Fatalf("buildPathComponents(!skipLast) = %v, want [\"sessionsuffix123456\" \"my-agent\"]", full)
+	}
+}
+
+// TestRejectBuildMachinePathsFiresOnALeak proves the stage-time scan itself
+// — not just its absence of effect once the Go closure fix landed — fails
+// closed with the stable stage.tree.build-path-leaked diagnostic naming the
+// offending staged path and the exact leaked component, and leaves a clean
+// tree with no diagnostic at all.
+func TestRejectBuildMachinePathsFiresOnALeak(t *testing.T) {
+	needles := [][]byte{[]byte("sessionsuffix123456")}
+
+	clean := t.TempDir()
+	if err := os.WriteFile(filepath.Join(clean, "file.txt"), []byte("nothing interesting here"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	diags := &diagnostics.List{}
+	if err := rejectBuildMachinePaths(clean, needles, diags); err != nil {
+		t.Fatalf("scanning a clean tree: %v", err)
+	}
+	if diags.HasErrors() {
+		t.Fatalf("a clean tree must report no diagnostic: %v", diags.All())
+	}
+
+	leaking := t.TempDir()
+	if err := os.WriteFile(filepath.Join(leaking, "go.mod"),
+		[]byte("replace example.com/x => /tmp/sessionsuffix123456/agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	diags = &diagnostics.List{}
+	if err := rejectBuildMachinePaths(leaking, needles, diags); err != nil {
+		t.Fatalf("scanning a leaking tree: %v", err)
+	}
+	found := false
+	for _, d := range diags.All() {
+		if d.ID != "stage.tree.build-path-leaked" {
+			continue
+		}
+		found = true
+		if d.Path != "go.mod" {
+			t.Fatalf("the diagnostic must name the leaking staged file, got path %q", d.Path)
+		}
+		if !strings.Contains(d.Rule, "sessionsuffix123456") {
+			t.Fatalf("the diagnostic must name the leaked component: %q", d.Rule)
+		}
+	}
+	if !found {
+		t.Fatalf("expected stage.tree.build-path-leaked, got %v", diags.All())
 	}
 }

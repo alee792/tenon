@@ -546,7 +546,24 @@ func closureCacheRoot(workspace, harnessName string) (string, error) {
 	if record == nil || record.ClosureRoot == "" {
 		return "", nil
 	}
-	return filepath.Join(ws, filepath.FromSlash(record.ClosureRoot)), nil
+	rel := filepath.FromSlash(record.ClosureRoot)
+	if filepath.IsAbs(rel) {
+		return "", fmt.Errorf("the apply record's closure_root must be relative to the workspace, got %q", record.ClosureRoot)
+	}
+	joined := filepath.Join(ws, rel)
+	// The closure and the workspace are published as siblings under one
+	// tree root (ADR 0021: /opt/tenon/runtimes/tools and /workspace both sit
+	// under /), so closure_root legitimately climbs out of the workspace to
+	// reach that sibling — plain filepath.IsLocal would refuse that
+	// altogether. What it may never do is climb further: bound the resolved
+	// path to the workspace's own parent directory, so a corrupted or
+	// hand-edited record cannot walk it anywhere else on disk.
+	boundary := filepath.Dir(ws)
+	rel, err = filepath.Rel(boundary, joined)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("the apply record's closure_root %q escapes the workspace root", record.ClosureRoot)
+	}
+	return joined, nil
 }
 
 // prepareTools prepares and inspects the project's authored tools, reporting
