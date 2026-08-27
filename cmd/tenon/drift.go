@@ -17,20 +17,26 @@ import (
 	"github.com/alee792/tenon/internal/version"
 )
 
-// driftResult is the jsonl-mode result summary for a clean drift check.
+// driftResult is the jsonl-mode result summary for a clean drift check,
+// shaped like validateResult/applyResult: agent, harness, workspace, and the
+// source fingerprint, plus the unchanged file list.
 type driftResult struct {
-	Agent     string   `json:"agent"`
-	Harness   string   `json:"harness"`
-	Workspace string   `json:"workspace"`
-	Unchanged []string `json:"unchanged"`
+	Agent       string   `json:"agent"`
+	Harness     string   `json:"harness"`
+	Workspace   string   `json:"workspace"`
+	Fingerprint string   `json:"fingerprint"`
+	Unchanged   []string `json:"unchanged"`
 }
 
 // runDrift reports whether a workspace still carries exactly what a fresh
-// generation of AGENT for --harness would produce, without writing anything:
-// it regenerates every tenon-owned file in memory on the same generation
-// path apply uses, then compares each against the workspace and the apply
-// record (.tenon/apply-<harness>.json) as unchanged, modified on disk since
-// the previous apply, missing, or stale (recorded but no longer generated).
+// apply of AGENT for --harness would produce, without writing anything: it
+// regenerates every tenon-owned file in memory on apply's own generation
+// path (the same driver, the same Target shape including a supplied
+// manifest's pinned Model, exactly as runApply builds it), then classifies
+// each owned path against BOTH the workspace and the apply record — reusing
+// apply.ClassifyOwnership, the exact rule apply's own conflict check
+// enforces — as unchanged, modified on disk since the previous apply,
+// missing, or stale (recorded but no longer generated).
 //
 // Drift deliberately never adopts a workspace edit back into source:
 // generation is lossy in reverse (a rendered native file cannot be inverted
@@ -44,6 +50,7 @@ func runDrift(args []string, stdout, stderr io.Writer) int {
 	harnessName := fs.String("harness", "", "target harness: claude or codex")
 	workspace := fs.String("workspace", "", "workspace directory (required)")
 	mode := fs.String("diagnostics", "prose", "diagnostic rendering: prose or jsonl")
+	manifestPath := fs.String("manifest", "", "optional supplied agent manifest to verify")
 
 	positional, ok := parsePositional(fs, args)
 	if !ok || len(positional) != 1 {
@@ -76,10 +83,25 @@ func runDrift(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	p, diags, err := agentproject.Load(agent)
+	supplied, err := readSuppliedManifest(*manifestPath)
 	if err != nil {
 		fmt.Fprintln(stderr, "tenon drift:", err)
 		return 1
+	}
+	p, diags, err := agentproject.LoadWithManifest(agent, expectedFingerprint(supplied))
+	if err != nil {
+		fmt.Fprintln(stderr, "tenon drift:", err)
+		return 1
+	}
+	// A supplied manifest is verified against the current closure exactly as
+	// validate does, before generation: drift reports the identical drift
+	// validate and apply would, rather than silently regenerating against a
+	// pin the closure no longer matches.
+	if p != nil && !diags.HasErrors() && supplied != nil {
+		if err := verifyManifestDiag(p, driver.Harness(), resolveIntegrationStoreBase(), supplied, diags); err != nil {
+			fmt.Fprintln(stderr, "tenon drift:", err)
+			return 1
+		}
 	}
 	if p == nil || diags.HasErrors() {
 		render(diags, jsonl, stdout, stderr)
@@ -120,15 +142,16 @@ func runDrift(args []string, stdout, stderr io.Writer) int {
 	}
 
 	// Regeneration reuses apply's exact generation path: the same driver,
-	// the same target shape (no manifest-sourced Model here, since drift
-	// takes no --manifest; a project applied with a pinned model is compared
-	// against a regeneration without one, same as validate without a
-	// supplied manifest).
+	// threaded through the identical Target shape runApply builds (the
+	// supplied manifest's pinned Model included), so a model-pinned project
+	// regenerates identically to how it was applied and reports no false
+	// drift from the pin alone.
 	files := driver.Generate(p, apply.Target{
 		Workspace:        ws,
 		Executable:       executable,
 		IntegrationStore: resolveIntegrationStoreBase(),
 		TenonVersion:     version.Version,
+		Model:            manifestModel(supplied, driver.Harness()),
 	}, diags)
 	if diags.HasErrors() {
 		render(diags, jsonl, stdout, stderr)
@@ -151,23 +174,7 @@ func runDrift(args []string, stdout, stderr io.Writer) int {
 	diffs := map[string]string{}
 	for _, f := range files {
 		generated[f.Path] = true
-		full := filepath.Join(ws, f.Path)
-		current, readErr := os.ReadFile(full)
-		switch {
-		case os.IsNotExist(readErr):
-			diags.Errorf("drift.file.missing", f.Path,
-				"the tenon-owned file no longer exists in the workspace; run tenon apply")
-		case readErr != nil:
-			diags.Errorf("drift.file.missing", f.Path,
-				"the tenon-owned file could not be read: %s", diagnostics.Bound(readErr.Error(), 256))
-		case string(current) == string(f.Content):
-			unchanged = append(unchanged, f.Path)
-		default:
-			diags.Errorf("drift.file.modified", f.Path,
-				"the workspace file differs from the freshly regenerated content; tenon never adopts a workspace edit back into source, run tenon apply --discard-local to overwrite it")
-			modifiedPaths = append(modifiedPaths, f.Path)
-			diffs[f.Path] = unifiedDiff("generated/"+f.Path, "workspace/"+f.Path, f.Content, current)
-		}
+		classifyAndReportFile(ws, f, record, diags, &unchanged, &modifiedPaths, diffs)
 	}
 	if record != nil {
 		var stalePaths []string
@@ -187,7 +194,9 @@ func runDrift(args []string, stdout, stderr io.Writer) int {
 	if !jsonl {
 		sort.Strings(modifiedPaths)
 		for _, path := range modifiedPaths {
-			fmt.Fprintln(stdout, diffs[path])
+			if diff := diffs[path]; diff != "" {
+				fmt.Fprintln(stdout, diff)
+			}
 		}
 	}
 	if diags.HasErrors() {
@@ -195,7 +204,7 @@ func runDrift(args []string, stdout, stderr io.Writer) int {
 	}
 	sort.Strings(unchanged)
 	if jsonl {
-		res := driftResult{Agent: p.Name, Harness: driver.Harness(), Workspace: ws, Unchanged: unchanged}
+		res := driftResult{Agent: p.Name, Harness: driver.Harness(), Workspace: ws, Fingerprint: p.Fingerprint, Unchanged: unchanged}
 		if err := writeResult(stdout, res); err != nil {
 			fmt.Fprintln(stderr, "tenon drift:", err)
 			return 1
@@ -209,38 +218,149 @@ func runDrift(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// classifyAndReportFile classifies one generated file f against both the
+// workspace and the apply record, appending its path to unchanged or
+// modifiedPaths and recording any diff, and adds exactly one diagnostic
+// naming the finding (drift.file.missing or drift.file.modified) unless the
+// file is clean. It shares apply.ClassifyOwnership with checkOwnership so
+// drift never diverges from what apply itself would refuse: an executable-
+// bit-only change, a symlink replacing an owned file, and a workspace file
+// that no longer matches the previous apply record (even if it happens to
+// already match the fresh regeneration) are every one of them reported,
+// exactly as they would cause apply.conflict.unowned or
+// apply.conflict.modified.
+func classifyAndReportFile(ws string, f apply.GeneratedFile, record *apply.Record, diags *diagnostics.List, unchanged, modifiedPaths *[]string, diffs map[string]string) {
+	full := filepath.Join(ws, f.Path)
+	kind, _ := apply.ClassifyOwnership(ws, f.Path, record)
+
+	switch kind {
+	case apply.OwnershipAbsent:
+		diags.Errorf("drift.file.missing", f.Path,
+			"the tenon-owned file no longer exists in the workspace; run tenon apply")
+		return
+	case apply.OwnershipNonRegular:
+		diags.Errorf("drift.file.modified", f.Path,
+			"the workspace entry is a symlink or other non-regular file; apply refuses to replace it (apply.conflict.unowned), which --discard-local does not override — move it aside and run tenon apply")
+		*modifiedPaths = append(*modifiedPaths, f.Path)
+		return
+	}
+
+	current, readErr := os.ReadFile(full)
+	if readErr != nil {
+		diags.Errorf("drift.file.missing", f.Path,
+			"the tenon-owned file could not be read: %s", diagnostics.Bound(readErr.Error(), 256))
+		return
+	}
+	info, statErr := os.Lstat(full)
+	currentExecutable := statErr == nil && isExecutableMode(info.Mode())
+	contentDiffers := string(current) != string(f.Content) || currentExecutable != f.Executable
+
+	switch {
+	case kind == apply.OwnershipUnowned:
+		diff := unifiedDiff("generated/"+f.Path, "workspace/"+f.Path, f.Content, current)
+		diags.Add(diagnostics.Diagnostic{
+			ID: "drift.file.modified", Severity: diagnostics.Error, Path: f.Path,
+			Rule:   "the workspace file exists without a recorded owned entry; apply refuses to overwrite it as hand-authored (apply.conflict.unowned), which --discard-local does not override",
+			Detail: diff,
+		})
+		*modifiedPaths = append(*modifiedPaths, f.Path)
+		diffs[f.Path] = diff
+	case kind == apply.OwnershipModified || contentDiffers:
+		diff := unifiedDiff("generated/"+f.Path, "workspace/"+f.Path, f.Content, current)
+		diags.Add(diagnostics.Diagnostic{
+			ID: "drift.file.modified", Severity: diagnostics.Error, Path: f.Path,
+			Rule:   "the workspace file no longer matches the previous apply record and/or the freshly regenerated content; tenon never adopts a workspace edit back into source, run tenon apply --discard-local to overwrite it",
+			Detail: diff,
+		})
+		*modifiedPaths = append(*modifiedPaths, f.Path)
+		diffs[f.Path] = diff
+	default:
+		*unchanged = append(*unchanged, f.Path)
+	}
+}
+
+// isExecutableMode reports whether mode carries any executable bit, the
+// same test apply.isExecutable makes (unexported there, so drift keeps its
+// own copy rather than reaching across the package boundary for one line).
+func isExecutableMode(mode os.FileMode) bool {
+	return mode.Perm()&0o111 != 0
+}
+
 // --- unified diff (line-based, informational — not meant as a patch input) ---
 
 // driftDiffLineLimit bounds the two-dimensional line-alignment table drift
-// builds for one file's diff. A file pair beyond it is rendered as a coarse
-// whole-file replacement instead of a line-aligned diff: correctness of the
-// drift finding itself never depends on the diff rendering, and reporting
-// must stay bounded regardless of how large a generated file is.
-const driftDiffLineLimit = 4000
+// builds for one file's diff: at the limit, an int DP table is
+// (limit+1)^2 * 8 bytes ~= 13 MB, comfortably bounded regardless of how
+// large a generated file's line count grows. A pair beyond it skips
+// line-alignment entirely and reports a short elided notice instead — never
+// a partial, unbounded diff.
+const driftDiffLineLimit = 1200
 
 // diffContext is the number of unchanged lines kept around each change, the
 // same convention `diff -u` uses.
 const diffContext = 3
 
+// driftDiffByteLimit bounds the total rendered diff text drift ever
+// produces or embeds in a JSONL finding's Detail field, regardless of how
+// many scattered changes an in-limit file pair has.
+const driftDiffByteLimit = 8000
+
 // unifiedDiff renders a bounded, informational unified diff between old and
 // new file content, labeled oldLabel/newLabel. It is read-only reporting:
 // nothing here writes to either side, and the result is for a human or an
-// improvement loop to read, not to apply as a patch.
+// improvement loop to read, not to apply as a patch. Every path — the
+// oversized-file elision, the ordinary line-aligned diff, and the
+// trailing-newline-only case where the line-level content is identical — is
+// bounded to driftDiffByteLimit bytes.
 func unifiedDiff(oldLabel, newLabel string, oldContent, newContent []byte) string {
+	if string(oldContent) == string(newContent) {
+		return "" // nothing to show; callers only call this when they differ
+	}
 	oldLines := splitDiffLines(oldContent)
 	newLines := splitDiffLines(newContent)
-	var ops []diffOp
 	if len(oldLines) > driftDiffLineLimit || len(newLines) > driftDiffLineLimit {
-		for _, l := range oldLines {
-			ops = append(ops, diffOp{kind: '-', line: l})
-		}
-		for _, l := range newLines {
-			ops = append(ops, diffOp{kind: '+', line: l})
-		}
-	} else {
-		ops = lcsLineDiff(oldLines, newLines)
+		return boundDiffText(fmt.Sprintf(
+			"--- %s\n+++ %s\n@@ diff elided: %d old / %d new lines exceeds drift's %d-line diff limit @@\n",
+			oldLabel, newLabel, len(oldLines), len(newLines), driftDiffLineLimit), driftDiffByteLimit)
 	}
-	return formatUnifiedDiff(oldLabel, newLabel, ops)
+	ops := lcsLineDiff(oldLines, newLines)
+	body := formatUnifiedDiff(oldLabel, newLabel, ops)
+	if body == "" {
+		// The two files' lines are identical; the byte-level difference
+		// (already established above) is purely a trailing newline. diff -u
+		// marks this with its own "\ No newline at end of file" convention;
+		// drift says the same thing in its own words rather than emit a
+		// hunk with no visible content.
+		note := "content is identical except for a trailing newline"
+		switch {
+		case endsWithNewline(newContent) && !endsWithNewline(oldContent):
+			note = "the workspace file ends with a newline the regenerated content does not"
+		case endsWithNewline(oldContent) && !endsWithNewline(newContent):
+			note = "the regenerated content ends with a newline the workspace file does not"
+		}
+		return fmt.Sprintf("--- %s\n+++ %s\n@@ %s @@", oldLabel, newLabel, note)
+	}
+	return boundDiffText(body, driftDiffByteLimit)
+}
+
+// endsWithNewline reports whether b's last byte is a newline; an empty b
+// does not end with one.
+func endsWithNewline(b []byte) bool {
+	return len(b) > 0 && b[len(b)-1] == '\n'
+}
+
+// boundDiffText truncates s to at most limit bytes, cutting at the last
+// line boundary within the limit so the truncated text stays readable, and
+// appends a truncation marker. s at or under limit is returned unchanged.
+func boundDiffText(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	cut := strings.LastIndexByte(s[:limit], '\n')
+	if cut <= 0 {
+		cut = limit
+	}
+	return s[:cut] + "\n... (diff truncated)"
 }
 
 // splitDiffLines splits content into lines for diffing, dropping exactly one

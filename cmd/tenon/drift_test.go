@@ -3,10 +3,12 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestDriftCleanWorkspaceExitsZero proves the no-drift case: right after
@@ -286,17 +288,10 @@ func TestApplyDiscardLocalOverwritesModifiedButRefusesUnowned(t *testing.T) {
 		t.Fatalf("--discard-local must overwrite the local edit with regenerated content: %q", got)
 	}
 
-	// Now introduce a genuinely hand-authored, never-owned file: even
-	// --discard-local must refuse it.
-	if err := os.WriteFile(filepath.Join(ws, "AGENTS.md"), []byte("hand-authored, never generated for claude\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	// Force a stale-removal path is not needed here: AGENTS.md is simply an
-	// unrecorded file coincidentally in the workspace. To exercise the
-	// unowned refusal under --discard-local, target the workspace directly
-	// with a file claude generation does not own at all is not generated
-	// for claude, so instead prove via .mcp.json which IS owned by claude:
-	// remove its record entry to simulate a hand-authored .mcp.json.
+	// Now simulate a hand-authored .mcp.json: overwrite it and strip its
+	// entry from the apply record, so it is exactly what apply.conflict.
+	// unowned describes — a claude-owned path with content on disk but no
+	// recorded owned state. Even --discard-local must refuse it.
 	record := filepath.Join(ws, ".tenon", "apply-claude.json")
 	raw, err := os.ReadFile(record)
 	if err != nil {
@@ -320,5 +315,345 @@ func TestApplyDiscardLocalOverwritesModifiedButRefusesUnowned(t *testing.T) {
 	got, _ = os.ReadFile(filepath.Join(ws, ".mcp.json"))
 	if string(got) != `{"hand":"authored"}` {
 		t.Fatalf("the hand-authored file must never be overwritten, even with --discard-local: %q", got)
+	}
+}
+
+// TestDriftDetectsExecutableBitChange proves drift catches what apply itself
+// refuses on a mode-only change: identical bytes, a flipped executable bit.
+// apply.conflict.modified fires on exactly this in
+// TestApplyRefusesModeOnlyModifiedOwnedFile; drift must agree.
+func TestDriftDetectsExecutableBitChange(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	ws := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("apply exit %d: %s", code, stderr.String())
+	}
+	if err := os.Chmod(filepath.Join(ws, "CLAUDE.md"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"drift", agent, "--harness", "claude", "--workspace", ws}, nil, &stdout, &stderr); code != 1 {
+		t.Fatalf("drift exit %d, want 1 (executable bit changed with identical bytes)\nstdout: %s\nstderr: %s",
+			code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "drift.file.modified") || !strings.Contains(stderr.String(), "CLAUDE.md") {
+		t.Fatalf("expected drift.file.modified at CLAUDE.md for an executable-bit-only change, got %q", stderr.String())
+	}
+}
+
+// TestDriftDetectsSymlinkReplacement proves drift catches an owned path
+// replaced by a symlink — apply refuses this as apply.conflict.unowned
+// (checkOwnership never follows a symlink), and drift must agree rather than
+// silently follow it via os.ReadFile and report the target's content.
+func TestDriftDetectsSymlinkReplacement(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	ws := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("apply exit %d: %s", code, stderr.String())
+	}
+	claudeMD := filepath.Join(ws, "CLAUDE.md")
+	elsewhere := filepath.Join(t.TempDir(), "elsewhere.md")
+	original, err := os.ReadFile(claudeMD)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(elsewhere, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(claudeMD); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, claudeMD); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"drift", agent, "--harness", "claude", "--workspace", ws}, nil, &stdout, &stderr); code != 1 {
+		t.Fatalf("drift exit %d, want 1 (owned path replaced by a symlink)\nstdout: %s\nstderr: %s",
+			code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "drift.file.modified") || !strings.Contains(stderr.String(), "CLAUDE.md") {
+		t.Fatalf("expected drift.file.modified at CLAUDE.md for a symlink replacement, got %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "symlink") {
+		t.Fatalf("expected the finding to name the symlink, got %q", stderr.String())
+	}
+}
+
+// TestDriftDetectsStaleRecordHashDespiteMatchingDisk proves the case the
+// reviewer flagged directly: when the apply record's hash for a path no
+// longer matches the disk file, drift must report modified even though the
+// disk file happens to already equal the freshly regenerated content —
+// exactly the scenario where apply.ClassifyOwnership (not a bare disk-vs-
+// regeneration byte comparison) is required to agree with what apply itself
+// would refuse.
+func TestDriftDetectsStaleRecordHashDespiteMatchingDisk(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	ws := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("apply exit %d: %s", code, stderr.String())
+	}
+	// The disk file is left completely untouched — it still equals exactly
+	// what a fresh regeneration produces. Only the record's hash for it is
+	// corrupted, simulating a record that has fallen out of sync with what
+	// is actually recorded as owned.
+	recordPath := filepath.Join(ws, ".tenon", "apply-claude.json")
+	raw, err := os.ReadFile(recordPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &record); err != nil {
+		t.Fatal(err)
+	}
+	var files map[string]map[string]json.RawMessage
+	if err := json.Unmarshal(record["files"], &files); err != nil {
+		t.Fatal(err)
+	}
+	files["CLAUDE.md"]["hash"] = json.RawMessage(`"sha256:0000000000000000000000000000000000000000000000000000000000000000"`)
+	patchedFiles, err := json.Marshal(files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record["files"] = patchedFiles
+	patched, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(recordPath, patched, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"drift", agent, "--harness", "claude", "--workspace", ws}, nil, &stdout, &stderr); code != 1 {
+		t.Fatalf("drift exit %d, want 1 (stale record hash despite matching disk)\nstdout: %s\nstderr: %s",
+			code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "drift.file.modified") || !strings.Contains(stderr.String(), "CLAUDE.md") {
+		t.Fatalf("expected drift.file.modified at CLAUDE.md despite disk matching the fresh regeneration, got %q", stderr.String())
+	}
+}
+
+// TestDriftManifestPinnedModelReportsClean proves the model-pinned drift
+// blocker fix: a project applied with a manifest that pins a model
+// regenerates identically when drift is given the same manifest, so a
+// pristine workspace reports clean rather than false drift on the model
+// configuration file alone.
+func TestDriftManifestPinnedModelReportsClean(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	withFakeResolver(t, "2.1.240", nil)
+	manifestPath := writeManifestForModel(t, agent, "claude", "claude-opus-4")
+
+	ws := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--manifest", manifestPath}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("apply exit %d: %s", code, stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(ws, ".claude", "settings.json")); err != nil {
+		t.Fatalf("expected the model-pinned settings.json to exist: %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code := run([]string{"drift", agent, "--harness", "claude", "--workspace", ws, "--manifest", manifestPath}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("drift exit %d, want 0 (clean)\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "unchanged .claude/settings.json") {
+		t.Fatalf("expected .claude/settings.json reported unchanged, got %q", stdout.String())
+	}
+}
+
+// TestDriftJSONLModifiedFindingCarriesDiff proves the JSONL parity fix: an
+// improvement loop reading drift.file.modified in jsonl mode gets the
+// unified diff in the finding's own detail field, not only in prose-mode
+// stdout it never reads. It also proves the driftResult summary carries
+// fingerprint, matching validateResult/applyResult's shape.
+func TestDriftJSONLModifiedFindingCarriesDiff(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	ws := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("apply exit %d: %s", code, stderr.String())
+	}
+	if err := os.WriteFile(filepath.Join(ws, "CLAUDE.md"), []byte("edited\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code := run([]string{"drift", agent, "--harness", "claude", "--workspace", ws, "--diagnostics", "jsonl"}, nil, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("drift exit %d, want 1\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+	}
+	var found bool
+	for _, line := range strings.Split(strings.TrimSpace(stdout.String()), "\n") {
+		var d struct {
+			ID     string `json:"id"`
+			Path   string `json:"path"`
+			Detail string `json:"detail"`
+		}
+		if err := json.Unmarshal([]byte(line), &d); err != nil {
+			t.Fatalf("line %q is not valid JSON: %v", line, err)
+		}
+		if d.ID == "drift.file.modified" && d.Path == "CLAUDE.md" {
+			found = true
+			if d.Detail == "" {
+				t.Fatalf("expected a non-empty diff in the jsonl finding's detail field: %+v", d)
+			}
+			if !strings.Contains(d.Detail, "--- generated/CLAUDE.md") {
+				t.Fatalf("expected the diff detail to carry the labeled header, got %q", d.Detail)
+			}
+			if !strings.Contains(d.Detail, "+edited") {
+				t.Fatalf("expected the diff detail to show the workspace's edited content, got %q", d.Detail)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected a drift.file.modified finding at CLAUDE.md, got %q", stdout.String())
+	}
+}
+
+// TestDriftFlagValidation proves usage errors exit 2, matching
+// TestRunFlagValidation's pattern for the run command.
+func TestDriftFlagValidation(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	ws := t.TempDir()
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"missing workspace", []string{"drift", agent, "--harness", "claude"}},
+		{"bad harness", []string{"drift", agent, "--workspace", ws, "--harness", "gpt"}},
+		{"bad diagnostics mode", []string{"drift", agent, "--workspace", ws, "--harness", "claude", "--diagnostics", "yaml"}},
+		{"no agent", []string{"drift", "--workspace", ws, "--harness", "claude"}},
+		{"two agents", []string{"drift", agent, agent, "--workspace", ws, "--harness", "claude"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := run(tc.args, nil, &stdout, &stderr); code != 2 {
+				t.Fatalf("exit = %d, want 2\nstderr: %s", code, stderr.String())
+			}
+		})
+	}
+}
+
+// TestUnifiedDiffOverLimitStaysBounded proves the diff-mechanics fix: a file
+// pair beyond driftDiffLineLimit renders a short elided notice instead of
+// the line-alignment path — and, crucially, that notice is far smaller than
+// the input, not larger. The reviewer measured the previous fallback (dump
+// every old line, then every new line) emitting MORE output than the
+// input's line count; this proves the replacement never does that.
+func TestUnifiedDiffOverLimitStaysBounded(t *testing.T) {
+	oldLines := make([]string, driftDiffLineLimit+1)
+	newLines := make([]string, driftDiffLineLimit+1)
+	for i := range oldLines {
+		oldLines[i] = fmt.Sprintf("old line %d", i)
+		newLines[i] = fmt.Sprintf("new line %d", i)
+	}
+	old := []byte(strings.Join(oldLines, "\n") + "\n")
+	newer := []byte(strings.Join(newLines, "\n") + "\n")
+
+	diff := unifiedDiff("generated/big.md", "workspace/big.md", old, newer)
+	if diff == "" {
+		t.Fatal("expected a non-empty elided notice")
+	}
+	gotLines := strings.Count(diff, "\n") + 1
+	if gotLines > 10 {
+		t.Fatalf("elided notice is %d lines, want a small constant-size notice, not proportional to the %d-line input",
+			gotLines, len(oldLines))
+	}
+	if len(diff) >= len(old)+len(newer) {
+		t.Fatalf("elided notice (%d bytes) must be far smaller than the input (%d+%d bytes)", len(diff), len(old), len(newer))
+	}
+	if !strings.Contains(diff, "elided") {
+		t.Fatalf("expected the notice to say the diff was elided, got %q", diff)
+	}
+}
+
+// TestUnifiedDiffOverLimitBoundsMemory proves the DP table's memory stays
+// bounded at driftDiffLineLimit: the reviewer measured 126 MB for a
+// 3999-line pair under the old (unbounded) limit. This proves a same-order
+// input completes quickly and without the elided path being skipped by
+// mistake (the two inputs must actually differ in line count to hit the
+// over-limit branch rather than the identical-content fast path).
+func TestUnifiedDiffOverLimitBoundsMemory(t *testing.T) {
+	n := driftDiffLineLimit + 500
+	oldLines := make([]string, n)
+	newLines := make([]string, n+1) // deliberately different length
+	for i := 0; i < n; i++ {
+		oldLines[i] = fmt.Sprintf("line %d", i)
+		newLines[i] = fmt.Sprintf("line %d", i)
+	}
+	newLines[n] = "one more line"
+	old := []byte(strings.Join(oldLines, "\n") + "\n")
+	newer := []byte(strings.Join(newLines, "\n") + "\n")
+
+	done := make(chan string, 1)
+	go func() { done <- unifiedDiff("generated/x", "workspace/x", old, newer) }()
+	select {
+	case diff := <-done:
+		if !strings.Contains(diff, "elided") {
+			t.Fatalf("expected the over-limit path (elided notice), got %q", diff)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("unifiedDiff did not return promptly for an over-limit pair; the DP path was likely taken instead of being bounded")
+	}
+}
+
+// TestUnifiedDiffTrailingNewlineOnlyChangeIsNotBlank proves the fix for a
+// bare-blank-line output on a trailing-newline-only difference: when the
+// line-level content is identical and only a trailing newline differs, the
+// diff names that explicitly rather than rendering an empty-looking hunk.
+func TestUnifiedDiffTrailingNewlineOnlyChangeIsNotBlank(t *testing.T) {
+	old := []byte("line one\nline two\n")
+	newer := []byte("line one\nline two")
+
+	diff := unifiedDiff("generated/x", "workspace/x", old, newer)
+	if strings.TrimSpace(diff) == "" {
+		t.Fatal("a trailing-newline-only change must not render as a blank diff")
+	}
+	if !strings.Contains(diff, "newline") {
+		t.Fatalf("expected the diff to name the newline difference explicitly, got %q", diff)
+	}
+}
+
+// TestUnifiedDiffBoundsTotalBytes proves driftDiffByteLimit is actually
+// enforced end to end: many small scattered changes within the line-count
+// limit still produce a diff capped at driftDiffByteLimit bytes.
+func TestUnifiedDiffBoundsTotalBytes(t *testing.T) {
+	const lines = 800
+	oldLines := make([]string, lines)
+	newLines := make([]string, lines)
+	for i := 0; i < lines; i++ {
+		oldLines[i] = fmt.Sprintf("this is a moderately long unchanged context line number %d", i)
+		newLines[i] = oldLines[i]
+		if i%2 == 0 {
+			// Scatter a change on every other line so every hunk carries
+			// context on both sides — no hunks merge into one contiguous
+			// block, keeping the rendered diff large despite the modest
+			// line count.
+			newLines[i] = fmt.Sprintf("this is a CHANGED moderately long context line number %d", i)
+		}
+	}
+	old := []byte(strings.Join(oldLines, "\n") + "\n")
+	newer := []byte(strings.Join(newLines, "\n") + "\n")
+
+	diff := unifiedDiff("generated/x", "workspace/x", old, newer)
+	if len(diff) > driftDiffByteLimit+200 { // +200 slack for the truncation marker itself
+		t.Fatalf("diff is %d bytes, want at most ~%d (driftDiffByteLimit)", len(diff), driftDiffByteLimit)
+	}
+	if len(diff) > driftDiffByteLimit {
+		if !strings.Contains(diff, "truncated") {
+			t.Fatalf("a diff over the byte limit must carry a truncation marker, got tail %q", diff[len(diff)-60:])
+		}
 	}
 }

@@ -344,6 +344,23 @@ func TestApplyDiscardLocalOverwritesModifiedStaleFile(t *testing.T) {
 	}
 }
 
+// TestApplyDiscardLocalNeverForwardedToDriver pins the design choice
+// documented on Target.DiscardLocal: it is a caller policy decision about
+// conflict handling, not generated content, so — like ManifestIdentity — it
+// must never reach a driver's Generate. A driver that somehow branched on it
+// would be reading a signal apply never intended to leak.
+func TestApplyDiscardLocalNeverForwardedToDriver(t *testing.T) {
+	ws := t.TempDir()
+	var seen Target
+	driver := fakeDriver{files: []GeneratedFile{{Path: "CLAUDE.md", Content: []byte("generated\n")}}, target: &seen}
+	if _, diags, err := ApplyWithTarget(project(t), Target{Workspace: ws, Executable: testExecutable, DiscardLocal: true}, driver); err != nil || diags.HasErrors() {
+		t.Fatalf("apply failed: %v %v", err, diags.All())
+	}
+	if seen.DiscardLocal {
+		t.Fatal("DiscardLocal must never be forwarded into the driver's Generate target")
+	}
+}
+
 func TestReapplyIdenticalSourceIsDeterministic(t *testing.T) {
 	ws := t.TempDir()
 	driver := fakeDriver{files: []GeneratedFile{{Path: "CLAUDE.md", Content: []byte("generated\n")}}}

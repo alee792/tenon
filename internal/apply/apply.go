@@ -358,6 +358,65 @@ func Verify(p *agentproject.Project, workspace, harness string) error {
 	return nil
 }
 
+// OwnershipKind classifies one workspace path's tenon-ownership standing
+// against the previous apply record — the exact rule checkOwnership
+// enforces before any mutation, exported so read-only reporting (drift) can
+// classify a path identically without duplicating (and risking diverging
+// from) that rule.
+type OwnershipKind int
+
+const (
+	// OwnershipAbsent: nothing exists at path — safe to create, nothing to
+	// remove.
+	OwnershipAbsent OwnershipKind = iota
+	// OwnershipClean: a regular file at path matches the recorded owned
+	// state (content hash and executable bit) exactly.
+	OwnershipClean
+	// OwnershipNonRegular: a symlink or other non-regular entry exists at
+	// path. Refused (apply.conflict.unowned) regardless of any record.
+	OwnershipNonRegular
+	// OwnershipUnowned: a regular file exists at path but was never
+	// recorded as tenon-owned. Refused (apply.conflict.unowned).
+	OwnershipUnowned
+	// OwnershipModified: path was recorded as owned, but the file's bytes
+	// or executable bit no longer match the recorded state. Refused
+	// (apply.conflict.modified) unless the caller has opted into
+	// Target.DiscardLocal.
+	OwnershipModified
+)
+
+// ClassifyOwnership reports path's ownership standing in ws against
+// previous. readErr is non-nil only when path is a recorded, regular file
+// that could not be read; the returned kind is OwnershipUnowned in that
+// case, matching checkOwnership's fail-closed treatment of an unreadable
+// recorded file (an unreadable file can never be proven safe to replace).
+func ClassifyOwnership(ws, path string, previous *Record) (kind OwnershipKind, readErr error) {
+	full := filepath.Join(ws, path)
+	info, err := os.Lstat(full)
+	if err != nil {
+		return OwnershipAbsent, nil
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return OwnershipNonRegular, nil
+	}
+	var recorded OwnedFile
+	var owned bool
+	if previous != nil {
+		recorded, owned = previous.Files[path]
+	}
+	if !owned {
+		return OwnershipUnowned, nil
+	}
+	current, err := os.ReadFile(full)
+	if err != nil {
+		return OwnershipUnowned, err
+	}
+	if hashBytes(current) != recorded.Hash || isExecutable(info.Mode()) != recorded.Executable {
+		return OwnershipModified, nil
+	}
+	return OwnershipClean, nil
+}
+
 // checkOwnership reports a conflict diagnostic when the workspace file at
 // path cannot be safely replaced or removed: it exists without a record
 // (hand-authored) or its bytes or executable bit differ from the recorded
@@ -368,32 +427,23 @@ func Verify(p *agentproject.Project, workspace, harness string) error {
 // only ever widens what a previous tenon apply already owned, never what a
 // person authored by hand.
 func checkOwnership(ws, path string, previous *Record, discardLocal bool, diags *diagnostics.List) bool {
-	full := filepath.Join(ws, path)
-	info, err := os.Lstat(full)
-	if err != nil {
-		return false // absent: safe to create, nothing to remove
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+	kind, err := ClassifyOwnership(ws, path, previous)
+	switch kind {
+	case OwnershipAbsent, OwnershipClean:
+		return false
+	case OwnershipNonRegular:
 		diags.Errorf("apply.conflict.unowned", path,
 			"the existing workspace entry is not a regular file and tenon never replaces it")
 		return true
-	}
-	var recorded OwnedFile
-	var owned bool
-	if previous != nil {
-		recorded, owned = previous.Files[path]
-	}
-	if !owned {
+	case OwnershipUnowned:
+		if err != nil {
+			diags.Errorf("apply.conflict.unowned", path, "the existing workspace file could not be read: %v", err)
+			return true
+		}
 		diags.Errorf("apply.conflict.unowned", path,
 			"a hand-authored native file already exists and tenon refuses to overwrite it; move it aside or choose another workspace")
 		return true
-	}
-	current, err := os.ReadFile(full)
-	if err != nil {
-		diags.Errorf("apply.conflict.unowned", path, "the existing workspace file could not be read: %v", err)
-		return true
-	}
-	if hashBytes(current) != recorded.Hash || isExecutable(info.Mode()) != recorded.Executable {
+	case OwnershipModified:
 		if discardLocal {
 			return false // caller opted in: the local edit is discarded, never adopted
 		}

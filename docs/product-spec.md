@@ -245,11 +245,14 @@ Claude receives `CLAUDE.md`, `.mcp.json`, `.claude/skills/`, and
 `.agents/skills/`, and `.codex/agents/`. Generated files are visibly
 tool-owned and disposable. Apply refuses to overwrite hand-authored native
 files or any tenon-owned file modified since the previous apply, and
-reapplying identical source is deterministic. All authored inputs join one
-source fingerprint recorded with the apply, so stale or edited generated
-setup fails closed. Codex project trust remains the user's native decision;
-apply never edits global harness configuration or trusts a project on the
-user's behalf.
+reapplying identical source is deterministic. An explicit `--discard-local`
+flag lets apply overwrite a tenon-owned file modified since the previous
+apply instead of refusing it; it never widens the hand-authored-file
+refusal; a file apply never recorded as its own is refused with or without
+the flag. All authored inputs join one source fingerprint recorded with the
+apply, so stale or edited generated setup fails closed. Codex project trust
+remains the user's native decision; apply never edits global harness
+configuration or trusts a project on the user's behalf.
 
 `tenon validate AGENT --harness <claude|codex>` runs the same validation as
 apply without writing anything: it loads and bounds the project, checks
@@ -277,6 +280,21 @@ mode emits the same per-file entries that feed the rollup (path, content
 hash, executable bit) followed by one closing object carrying the
 rolled-up fingerprint, in the same "stream of objects, closing summary
 line" shape.
+
+`tenon drift AGENT --workspace WORKSPACE --harness <claude|codex>` reports
+whether a workspace still carries exactly what a fresh apply would produce,
+writing nothing at all: it regenerates every tenon-owned file in memory on
+apply's own generation path, then compares each against both the workspace
+and the apply record — the same ownership rule apply's conflict check
+enforces, not merely a byte comparison against the fresh regeneration — and
+reports it unchanged, modified on disk (with a unified diff), missing, or
+stale (recorded by a previous apply but no longer generated). Drift
+deliberately never adopts a workspace edit back into source: generation is
+lossy in reverse, so tenon never guesses author intent from a diff. Drift
+only shows the diff; the author edits source and reapplies, optionally with
+`--discard-local` to explicitly discard the workspace edit. Its
+machine-readable mode carries the same stable per-finding identifiers and
+diagnostics discipline as validate and apply.
 
 ## Agent manifest
 

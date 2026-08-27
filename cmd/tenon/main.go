@@ -44,7 +44,7 @@ const prepareBudget = 5 * time.Minute
 const usage = `usage:
   tenon apply AGENT --harness <claude|codex> [--workspace DIR] [--manifest PATH] [--diagnostics <prose|jsonl>] [--discard-local]
   tenon validate AGENT --harness <claude|codex> [--manifest PATH] [--diagnostics <prose|jsonl>]
-  tenon drift AGENT --workspace DIR --harness <claude|codex> [--diagnostics <prose|jsonl>]
+  tenon drift AGENT --workspace DIR --harness <claude|codex> [--manifest PATH] [--diagnostics <prose|jsonl>]
   tenon fingerprint show AGENT [--diagnostics <prose|jsonl>]
   tenon manifest write AGENT --harness <claude|codex> [--output PATH] [--manifest PATH] [--model VALUE]
   tenon mcp serve AGENT --harness <claude|codex> [--workspace DIR] [--manifest PATH]
