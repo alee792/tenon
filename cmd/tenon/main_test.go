@@ -11,6 +11,8 @@ import (
 	"testing"
 
 	"github.com/alee792/tenon/internal/generated"
+
+	"github.com/alee792/tenon/internal/version"
 )
 
 const validInstructions = `---
@@ -1325,7 +1327,7 @@ func TestApplyGeneratesTheManagedServerForBothHarnesses(t *testing.T) {
 		t.Fatalf(".codex/config.toml =\n%s\nwant\n%s", got, wantCodexConfig(executable, agent, codexWS))
 	}
 	for _, content := range []string{string(got), string(mustRead(t, filepath.Join(claudeWS, ".mcp.json")))} {
-		for _, metadata := range []string{"sha256:", "fingerprint", "0.1.0-dev"} {
+		for _, metadata := range []string{"sha256:", "fingerprint", version.Version} {
 			if strings.Contains(content, metadata) {
 				t.Fatalf("generated managed configuration must carry no setup metadata (%q): %s", metadata, content)
 			}
@@ -2164,5 +2166,26 @@ func TestRunFlagValidation(t *testing.T) {
 				t.Fatalf("exit = %d, want 2\nstderr: %s", code, stderr.String())
 			}
 		})
+	}
+}
+
+// TestVersionCommandReportsTheStampedVersion proves `tenon version` reports
+// exactly what the binary carries. Release builds stamp that value over the
+// -dev default with -ldflags, and an agent manifest pins the same string, so
+// this command is how an operator reads what a given tenon will verify
+// against.
+func TestVersionCommandReportsTheStampedVersion(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"version"}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("version exit %d\nstderr: %s", code, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != version.Version {
+		t.Fatalf("version = %q, want %q", got, version.Version)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"version", "extra"}, nil, &stdout, &stderr); code != 2 {
+		t.Fatalf("version with an argument exit %d, want 2", code)
 	}
 }

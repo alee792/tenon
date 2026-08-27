@@ -34,6 +34,7 @@ import (
 	"github.com/alee792/tenon/internal/mcp"
 	"github.com/alee792/tenon/internal/schedule"
 	"github.com/alee792/tenon/internal/toolruntime"
+	"github.com/alee792/tenon/internal/version"
 )
 
 // prepareBudget bounds one tool preparation: installing locked dependencies
@@ -57,6 +58,7 @@ const usage = `usage:
   tenon integration install SOURCE --trust operator
   tenon integration inspect|verify|list|enable|disable|remove [ID]
   tenon integration update ID SOURCE --trust operator
+  tenon version
 `
 
 func main() {
@@ -97,10 +99,24 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runConnection(args[1:], stdout, stderr)
 	case "integration":
 		return runIntegration(args[1:], stdout, stderr)
+	case "version":
+		return runVersion(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "tenon: unknown command %q\n%s", args[0], usage)
 		return 2
 	}
+}
+
+// runVersion reports the version stamped into this binary. An agent manifest
+// pins that exact string, so this is the authoritative way to read what a
+// given tenon will record and verify against.
+func runVersion(args []string, stdout, stderr io.Writer) int {
+	if len(args) != 0 {
+		fmt.Fprintf(stderr, "tenon version: takes no arguments\n%s", usage)
+		return 2
+	}
+	fmt.Fprintln(stdout, version.Version)
+	return 0
 }
 
 // commonFlags parses the shared AGENT positional and flag set. It returns
@@ -281,7 +297,7 @@ func runValidate(args []string, stdout, stderr io.Writer) int {
 				Workspace:        workspace,
 				Executable:       executable,
 				IntegrationStore: resolveIntegrationStoreBase(),
-				TenonVersion:     mcp.Version,
+				TenonVersion:     version.Version,
 				Model:            manifestModel(supplied, driver.Harness()),
 			}, diags)
 		}
@@ -351,7 +367,7 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 		Workspace:        workspace,
 		Executable:       executable,
 		IntegrationStore: storeBase,
-		TenonVersion:     mcp.Version,
+		TenonVersion:     version.Version,
 		ManifestIdentity: manifestIdentity(supplied),
 		Model:            manifestModel(supplied, driver.Harness()),
 	}, driver)
@@ -644,7 +660,7 @@ func newHarnessDriver(name string) (harness.Driver, error) {
 	case "claude":
 		return claudeharness.NewDriver("claude"), nil
 	case "codex":
-		return codexharness.NewDriver("codex", mcp.Version), nil
+		return codexharness.NewDriver("codex", version.Version), nil
 	default:
 		return nil, fmt.Errorf("--harness must be exactly claude or codex")
 	}
@@ -1013,7 +1029,7 @@ func newFrictionRecorder(p *agentproject.Project, harness string) frictionRecord
 			Agent:             p.Name,
 			SourceFingerprint: p.Fingerprint,
 			Harness:           harness,
-			TenonVersion:      mcp.Version,
+			TenonVersion:      version.Version,
 		},
 	}
 }
@@ -1311,7 +1327,7 @@ func installedConnectionHealth(store *integration.Store, c agentproject.Connecti
 	if store == nil {
 		return false, "no integration store is configured"
 	}
-	desc, err := store.Resolve(c.Package, c.Capability, mcp.Version, runtime.GOOS, runtime.GOARCH)
+	desc, err := store.Resolve(c.Package, c.Capability, version.Version, runtime.GOOS, runtime.GOARCH)
 	if err != nil {
 		return false, diagnostics.Bound(err.Error(), 256)
 	}

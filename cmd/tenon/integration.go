@@ -8,7 +8,7 @@ import (
 	"sort"
 
 	"github.com/alee792/tenon/internal/integration"
-	"github.com/alee792/tenon/internal/mcp"
+	"github.com/alee792/tenon/internal/version"
 )
 
 const integrationUsage = `usage:
@@ -111,7 +111,7 @@ func runIntegrationInstall(store *integration.Store, name string, args []string,
 	}
 	req := integration.InstallRequest{
 		TrustOperator: true,
-		TenonVersion:  mcp.Version,
+		TenonVersion:  version.Version,
 		OS:            runtime.GOOS,
 		Arch:          runtime.GOARCH,
 	}

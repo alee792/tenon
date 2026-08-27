@@ -17,8 +17,8 @@ import (
 	"github.com/alee792/tenon/internal/diagnostics"
 	"github.com/alee792/tenon/internal/integration"
 	"github.com/alee792/tenon/internal/manifest"
-	"github.com/alee792/tenon/internal/mcp"
 	"github.com/alee792/tenon/internal/toolruntime"
+	"github.com/alee792/tenon/internal/version"
 )
 
 // manifestResolverFor builds the production closure Resolver for p on
@@ -70,7 +70,7 @@ func verifyManifestDiag(p *agentproject.Project, harnessName, storeBase string, 
 	if supplied == nil {
 		return nil
 	}
-	current, err := manifest.Resolve(p, harnessName, mcp.Version, manifestResolverFor(p, harnessName, storeBase))
+	current, err := manifest.Resolve(p, harnessName, version.Version, manifestResolverFor(p, harnessName, storeBase))
 	if err != nil {
 		return err
 	}
@@ -93,7 +93,7 @@ func checkManifest(p *agentproject.Project, harnessName, storeBase string, suppl
 	if supplied == nil {
 		return nil
 	}
-	current, err := manifest.Resolve(p, harnessName, mcp.Version, manifestResolverFor(p, harnessName, storeBase))
+	current, err := manifest.Resolve(p, harnessName, version.Version, manifestResolverFor(p, harnessName, storeBase))
 	if err != nil {
 		return err
 	}
@@ -204,7 +204,7 @@ func runManifestWrite(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	current, err := manifest.Resolve(p, *harnessName, mcp.Version, manifestResolverFor(p, *harnessName, storeBase))
+	current, err := manifest.Resolve(p, *harnessName, version.Version, manifestResolverFor(p, *harnessName, storeBase))
 	if err != nil {
 		fmt.Fprintln(stderr, "tenon manifest write:", err)
 		return 1

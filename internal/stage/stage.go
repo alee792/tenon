@@ -27,8 +27,8 @@ import (
 	"github.com/alee792/tenon/internal/agentproject"
 	"github.com/alee792/tenon/internal/apply"
 	"github.com/alee792/tenon/internal/diagnostics"
-	"github.com/alee792/tenon/internal/mcp"
 	"github.com/alee792/tenon/internal/toolruntime"
+	"github.com/alee792/tenon/internal/version"
 )
 
 // SchemaVersion is the artifact manifest schema. It is tenon's own
@@ -243,7 +243,7 @@ func Stage(ctx context.Context, opts Options) (*Result, *diagnostics.List, error
 	// so far, then publish with one rename.
 	artifact := &Artifact{
 		SchemaVersion:     SchemaVersion,
-		TenonVersion:      mcp.Version,
+		TenonVersion:      version.Version,
 		Harness:           HarnessInfo{Name: opts.Harness, Bundled: false, Note: harnessPlaceholderNote},
 		Agent:             p.Name,
 		SourceFingerprint: p.Fingerprint,
