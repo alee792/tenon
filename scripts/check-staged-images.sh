@@ -13,31 +13,57 @@
 #   1. writes a minimal probe agent carrying one authored tool in that
 #      language,
 #   2. runs `tenon stage` to produce a complete runnable tree,
-#   3. builds a two-stage image: the staged tree copied onto the documented
-#      compatible base (ubuntu:24.04, docs/harness-images.md),
+#   3. builds a final image: the staged tree copied onto the documented
+#      compatible base (ubuntu:24.04, docs/harness-images.md) — see the
+#      Dockerfile deviations noted below,
 #   4. runs the built image with --network none as the staged non-root
-#      identity (uid/gid 65532), verifies the staged tree offline via the
-#      staged entrypoint's own `tenon stage verify`, and calls the probe
-#      tool over MCP through `/opt/tenon/bin/tenon mcp serve`, asserting
-#      isError:false and the expected output,
+#      identity (uid/gid 65532): verifies the staged tree offline via
+#      `tenon stage verify` run directly, separately proves the staged
+#      entrypoint's own fail-closed `--verify-only` path
+#      (internal/stage/entrypoint.go) through the image's default
+#      ENTRYPOINT, and calls the probe tool over MCP through
+#      `/opt/tenon/bin/tenon mcp serve`, asserting isError:false and the
+#      expected output,
 #   5. asserts language-exclusivity in the staged manifest, and
-#   6. asserts tree hygiene (zero non-regular files).
+#   6. asserts tree hygiene (zero non-regular files, and that /workspace and
+#      /home/tenon are writable by the runtime identity).
 #
 # It also stages and images a tool-free agent (empty runtime record) and
 # proves the TypeScript refusal (stage exits 1 with a named diagnostic and
 # publishes no output directory).
 #
-# Deliberate deviation from images/'s own Dockerfiles: images/inputs.json
-# pins every harness component (claude, codex) as
-# "TODO-pin-before-first-build" (issue #19), so there is no buildable tenon
-# harness image today to use as the `AS build` stage ADR 0012's two-stage
-# example shows. This script instead performs that build stage's one
+# Deliberate deviations from ADR 0012's two-stage example and images/'s own
+# Dockerfiles, both rooted in the same cause: images/inputs.json pins every
+# harness component (claude, codex) as "TODO-pin-before-first-build" (issue
+# #19), so there is no buildable tenon harness image today to use as the
+# `AS build` stage. This script instead performs that build stage's one
 # relevant step — `tenon stage` — directly on the host with a tenon binary
-# built from this checkout, then copies the result onto the documented base
-# exactly as the two-stage Dockerfile's second stage does. It proves the
-# staged tree and the final compatible base, not the harness image
-# Dockerfiles themselves (those remain separately gated by issue #19 and
-# publication authorization; see docs/harness-images.md).
+# built from this checkout, and its own final.Dockerfile (built below) is
+# NOT verbatim from docs/harness-images.md's two-stage example:
+#
+#   - it drops the `COPY --from=build /etc/ssl/certs/ca-certificates.crt
+#     ...` line: that line copies the CA bundle from the build stage (a
+#     harness image FROM ubuntu, which has it via apt), and this gate has
+#     no such build stage. This is genuinely unavoidable host-side, not a
+#     shortcut: none of this gate's checks make an outbound TLS connection,
+#     so its absence does not weaken what is proven, but a transcript
+#     reader must know the compatible-base contract's certificate clause
+#     (docs/harness-images.md, "Certificate bundle") was NOT exercised by
+#     this run;
+#   - it therefore also carries `SSL_CERT_FILE` pointed at a bundle that
+#     does not exist in the built image (documented in the Dockerfile
+#     itself, below);
+#   - `RUN` (create the non-root identity) runs before the `COPY` of the
+#     staged tree, matching the documented ordering, not after it;
+#   - `ENTRYPOINT ["/opt/tenon/bin/agent-entrypoint"]` is present exactly
+#     as documented, so the entrypoint's own verification path is real and
+#     checked below — every other check in this script overrides it with
+#     `--entrypoint` for its own direct command.
+#
+# This proves the staged tree and the documented compatible base (short of
+# the certificate clause above), not the harness image Dockerfiles
+# themselves (those remain separately gated by issue #19 and publication
+# authorization; see docs/harness-images.md).
 #
 # Usage: ./scripts/check-staged-images.sh
 set -eu
@@ -47,6 +73,10 @@ cd "$repo_root"
 
 command -v docker >/dev/null 2>&1 || {
   echo "FAIL prerequisites: docker is required for the staged-image acceptance gate" >&2
+  exit 1
+}
+docker info >/dev/null 2>&1 || {
+  echo "FAIL prerequisites: the docker daemon is not reachable (docker info failed)" >&2
   exit 1
 }
 command -v go >/dev/null 2>&1 || {
@@ -67,8 +97,14 @@ command -v timeout >/dev/null 2>&1 || {
 }
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/tenon-check-staged-images.XXXXXX")
+# The three image tags this gate ever builds, fixed ahead of time so cleanup
+# can remove them unconditionally (a missing tag is a silent no-op) without
+# tracking what actually got built on a failed run.
+built_images="tenon-staged-tool-free:acceptance tenon-staged-go:acceptance tenon-staged-python:acceptance"
 cleanup() {
   rm -rf -- "$work"
+  # shellcheck disable=SC2086
+  docker image rm -f $built_images >/dev/null 2>&1 || true
 }
 trap cleanup EXIT HUP INT TERM
 
@@ -79,24 +115,35 @@ GOOS=linux GOARCH=amd64 go build -o "$work/tenon" ./cmd/tenon
 tenon="$work/tenon"
 echo "PASS build: tenon executable built for linux/amd64"
 
-# final.Dockerfile is the two-stage journey's second stage, verbatim from
-# docs/harness-images.md, with the build stage's output already materialized
-# on disk by `tenon stage` (see the deviation note above): copy the staged
-# tree's opt/, workspace/, and home/tenon/ onto the documented compatible
-# base and create the non-root runtime identity.
+# final.Dockerfile is the two-stage journey's second stage, adapted from
+# docs/harness-images.md — NOT verbatim; see the header comment above for
+# every deviation and why. The build stage's output is already materialized
+# on disk by `tenon stage` (host-side, per the deviation note): copy the
+# staged tree's opt/, workspace/, and home/tenon/ onto the documented
+# compatible base and create the non-root runtime identity.
 final_dockerfile="$work/Dockerfile.final"
 cat >"$final_dockerfile" <<EOF
 FROM $base_image
-COPY opt/ /opt/
-COPY --chown=65532:65532 workspace/ /workspace/
-COPY --chown=65532:65532 home/tenon/ /home/tenon/
+ENV HOME=/home/tenon \\
+    PATH=/opt/tenon/bin:/opt/tenon/harness/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \\
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+# NOT copied here: /etc/ssl/certs/ca-certificates.crt. The documented
+# two-stage Dockerfile copies it --from=build, a build stage this gate does
+# not have (see the header comment). SSL_CERT_FILE above therefore points
+# at a bundle this image does not carry; nothing this gate checks makes an
+# outbound TLS connection, so this does not weaken the proof, but the
+# certificate clause of the compatible-base contract is NOT exercised here.
 RUN set -eu; \\
     groupadd --gid 65532 tenon; \\
     useradd --uid 65532 --gid 65532 --home-dir /home/tenon --shell /bin/sh --no-create-home --no-log-init tenon; \\
     mkdir -p /home/tenon /workspace; \\
     chown -R 65532:65532 /home/tenon /workspace
+COPY opt/ /opt/
+COPY --chown=65532:65532 workspace/ /workspace/
+COPY --chown=65532:65532 home/tenon/ /home/tenon/
 USER 65532:65532
 WORKDIR /workspace
+ENTRYPOINT ["/opt/tenon/bin/agent-entrypoint"]
 EOF
 
 # write_instructions gives a probe agent the minimal valid instructions.md
@@ -143,23 +190,50 @@ verify_staged_tree() {
 }
 
 # check_hygiene_and_container_verify runs inside the built image, --network
-# none, as the staged non-root identity: proves runtime identity, zero
-# non-regular staged entries, and the staged entrypoint's own offline
-# verification of the artifact manifest, now inside the container.
+# none, as the staged non-root identity, entrypoint overridden to a plain
+# shell: proves runtime identity, zero non-regular staged entries, that
+# /workspace and /home/tenon are actually writable by that identity (stage.
+# Verify never checks Dirs, so this is the only proof of that), and a
+# direct in-container `tenon stage verify` of the artifact manifest. The
+# staged entrypoint's OWN verification path is a separate, later check
+# (check_entrypoint_verify) — this one bypasses the entrypoint entirely.
 check_hygiene_and_container_verify() {
   image=$1
   label=$2
   docker run --rm --network none --entrypoint /bin/sh "$image" -c '
     set -eu
     test "$(id -u):$(id -g)" = "65532:65532"
-    test -z "$(find /opt /workspace /home -not -type d -not -type f -print -quit)"
+    # A failing find (not merely a nonempty result) must abort loudly rather
+    # than have its exit status swallowed by wrapping it in test -z "$(...)":
+    # this plain assignment aborts under set -e if find itself errors.
+    non_regular=$(find /opt /workspace /home -not -type d -not -type f -print -quit)
+    [ -z "$non_regular" ]
+    touch /workspace/.check-staged-images-probe
+    touch /home/tenon/.check-staged-images-probe
     /opt/tenon/bin/tenon stage verify --artifact /opt/tenon/artifact.json >/dev/null
   ' >"$work/hygiene-$label.out" 2>&1 || {
-    echo "FAIL hygiene($label): identity, non-regular-file, or in-container verify check failed" >&2
+    echo "FAIL hygiene($label): identity, non-regular-file, writability, or in-container verify check failed" >&2
     cat "$work/hygiene-$label.out" >&2
     exit 1
   }
-  echo "PASS hygiene($label): uid/gid 65532, zero non-regular staged entries, artifact verifies in-container"
+  echo "PASS hygiene($label): uid/gid 65532, zero non-regular staged entries, /workspace and /home/tenon writable, artifact verifies in-container"
+}
+
+# check_entrypoint_verify proves the staged entrypoint's OWN fail-closed
+# verification path (internal/stage/entrypoint.go), not a stand-in for it:
+# it runs the image through its default ENTRYPOINT
+# (/opt/tenon/bin/agent-entrypoint) with --verify-only, the entrypoint's
+# documented verify-and-exit mode, and asserts a clean exit 0 with no
+# harness handoff attempted.
+check_entrypoint_verify() {
+  image=$1
+  label=$2
+  docker run --rm --network none "$image" --verify-only >"$work/entrypoint-verify-$label.out" 2>&1 || {
+    echo "FAIL entrypoint-verify($label): the staged entrypoint's --verify-only path failed" >&2
+    cat "$work/entrypoint-verify-$label.out" >&2
+    exit 1
+  }
+  echo "PASS entrypoint-verify($label): the staged agent-entrypoint verified the tree and exited 0 via --verify-only"
 }
 
 # check_mcp_call runs the staged tenon's `mcp serve` inside the image,
@@ -168,7 +242,9 @@ check_hygiene_and_container_verify() {
 # tool's own JSON arguments), and asserts the call succeeds (isError:false)
 # with the expected output. `timeout` wraps the docker invocation on the
 # host: mcp serve is a long-lived host process by design and only exits when
-# stdin closes, which the input file already does.
+# stdin closes, which the input file already does. The caller supplies the
+# timeout in seconds; Python's leg needs longer than Go's for a cold read of
+# the staged ~82MB standalone CPython closure.
 check_mcp_call() {
   image=$1
   label=$2
@@ -176,13 +252,14 @@ check_mcp_call() {
   tool_name=$4
   arguments=$5
   expect_grep=$6
+  timeout_seconds=$7
   requests="$work/mcp-$label-requests.jsonl"
   cat >"$requests" <<EOF
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}
 {"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
 {"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"$tool_name","arguments":$arguments}}
 EOF
-  if ! result=$(timeout 10 docker run --rm -i --network none \
+  if ! result=$(timeout "$timeout_seconds" docker run --rm -i --network none \
       --entrypoint /opt/tenon/bin/tenon "$image" \
       mcp serve "/opt/tenon/agents/$agent_name" --workspace /workspace --harness claude \
       <"$requests" 2>"$work/mcp-$label.err"); then
@@ -270,6 +347,7 @@ docker build --platform linux/amd64 --tag "$free_image" --file "$final_dockerfil
 }
 echo "PASS build(tool-free): the final image built onto $base_image"
 check_hygiene_and_container_verify "$free_image" "tool-free"
+check_entrypoint_verify "$free_image" "tool-free"
 
 # ---------------------------------------------------------------------------
 # Language legs: go, python today. Add typescript here once its rendering
@@ -287,6 +365,7 @@ for lang in go python; do
       tool_name=reverse
       call_arguments='{"text":"tenon"}'
       expect_grep='"reversed":"nonet"'
+      mcp_timeout=10
       cp "$repo_root/examples/mixed-tools/go.mod" "$agent_dir/go.mod"
       mkdir -p "$agent_dir/tools/reverse"
       cp "$repo_root/examples/mixed-tools/tools/reverse/tool.go" "$agent_dir/tools/reverse/tool.go"
@@ -295,6 +374,10 @@ for lang in go python; do
       tool_name=wordcount
       call_arguments='{"text":"one two three"}'
       expect_grep='"words":3'
+      # A cold container reads the staged ~82MB standalone CPython closure
+      # off disk for the first time; Go's compiled host binary is much
+      # smaller, so only Python needs the longer bound.
+      mcp_timeout=30
       mkdir -p "$agent_dir/tools"
       cp "$repo_root/examples/mixed-tools/pyproject.toml" "$agent_dir/pyproject.toml"
       cp "$repo_root/examples/mixed-tools/uv.lock" "$agent_dir/uv.lock"
@@ -308,7 +391,11 @@ for lang in go python; do
   artifact="$staged_dir/opt/tenon/artifact.json"
   case "$lang" in
     go)
-      grep -F '"go"' "$artifact" >/dev/null || {
+      # Scoped to the runtime.languages array (the "languages" key line plus
+      # its following entries), not a whole-file substring match: a
+      # whole-file '"go"' grep would also pass against a mixed manifest that
+      # happened to carry python, so it would not actually prove go-only.
+      grep -A3 '"languages"' "$artifact" | grep -F '"go"' >/dev/null || {
         echo "FAIL exclusivity(go): runtime.languages must record go" >&2
         exit 1
       }
@@ -344,7 +431,8 @@ for lang in go python; do
   echo "PASS build($lang): the final image built onto $base_image"
 
   check_hygiene_and_container_verify "$image" "$lang"
-  check_mcp_call "$image" "$lang" "$agent_name" "$tool_name" "$call_arguments" "$expect_grep"
+  check_entrypoint_verify "$image" "$lang"
+  check_mcp_call "$image" "$lang" "$agent_name" "$tool_name" "$call_arguments" "$expect_grep" "$mcp_timeout"
 done
 
 printf '%s\n' "PASS check-staged-images: TypeScript refusal, tool-free, Go-only, and Python-only staged images all verified"

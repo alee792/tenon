@@ -19,19 +19,23 @@ stays refused pending its own rendering spike, issue #16) the script:
 1. writes a minimal probe agent carrying one authored tool in that language,
 2. runs `tenon stage` to produce a complete runnable tree,
 3. copies that tree onto the documented compatible base (`ubuntu:24.04`,
-   [`docs/harness-images.md`](harness-images.md)) — the two-stage journey's
-   second stage,
+   [`docs/harness-images.md`](harness-images.md)) — an adaptation of the
+   two-stage journey's second stage, not verbatim (see "Deviations" below),
 4. runs the built image with `--network none` as the staged non-root
-   identity (uid/gid 65532), verifies the staged tree offline through
-   `tenon stage verify` — the same call the staged entrypoint makes before
-   ever starting a harness — and calls the probe tool over MCP through
-   `/opt/tenon/bin/tenon mcp serve`, asserting `isError:false` and the exact
-   expected output,
+   identity (uid/gid 65532): verifies the staged tree offline directly
+   through `tenon stage verify`, separately runs the image through its
+   default entrypoint with `--verify-only` to prove the staged
+   `agent-entrypoint`'s own fail-closed verification path
+   (`internal/stage/entrypoint.go`) — not merely a stand-in for it — and
+   calls the probe tool over MCP through `/opt/tenon/bin/tenon mcp serve`,
+   asserting `isError:false` and the exact expected output,
 5. asserts staged-manifest language exclusivity (a Go-only image records no
    Python interpreter and stages no `cpython`; a Python-only image records
    the pinned interpreter identity and stages it), and
 6. asserts staged-tree hygiene: zero non-regular files anywhere under
-   `/opt`, `/workspace`, or `/home`.
+   `/opt`, `/workspace`, or `/home`, and that `/workspace` and `/home/tenon`
+   are actually writable by the runtime identity (the artifact manifest
+   never checks this itself).
 
 It also stages and images a tool-free agent, proving the empty runtime
 record (`runtime.bundled: false`, no staged language runtime), and proves
@@ -48,6 +52,22 @@ relevant step — `tenon stage` — directly on the host instead; the script's
 own header comment records this deviation and the reason. It does not
 supersede [`docs/harness-images.md`](harness-images.md)'s own publication
 gating, which still governs the harness images themselves.
+
+### Deviations from the documented two-stage Dockerfile
+
+The gate's own generated final-stage Dockerfile is not verbatim from
+[`docs/harness-images.md`](harness-images.md): most notably, it drops the
+`COPY --from=build /etc/ssl/certs/ca-certificates.crt ...` line, because
+that line copies the CA bundle from a build stage (a harness image `FROM`
+ubuntu, carrying it via `apt`) that this gate has no substitute for. This is
+genuinely unavoidable host-side, not a shortcut skipped for convenience:
+none of this gate's checks make an outbound TLS connection, so the omission
+does not weaken anything this run actually proves, but a transcript reader
+must know the compatible-base contract's certificate clause
+(`docs/harness-images.md`, "Certificate bundle") was **not** exercised by
+any run of this gate. The `ENTRYPOINT`, `ENV`, and instruction ordering are
+otherwise reproduced so the entrypoint-verification check above is real; the
+script's own header comment is the authoritative, complete deviation list.
 
 ## When to run it
 
@@ -67,9 +87,11 @@ On a Linux/amd64 host with Docker, Go, and `uv` installed:
 ./scripts/check-staged-images.sh
 ```
 
-It builds tenon from the current checkout, is self-contained (writes only
-under a temporary directory it cleans up), and fails fast on the first
-`FAIL` line. A clean run ends with:
+It builds tenon from the current checkout, is self-contained (host-side
+writes stay under a temporary directory it removes on exit, and it removes
+the Docker images it builds — `tenon-staged-tool-free`, `tenon-staged-go`,
+`tenon-staged-python`, tag `acceptance` — the same way), and fails fast on
+the first `FAIL` line. A clean run ends with:
 
 ```
 PASS check-staged-images: TypeScript refusal, tool-free, Go-only, and Python-only staged images all verified
