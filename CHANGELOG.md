@@ -17,10 +17,10 @@ The first release, v0.1.0, ships the core described in
   now names the agent source relative to its own build directory, so the
   build-machine path is never embedded in the built binary in the first
   place (previously visible via `go version -m` even after a `-trimpath`
-  build). Staging refuses a Python- or TypeScript-bearing agent with a
-  named diagnostic (`stage.tools.runtime-unsupported`) before any
-  mutation; `apply`/`validate`/`mcp serve` are unaffected and continue to
-  work locally for every language.
+  build). Staging refuses a TypeScript-bearing agent with a named
+  diagnostic (`stage.tools.runtime-unsupported`) before any mutation;
+  `apply`/`validate`/`mcp serve` are unaffected and continue to work
+  locally for every language.
 
 - Python authored tools run from a self-contained execution closure (ADR
   0021): preparation installs a pinned, checksum-verified standalone
@@ -91,8 +91,9 @@ The first release, v0.1.0, ships the core described in
   clean working tree's git commit SHA alongside the apply record when the
   source is a clean git checkout; and `apply`/`validate` accept
   `--diagnostics jsonl` to emit a single structured JSON summary line
-  (agent, harness, workspace, fingerprint, files written/removed, managed
-  tools) instead of prose, for scripted and outer-loop consumption.
+  instead of prose, for scripted and outer-loop consumption —
+  `{agent, fingerprint}` for `validate`, and `{agent, harness, workspace,
+  fingerprint, written, removed, managed_tools}` for `apply`.
 
 - `tenon apply` and `tenon validate` compile one filesystem-authored agent
   project (`instructions.md`, `skills/`, `plugins/`, `tools/`,
