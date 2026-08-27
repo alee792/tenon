@@ -12,8 +12,7 @@ Authority order, first wins:
    contract; every stated behavior in the specification binds, and its
    acceptance section is the proof skeleton.
 3. `docs/adr/` — accepted decisions and their rationale.
-4. `docs/glossary.md` and `docs/workbench/skill-compatibility.md` — shared
-   vocabulary and the dated skill-field compatibility matrix.
+4. `docs/glossary.md` — shared vocabulary.
 
 Read those documents in that order before changing product behavior. Silence
 asserts alignment with the north star; explicit reconciliation is owed only

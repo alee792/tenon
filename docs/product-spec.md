@@ -570,17 +570,20 @@ above:
   the native harness runtime is not yet bundled into the staged tree
   (expected on the base image), and the authored-tool execution closure is
   staged whole rather than minimized, both recorded in the staging artifact
-  manifest. Among authored-tool languages, the Go closure stages and serves
-  end to end; the Python closure (a pinned, checksum-verified standalone
-  CPython) and the TypeScript closure (`deno compile` or a pruned
-  self-contained `deno` executable) land with that ADR's own per-language
-  work, and staging refuses either language until then with a named
-  diagnostic rather than emitting a tree that cannot run.
+  manifest. No authored tool serves from a staged tree yet: the staged
+  closure is not yet reachable from the apply record. Landing Go
+  reachability and named per-language refusals for Python and TypeScript is
+  ADR 0021's committed follow-up.
 - **Real harness drivers.** The Claude and Codex drivers are validated by
   pure-function unit tests plus manual `//go:build harness` integration
   tests against live binaries; CI does not run the latter, so CI green means
   "dispatcher and drivers correct as specified," not "verified against
-  today's Claude/Codex."
+  today's Claude/Codex." The Codex driver's successful-turn path has not
+  been validated live — only its credential-safe 401 classification has.
+- **Manifest verification scope.** A supplied agent manifest is verified at
+  `tenon run`'s session start, not re-verified per turn within that
+  session; the recurring `schedule run` path does re-verify each
+  occurrence.
 - **Not in scope (no ADR).** Evaluations, scoring, transcript retention,
   selection among revisions, lineage tracking, a marketplace, and network
   acquisition of components; the conversational channel product stays in
