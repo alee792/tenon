@@ -3,6 +3,9 @@
 - Status: accepted
 - Completes: [ADR 0012](0012-stage-agent-filesystems-for-downstream-oci-builds.md)'s
   execution-closure commitment for authored tools
+- Re-decides: prototype ADR 0004's tool-host execution mechanics
+  (alee792/hctl), the record its rebuild notes deliberately left for
+  re-decision on new evidence; ports staging intent from prototype ADR 0027
 
 ## Decision
 
@@ -37,12 +40,16 @@ build* tools. Concretely:
   time; the venv machinery — `pyvenv.cfg`, activation scripts, the
   interpreter symlink — never exists, so nothing points outside the closure.
 - **TypeScript** follows the same contract; its rendering is a bounded spike
-  (per tenet 4) with `deno compile` as the primary candidate — the direct
-  analog of the Go host, with tool modules passed via `--include` — and
-  copying the single self-contained `deno` executable into the closure as
-  the fallback. Both satisfy the contract; the spike picks between them.
-  Until it lands, staging *refuses* a TypeScript-bearing agent with a named
-  diagnostic rather than emitting a tree that cannot run.
+  (per tenet 4) with `deno compile` as the candidate — the direct analog of
+  the Go host, with tool modules passed via `--include` — and the
+  prototype-proven fallback of copying the single self-contained `deno`
+  executable into the closure beside a pruned, cached-only `DENO_DIR`
+  (hctl served a real tool call this way from a clean base image with no
+  network; its prune list, including Deno's `node_compat_bin` link back to
+  the build-time executable, is the starting point). Both satisfy the
+  contract; the spike picks between them. Until it lands, staging *refuses*
+  a TypeScript-bearing agent with a named diagnostic rather than emitting a
+  tree that cannot run.
 
 Deno-as-runtime and CPython are runtime; `uv`, the Go toolchain, and
 deno-as-compiler are build tools and stay in the build image, per ADR 0012's
@@ -75,7 +82,9 @@ already performs — deleting the runtime's internal convenience symlinks and
 rewriting the enumerated files that embed an absolute preparation path (the
 CPython `_sysconfigdata` module; the generated Go host's `go.mod` replace
 directive). After normalization, staging fails closed if any non-regular
-entry or any build-machine path survives anywhere in the tree. `copyTree`'s
+entry or any build-machine path survives anywhere in the tree — the
+prototype's `rejectBuildPaths` scan, widened from generated configuration to
+the whole tree. `copyTree`'s
 symlink prohibition and the manifest's regular-files-only model are
 unchanged: the closure is made symlink-free rather than the guarantee made
 symlink-tolerant.
@@ -86,7 +95,9 @@ honors that record — the same owner-checked file serving already trusts —
 instead of assuming the workspace cache layout. A staged tree whose closure
 is unreachable from its own apply record is a staging bug by definition,
 and the acceptance tests for this decision serve tools *from* a staged tree
-rather than asserting files exist inside one.
+rather than asserting files exist inside one — ultimately in the prototype's
+proof shape: a per-language probe agent staged onto the clean documented
+base, its tool called over MCP with networking disabled.
 
 ## Context
 
@@ -105,6 +116,22 @@ one whose closure was accidentally self-contained. ADR 0012 already
 committed staging to carry "the union of discovered language-runtime
 requirements"; this decision makes that commitment executable by defining
 what a language-runtime closure *is*.
+
+The prototype already proved the hard parts and recorded the diagnosis.
+hctl's ADR 0027 names raw caches as insufficient in exactly these terms —
+receipts binding absolute executables, Python environments encoding their
+installation location, platform-specific hosts — and its acceptance script
+served real MCP tool calls in all three languages from a clean base image
+with no build toolchain and no network, using a checksum-pinned standalone
+CPython enforced at a canonical path, materialized symlinks, a rewritten
+`pyvenv.cfg`, and a staged-tree scan for surviving build paths. Two things
+it did not solve, and this decision corrects rather than ports: its closure
+was split between `/opt` runtimes and the workspace cache, joined by a
+receipt of absolute paths — the ancestor of the unreachable-closure defect —
+where this decision requires one self-contained directory; and it staged
+`uv` into every Python image and asserted its presence in acceptance while
+the runtime path never executed it, an acquisition tool riding in the
+closure against its own stated rule.
 
 Alternatives evaluated and rejected on evidence: `uv venv --relocatable`
 rewrites activation scripts and entry-point shebangs but leaves the
@@ -133,5 +160,9 @@ ADR 0012 already records that minimization is deferred, and that note now
 covers a larger, honest number. Preparation on a network-restricted machine
 needs the pinned interpreter artifact available through whatever channel
 supplies its other pinned inputs; the build-image journey already assumes
-this. Until each language's rendering lands, staging refuses that language
+this. The agent manifest's tool-runtime pins, which the
+distilled specification inherited as Deno, uv, and Go versions, gain the
+interpreter identity itself once the interpreter is the pinned artifact;
+`uv` remains pinned as a preparation input, no longer implied at serve
+time. Until each language's rendering lands, staging refuses that language
 with a named diagnostic — a smaller true claim over a broader broken one.
