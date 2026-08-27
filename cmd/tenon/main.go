@@ -541,6 +541,45 @@ func toolConfig(p *agentproject.Project, workspace, cacheRoot string) (toolrunti
 	}, nil
 }
 
+// closureCacheRoot resolves the tool cache root serving should read from: the
+// staged closure root the apply record names, when present (ADR 0021), or ""
+// to fall back to the ordinary workspace-cache layout toolConfig otherwise
+// uses. A staged apply record's closure_root is recorded relative to the
+// workspace, so serving from a staged tree finds the closure whether the
+// tree sits at its canonical container paths or, in a credential-free test,
+// at some other physical prefix.
+func closureCacheRoot(workspace, harnessName string) (string, error) {
+	ws, err := filepath.Abs(workspace)
+	if err != nil {
+		return "", fmt.Errorf("resolving workspace: %w", err)
+	}
+	record, err := apply.RecordFor(ws, harnessName)
+	if err != nil {
+		return "", fmt.Errorf("reading the apply record: %w", err)
+	}
+	if record == nil || record.ClosureRoot == "" {
+		return "", nil
+	}
+	rel := filepath.FromSlash(record.ClosureRoot)
+	if filepath.IsAbs(rel) {
+		return "", fmt.Errorf("the apply record's closure_root must be relative to the workspace, got %q", record.ClosureRoot)
+	}
+	joined := filepath.Join(ws, rel)
+	// The closure and the workspace are published as siblings under one
+	// tree root (ADR 0021: /opt/tenon/runtimes/tools and /workspace both sit
+	// under /), so closure_root legitimately climbs out of the workspace to
+	// reach that sibling — plain filepath.IsLocal would refuse that
+	// altogether. What it may never do is climb further: bound the resolved
+	// path to the workspace's own parent directory, so a corrupted or
+	// hand-edited record cannot walk it anywhere else on disk.
+	boundary := filepath.Dir(ws)
+	rel, err = filepath.Rel(boundary, joined)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("the apply record's closure_root %q escapes the workspace root", record.ClosureRoot)
+	}
+	return joined, nil
+}
+
 // prepareTools prepares and inspects the project's authored tools, reporting
 // every failure as a diagnostic. A project without tools prepares nothing, so
 // apply and validate behave exactly as before for it.
@@ -634,7 +673,12 @@ func runMCPServe(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// One host per authored language starts once and stays alive for the
 	// whole session. A project without tools opens no runtime at all.
 	if len(p.Tools) > 0 {
-		toolCfg, err := toolConfig(p, workspace, "")
+		cacheRoot, err := closureCacheRoot(workspace, driver.Harness())
+		if err != nil {
+			fmt.Fprintln(stderr, "tenon mcp serve:", err)
+			return 1
+		}
+		toolCfg, err := toolConfig(p, workspace, cacheRoot)
 		if err != nil {
 			fmt.Fprintln(stderr, "tenon mcp serve:", err)
 			return 1
