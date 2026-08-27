@@ -60,19 +60,17 @@ awaits an Anthropic terms review before it may be published at all,
 independent of pin state.
 
 The actual container acceptance evidence for v0.1.0 is the per-language
-probe gate issue #17 defines: a probe script in issue #17's shape
-(landing separately, from a parallel worktree, and not present on this
-checklist's writing base) that stages each supported language's tool
-agent onto the documented compatible base (`docs/harness-images.md`'s
+probe gate issue #17 defines: `scripts/check-staged-images.sh`
+(documented in `docs/staged-acceptance.md`), which stages each supported
+language's tool agent onto the documented compatible base (`docs/harness-images.md`'s
 pinned Ubuntu LTS/glibc/uid 65532 contract), runs it with `--network
 none`, and proves a real tool call round-trips — proof that a staged
 tree actually serves, independent of either harness image ever being
-published. Once it lands, reference it here by name as this step's
-actual gate and run it in place of the placeholder Docker builds above.
-Until it lands or the `images/inputs.json` pins are resolved (whichever
-comes first), this step is satisfied by recording that state explicitly
-in the release notes rather than by a green check, and does not block
-step 8.
+published. Run it on a Docker-capable machine and record the transcript
+per `docs/staged-acceptance.md`. If no Docker-capable machine is
+available before the tag, this step is satisfied by recording that state
+explicitly in the release notes rather than by a green check, and does
+not block step 8.
 
 ## 4. Codex driver live validation
 
