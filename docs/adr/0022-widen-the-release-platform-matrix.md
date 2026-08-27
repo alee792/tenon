@@ -24,10 +24,11 @@ Everything ADR 0005 bound beyond the platform name still binds: there is no
 configuration still records the resolved absolute path to the installed
 executable, so moving the binary still requires `tenon apply` again.
 
-Release archives are byte-identical for a given tag and Go toolchain: build
-timestamps derive from the tagged commit rather than the clock, the archive
-records a fixed member order and uid/gid, and the gzip wrapper omits its own
-name and mtime. This is not a documentation claim; it is a CI job —
+Release archives are byte-identical for a given tag and Go toolchain, built
+on the GNU-tar host `scripts/release.sh` requires (it hard-fails on bsdtar):
+build timestamps derive from the tagged commit rather than the clock, the
+archive records a fixed member order and uid/gid, and the gzip wrapper omits
+its own name and mtime. This is not a documentation claim; it is a CI job —
 "Release build is reproducible" in `.github/workflows/ci.yml` — that builds
 the real release path twice against a throwaway tag and fails if the two
 checksum manifests differ.
@@ -40,13 +41,15 @@ wider platform matrix pending separate, evidence-backed justification.
 That evidence now exists on two fronts.
 
 First, the shape of tenon's own deployment target is Linux. ADR 0012 stages
-agent filesystems for downstream OCI builds, and ADR 0021 defines the
-self-contained runtime closure those images serve from; both describe a
-Linux base image, and neither has a Darwin analogue. CI itself runs on
-`ubuntu-24.04`. A release that never builds or exercises a `linux-amd64` (the
-common OCI base and CI runner architecture) or `linux-arm64` (the common
-managed-runtime target) binary ships an artifact its own build system never
-proves works, while claiming Linux is where staged images run.
+agent filesystems onto "a documented compatible base image" targeting "the
+source image's own OS, architecture, and ABI" without naming an OS, but
+ADR 0021 makes the Linux commitment explicit: it defines the self-contained
+runtime closure those images serve from in terms of a Linux base and a
+`cpython-*-linux-*` interpreter ABI. CI itself runs on `ubuntu-24.04`. A
+release that never builds or exercises a `linux-amd64` (the common OCI base
+and CI runner architecture) or `linux-arm64` (the common managed-runtime
+target) binary ships an artifact its own build system never proves works,
+while claiming Linux is where staged images run.
 
 Second, `scripts/release.sh` and the CI reproducibility job already build
 and verify all three platforms as a proven, checked-in implementation: the

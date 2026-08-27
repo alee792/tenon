@@ -466,15 +466,16 @@ permission to redistribute that harness.
 
 ## Installation and distribution
 
-The first supported platform is `darwin-arm64`. The exact `vX.Y.Z` tag names
-`tenon_X.Y.Z_darwin_arm64.tar.gz` (one executable at the archive root) and its
-`SHA256SUMS` manifest; the user verifies, extracts to a stable `PATH`
-location, and runs `tenon apply`. Generated MCP configuration records the
-resolved absolute executable path, so moving the binary requires reapplying.
-`go install` is not a supported end-user journey, and there is no `tenon
-package` command: agent source and lockfiles are inputs to `apply`, while
-generated hosts and dependency environments remain disposable
-workspace-local caches.
+The supported platforms are `darwin-arm64`, `linux-amd64`, and
+`linux-arm64`. The exact `vX.Y.Z` tag names, for each platform,
+`tenon_X.Y.Z_<os>_<arch>.tar.gz` (one executable at the archive root), plus
+one `tenon_X.Y.Z_SHA256SUMS` manifest covering every archive of that
+release; the user verifies, extracts to a stable `PATH` location, and runs
+`tenon apply`. Generated MCP configuration records the resolved absolute
+executable path, so moving the binary requires reapplying. `go install` is
+not a supported end-user journey, and there is no `tenon package` command:
+agent source and lockfiles are inputs to `apply`, while generated hosts and
+dependency environments remain disposable workspace-local caches.
 
 ## Deferred bets
 
