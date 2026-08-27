@@ -26,8 +26,8 @@ authorized work:
 
 - Only an exact `vX.Y.Z` tenon tag would publish an image, reproducing the
   prototype's release discipline: a read-only build-and-check job proves the
-  image, a downstream release step with narrower authority publishes it, and
-  no moving `latest`, major, or minor tag is ever published.
+  image, a separate, environment-gated release step publishes it, and no
+  moving `latest`, major, or minor tag is ever published.
 - The Codex image requires a current review of OpenAI's redistribution
   terms and explicit human authorization before its first publication, per
   [ADR 0012](adr/0012-stage-agent-filesystems-for-downstream-oci-builds.md)'s
@@ -114,7 +114,14 @@ Concretely, the contract is:
   compiled Go host, standalone CPython, and Deno executable are built or
   fetched for glibc and will not run against musl's dynamic linker.
 - **Certificate bundle.** `/etc/ssl/certs/ca-certificates.crt` populated
-  (Ubuntu's raw layer does not ship one); `SSL_CERT_FILE` pointed at it.
+  (Ubuntu's raw layer does not ship one); `SSL_CERT_FILE` pointed at it. Its
+  provenance is undecided: the prototype sourced it from staged CPython's
+  vendored `certifi` package, recorded as `certificate_source_component`,
+  but tenon's composition differs — CPython arrives via `uv` per ADR 0021,
+  not as a directly staged component — so the source component must be
+  re-decided before the first real build; `images/inputs.json` records this
+  as `target.runtime.certificate_source_component:
+  "TODO-decide-before-first-build"`.
 - **Writable paths.** `/workspace` and `/home/tenon` are writable by the
   runtime identity below; a deployment that mounts an empty volume over
   either path, hiding the staged files it must preserve, is not a supported

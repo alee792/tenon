@@ -18,6 +18,7 @@
         "/usr/bin/id"
       ],
       "certificate_bundle": "/etc/ssl/certs/ca-certificates.crt",
+      "certificate_source_component": "TODO-decide-before-first-build",
       "required_shared_libraries": [
         "ld-linux-x86-64.so.2",
         "libc.so.6",
@@ -63,7 +64,7 @@
       "format": "zip",
       "license": "MIT",
       "publication_gate": "open",
-      "note": "Forward-looking: staged only once ADR 0021's TypeScript rendering lands; a prepare-time build/compile tool, per ADR 0021 the closure carries either the compiled host or the runtime executable, never the compiler as a serve-time dependency."
+      "note": "Prepare-time build tool per ADR 0021 (deno-as-compiler stays in the image); the deno-as-runtime executable enters the staged closure only once ADR 0021's TypeScript rendering lands."
     },
     "go": {
       "version": "1.26.5",
