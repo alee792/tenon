@@ -366,11 +366,21 @@ func TestStaleToolCacheFailsServeClosed(t *testing.T) {
 }
 
 // requireToolchain skips a leg of the polyglot journey when its toolchain is
-// absent, naming exactly what is missing.
+// absent, naming exactly what is missing. Locally that is a graceful
+// degradation: the host protocol, its bounds, and the Go tool journey are
+// still proven without it. In CI a skip here would be silent data loss —
+// green would no longer mean the TypeScript and Python closures executed —
+// so TENON_REQUIRE_TOOLCHAINS=1 (set by ci.yml) turns the same gap into a
+// failure that names the missing toolchain, keeping "CI is green" and "the
+// polyglot paths ran" the same claim.
 func requireToolchain(t *testing.T, name string) string {
 	t.Helper()
 	found, err := exec.LookPath(name)
 	if err != nil {
+		if os.Getenv("TENON_REQUIRE_TOOLCHAINS") == "1" {
+			t.Fatalf("%s is not on PATH but TENON_REQUIRE_TOOLCHAINS=1 requires it; "+
+				"the polyglot tool journey needs deno, uv, and go.", name)
+		}
 		t.Skipf("%s is not on PATH; the polyglot tool journey needs deno, uv, and go. "+
 			"The host protocol, its bounds, and the Go tool journey are proven without it.", name)
 	}
@@ -379,11 +389,18 @@ func requireToolchain(t *testing.T, name string) string {
 
 // lockDependencies resolves the fixture's own locked dependencies with its
 // native toolchain, exactly as an author would before committing the lock.
+// A failure here (cold cache, no network) is the same silent-skip risk as a
+// missing toolchain binary, so it is gated the same way: TENON_REQUIRE_TOOLCHAINS=1
+// turns it into a named failure instead of letting the test quietly skip.
 func lockDependencies(t *testing.T, dir string, name string, args ...string) {
 	t.Helper()
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
 	if output, err := cmd.CombinedOutput(); err != nil {
+		if os.Getenv("TENON_REQUIRE_TOOLCHAINS") == "1" {
+			t.Fatalf("%s %s could not resolve the fixture's locked dependencies but TENON_REQUIRE_TOOLCHAINS=1 requires it: %v\n%s",
+				name, strings.Join(args, " "), err, output)
+		}
 		t.Skipf("%s could not resolve the fixture's locked dependencies (a warm cache or network is needed): %v\n%s",
 			name, err, output)
 	}
