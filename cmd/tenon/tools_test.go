@@ -366,11 +366,21 @@ func TestStaleToolCacheFailsServeClosed(t *testing.T) {
 }
 
 // requireToolchain skips a leg of the polyglot journey when its toolchain is
-// absent, naming exactly what is missing.
+// absent, naming exactly what is missing. Locally that is a graceful
+// degradation: the host protocol, its bounds, and the Go tool journey are
+// still proven without it. In CI a skip here would be silent data loss —
+// green would no longer mean the TypeScript and Python closures executed —
+// so TENON_REQUIRE_TOOLCHAINS=1 (set by ci.yml) turns the same gap into a
+// failure that names the missing toolchain, keeping "CI is green" and "the
+// polyglot paths ran" the same claim.
 func requireToolchain(t *testing.T, name string) string {
 	t.Helper()
 	found, err := exec.LookPath(name)
 	if err != nil {
+		if os.Getenv("TENON_REQUIRE_TOOLCHAINS") == "1" {
+			t.Fatalf("%s is not on PATH but TENON_REQUIRE_TOOLCHAINS=1 requires it; "+
+				"the polyglot tool journey needs deno, uv, and go.", name)
+		}
 		t.Skipf("%s is not on PATH; the polyglot tool journey needs deno, uv, and go. "+
 			"The host protocol, its bounds, and the Go tool journey are proven without it.", name)
 	}
