@@ -25,8 +25,14 @@ If any of these stops being true, the product is no longer tenon:
 **The measure.** Empty directory to a working agent inside the author's
 harness in five minutes; the same folder later runs headless, scheduled,
 or staged without edits; and a revision applies, runs, and attributes to
-its exact configuration without human hands
-([ADR 0018](adr/0018-add-the-revision-leg-to-the-measure.md)).
+its exact configuration without human hands, with its change to the
+agent's capability surface legible before it runs
+([ADR 0018](adr/0018-add-the-revision-leg-to-the-measure.md),
+[ADR 0024](adr/0024-add-observation-to-the-revision-leg.md)). Legible
+means legible to both authors: a person reads a revision's diff and
+understands it because they know what a skill, a tool schema, and a
+budget are, and the leg is met only when the change is legible to the
+consumer that cannot supply that knowledge itself.
 
 **The authors.** The artifact has two — a person, and an improvement loop
 revising an agent's files — and neither outranks the other: a decision

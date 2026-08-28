@@ -6,9 +6,11 @@
   ad-hoc parsing to learn what a revision changed. No comparison code lands
   before that trigger fires; if it never fires, this record is rejected
   with reasons.
-- Depends on: [ADR 0024](0024-add-observation-to-the-revision-leg.md); this
-  record is the mechanism that amendment leaves unspecified, and is void if
-  0024 is rejected.
+- Depends on: [ADR 0024](0024-add-observation-to-the-revision-leg.md),
+  accepted; this record is the mechanism that amendment deliberately leaves
+  unspecified. Accepting the measure's fourth verb does not accept this
+  rendering of it — 0024 binds the outcome, and this record may still be
+  rejected without disturbing it.
 - Builds on: [ADR 0013](0013-bound-authored-projects-with-aggregate-budgets.md),
   [ADR 0018](0018-add-the-revision-leg-to-the-measure.md)
 - Context: [docs/workbench/revision-observability.md](../workbench/revision-observability.md)

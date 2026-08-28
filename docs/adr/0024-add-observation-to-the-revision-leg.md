@@ -1,10 +1,10 @@
 # ADR 0024: Add observation to the revision leg of the measure
 
-- Status: proposed
-- Amends: `docs/north-star.md` — the measure only. This record changes
-  nothing else and proposes no mechanism, so that the change benefiting
-  from the amendment is not the change making it, as the north star
-  requires.
+- Status: accepted
+- Amends: `docs/north-star.md` — the measure only, applied with this
+  record. It changes nothing else and proposes no mechanism, so that the
+  change benefiting from the amendment is not the change making it, as
+  the north star requires.
 - Builds on: [ADR 0018](0018-add-the-revision-leg-to-the-measure.md)
 - Context: [docs/workbench/revision-observability.md](../workbench/revision-observability.md)
 
