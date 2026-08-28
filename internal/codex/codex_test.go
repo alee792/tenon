@@ -49,6 +49,66 @@ func TestGeneratedMCPConfigCeilingIsAnError(t *testing.T) {
 	}
 }
 
+// TestModelPinRendersTopLevelKeyAboveManagedTable proves a pinned Target.Model
+// (ADR 0020) renders as one top-level `model` key in the generated
+// .codex/config.toml, positioned above [mcp_servers.managed] as TOML requires
+// for top-level keys to precede tables.
+func TestModelPinRendersTopLevelKeyAboveManagedTable(t *testing.T) {
+	p := &agentproject.Project{Root: "/src/my-agent", Name: "my-agent"}
+	diags := &diagnostics.List{}
+	files := Driver{}.Generate(p, apply.Target{Workspace: "/ws", Executable: "/bin/tenon", Model: "claude-opus-4"}, diags)
+	if diags.HasErrors() {
+		t.Fatalf("unexpected diagnostics: %v", diags.All())
+	}
+
+	var config string
+	for _, f := range files {
+		if f.Path == ".codex/config.toml" {
+			config = string(f.Content)
+		}
+	}
+	modelIdx := strings.Index(config, `model = "claude-opus-4"`)
+	tableIdx := strings.Index(config, "[mcp_servers.managed]")
+	if modelIdx < 0 || tableIdx < 0 {
+		t.Fatalf("expected both a model key and the managed table: %s", config)
+	}
+	if modelIdx > tableIdx {
+		t.Fatalf("the model key must precede the first table: %s", config)
+	}
+}
+
+// TestNoModelPinLeavesConfigTOMLUnchanged proves an empty Target.Model (no
+// manifest supplied, or a manifest that pins no model) renders
+// .codex/config.toml byte-identical to a target that never carried the Model
+// field at all — the pre-ADR-0020 behavior.
+func TestNoModelPinLeavesConfigTOMLUnchanged(t *testing.T) {
+	p := &agentproject.Project{Root: "/src/my-agent", Name: "my-agent"}
+
+	diagsNoModel := &diagnostics.List{}
+	withoutModel := Driver{}.Generate(p, apply.Target{Workspace: "/ws", Executable: "/bin/tenon"}, diagsNoModel)
+
+	diagsEmptyModel := &diagnostics.List{}
+	withEmptyModel := Driver{}.Generate(p, apply.Target{Workspace: "/ws", Executable: "/bin/tenon", Model: ""}, diagsEmptyModel)
+
+	var a, b []byte
+	for _, f := range withoutModel {
+		if f.Path == ".codex/config.toml" {
+			a = f.Content
+		}
+	}
+	for _, f := range withEmptyModel {
+		if f.Path == ".codex/config.toml" {
+			b = f.Content
+		}
+	}
+	if len(a) == 0 || string(a) != string(b) {
+		t.Fatalf("config.toml without a model pin must be unchanged:\n%s\nvs\n%s", a, b)
+	}
+	if strings.Contains(string(a), "model =") {
+		t.Fatalf("config.toml without a pinned model must carry no model key: %s", a)
+	}
+}
+
 // TestRemoteHeadersWarnForCodex proves declared remote headers, which the
 // generated Codex configuration does not carry, are reported rather than
 // silently dropped, while the url entry itself still renders.

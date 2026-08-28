@@ -48,6 +48,140 @@ func TestGeneratedMCPConfigCeilingIsAnError(t *testing.T) {
 	}
 }
 
+// TestClaudeSettingsGeneratedWhenModelPinnedNoAuthorBase proves a pinned
+// Target.Model with no authored harnesses/claude/.claude/settings.json base
+// generates .claude/settings.json carrying only the model key, with
+// deterministic bytes (ADR 0020).
+func TestClaudeSettingsGeneratedWhenModelPinnedNoAuthorBase(t *testing.T) {
+	p := &agentproject.Project{Root: "/src/my-agent", Name: "my-agent"}
+	diags := &diagnostics.List{}
+	files := Driver{}.Generate(p, apply.Target{Workspace: "/ws", Executable: "/bin/tenon", Model: "claude-opus-4"}, diags)
+	if diags.HasErrors() {
+		t.Fatalf("unexpected diagnostics: %v", diags.All())
+	}
+
+	var got []byte
+	count := 0
+	for _, f := range files {
+		if f.Path == claudeSettingsRelPath {
+			got = f.Content
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("expected exactly one %s, found %d", claudeSettingsRelPath, count)
+	}
+	want := "{\n  \"model\": \"claude-opus-4\"\n}\n"
+	if string(got) != want {
+		t.Fatalf("settings.json = %q, want %q", got, want)
+	}
+}
+
+// TestClaudeSettingsInjectsModelOntoAuthorBase proves a pinned Target.Model
+// injects onto an authored base under harnesses/claude/.claude/settings.json:
+// the author's other keys are preserved, "model" is set, and the raw
+// authored base is dropped from the passthrough so exactly one
+// .claude/settings.json is emitted.
+func TestClaudeSettingsInjectsModelOntoAuthorBase(t *testing.T) {
+	p := &agentproject.Project{
+		Root: "/src/my-agent",
+		Name: "my-agent",
+		HarnessFiles: map[string][]agentproject.HarnessFile{
+			"claude": {{RelPath: claudeSettingsRelPath, Content: []byte(`{"permissions":{"allow":["Bash"]},"model":"old-model"}`)}},
+		},
+	}
+	diags := &diagnostics.List{}
+	files := Driver{}.Generate(p, apply.Target{Workspace: "/ws", Executable: "/bin/tenon", Model: "claude-opus-4"}, diags)
+	if diags.HasErrors() {
+		t.Fatalf("unexpected diagnostics: %v", diags.All())
+	}
+
+	var matches []apply.GeneratedFile
+	for _, f := range files {
+		if f.Path == claudeSettingsRelPath {
+			matches = append(matches, f)
+		}
+	}
+	if len(matches) != 1 {
+		t.Fatalf("expected exactly one %s, found %d: %+v", claudeSettingsRelPath, len(matches), matches)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(matches[0].Content, &got); err != nil {
+		t.Fatalf("generated settings.json is not valid JSON: %v", err)
+	}
+	if got["model"] != "claude-opus-4" {
+		t.Fatalf("model = %v, want overridden to claude-opus-4", got["model"])
+	}
+	perms, ok := got["permissions"].(map[string]any)
+	if !ok || perms["allow"] == nil {
+		t.Fatalf("the author's other keys must be preserved: %+v", got)
+	}
+}
+
+// TestClaudeSettingsInvalidAuthorJSONFailsClosed proves invalid JSON in the
+// authored base fails with claude.settings.invalid before any settings.json
+// is generated, rather than silently dropping or passing through the broken
+// base.
+func TestClaudeSettingsInvalidAuthorJSONFailsClosed(t *testing.T) {
+	p := &agentproject.Project{
+		Root: "/src/my-agent",
+		Name: "my-agent",
+		HarnessFiles: map[string][]agentproject.HarnessFile{
+			"claude": {{RelPath: claudeSettingsRelPath, Content: []byte(`{not valid json`)}},
+		},
+	}
+	diags := &diagnostics.List{}
+	files := Driver{}.Generate(p, apply.Target{Workspace: "/ws", Executable: "/bin/tenon", Model: "claude-opus-4"}, diags)
+
+	found := false
+	for _, d := range diags.All() {
+		if d.ID == "claude.settings.invalid" && d.Severity == diagnostics.Error {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected an error claude.settings.invalid, got %v", diags.All())
+	}
+	for _, f := range files {
+		if f.Path == claudeSettingsRelPath {
+			t.Fatalf("no settings.json may be generated when the author base fails to parse: %+v", f)
+		}
+	}
+}
+
+// TestClaudeSettingsPassthroughUnchangedWithoutModel proves an unpinned
+// Target.Model leaves an authored .claude/settings.json passing through
+// byte-for-byte exactly as before ADR 0020: no injection, no generated
+// settings.json.
+func TestClaudeSettingsPassthroughUnchangedWithoutModel(t *testing.T) {
+	authored := []byte(`{"permissions":{"allow":["Bash"]}}`)
+	p := &agentproject.Project{
+		Root: "/src/my-agent",
+		Name: "my-agent",
+		HarnessFiles: map[string][]agentproject.HarnessFile{
+			"claude": {{RelPath: claudeSettingsRelPath, Content: authored}},
+		},
+	}
+	diags := &diagnostics.List{}
+	files := Driver{}.Generate(p, apply.Target{Workspace: "/ws", Executable: "/bin/tenon"}, diags)
+	if diags.HasErrors() {
+		t.Fatalf("unexpected diagnostics: %v", diags.All())
+	}
+
+	var matches []apply.GeneratedFile
+	for _, f := range files {
+		if f.Path == claudeSettingsRelPath {
+			matches = append(matches, f)
+		}
+	}
+	if len(matches) != 1 {
+		t.Fatalf("expected exactly one %s, found %d", claudeSettingsRelPath, len(matches))
+	}
+	if string(matches[0].Content) != string(authored) {
+		t.Fatalf("settings.json = %q, want byte-identical authored %q", matches[0].Content, authored)
+	}
+}
+
 func projectWithConnection(name, url, context string) *agentproject.Project {
 	return &agentproject.Project{
 		Root:         "/src/my-agent",

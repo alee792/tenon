@@ -168,16 +168,19 @@ approval, authentication, discovery, calls, and effects. Name collisions with
 Authors need not hand-edit native configuration:
 
 ```text
-tenon connection add AGENT NAME --package PACKAGE --capability CAPABILITY [--context TEXT]
-tenon connection add AGENT NAME --url HTTPS_URL [--context TEXT]
-tenon connection status AGENT [NAME]
-tenon connection remove AGENT NAME
+tenon connection add AGENT NAME --url HTTPS_URL [--context TEXT] [--manifest PATH]
+tenon connection status AGENT [NAME] [--manifest PATH]
+tenon connection remove AGENT NAME [--manifest PATH]
 ```
 
-Commands take the exact positional agent root, never search ancestors or
-choose a harness, and finish by directing the author to run `tenon apply` for
-each intended workspace. There is no update command; the Markdown is ordinary
-versioned source.
+Commands take the exact positional agent root, proven either way the
+Instructions section names — so a supplied manifest proves an
+instructions-free root here exactly as it does for validate and apply — never
+search ancestors or choose a harness, and finish by directing the author to
+run `tenon apply` for each intended workspace. There is no update command;
+the Markdown is ordinary versioned source. Authoring an installed target
+through `connection add` is not available yet — the file is written by hand,
+which every other command here treats identically (see Known limitations).
 
 The GitHub connection is the canonical installed target: the official
 `github/github-mcp-server` executable, installed as an integration package,
@@ -245,11 +248,14 @@ Claude receives `CLAUDE.md`, `.mcp.json`, `.claude/skills/`, and
 `.agents/skills/`, and `.codex/agents/`. Generated files are visibly
 tool-owned and disposable. Apply refuses to overwrite hand-authored native
 files or any tenon-owned file modified since the previous apply, and
-reapplying identical source is deterministic. All authored inputs join one
-source fingerprint recorded with the apply, so stale or edited generated
-setup fails closed. Codex project trust remains the user's native decision;
-apply never edits global harness configuration or trusts a project on the
-user's behalf.
+reapplying identical source is deterministic. An explicit `--discard-local`
+flag lets apply overwrite a tenon-owned file modified since the previous
+apply instead of refusing it; it never widens the hand-authored-file
+refusal; a file apply never recorded as its own is refused with or without
+the flag. All authored inputs join one source fingerprint recorded with the
+apply, so stale or edited generated setup fails closed. Codex project trust
+remains the user's native decision; apply never edits global harness
+configuration or trusts a project on the user's behalf.
 
 `tenon validate AGENT --harness <claude|codex>` runs the same validation as
 apply without writing anything: it loads and bounds the project, checks
@@ -277,6 +283,21 @@ mode emits the same per-file entries that feed the rollup (path, content
 hash, executable bit) followed by one closing object carrying the
 rolled-up fingerprint, in the same "stream of objects, closing summary
 line" shape.
+
+`tenon drift AGENT --workspace WORKSPACE --harness <claude|codex>` reports
+whether a workspace still carries exactly what a fresh apply would produce,
+writing nothing at all: it regenerates every tenon-owned file in memory on
+apply's own generation path, then compares each against both the workspace
+and the apply record — the same ownership rule apply's conflict check
+enforces, not merely a byte comparison against the fresh regeneration — and
+reports it unchanged, modified on disk (with a unified diff), missing, or
+stale (recorded by a previous apply but no longer generated). Drift
+deliberately never adopts a workspace edit back into source: generation is
+lossy in reverse, so tenon never guesses author intent from a diff. Drift
+only shows the diff; the author edits source and reapplies, optionally with
+`--discard-local` to explicitly discard the workspace edit. Its
+machine-readable mode carries the same stable per-finding identifiers and
+diagnostics discipline as validate and apply.
 
 ## Agent manifest
 
@@ -440,17 +461,25 @@ complete runnable filesystem tree at canonical paths for an existing OCI
 builder:
 
 ```dockerfile
-FROM <tenon harness image> AS build
+FROM ghcr.io/alee792/tenon/codex:${TENON_VERSION} AS build   # not yet published; see docs/harness-images.md
 COPY . /agent
 RUN tenon stage /agent --harness codex --output /out/agent
 
-FROM DOCUMENTED_COMPATIBLE_BASE
+FROM docker.io/library/ubuntu:24.04
 COPY --from=build /out/agent/opt/ /opt/
 COPY --from=build --chown=65532:65532 /out/agent/workspace/ /workspace/
 COPY --from=build --chown=65532:65532 /out/agent/home/tenon/ /home/tenon/
 USER 65532:65532
 ENTRYPOINT ["/opt/tenon/bin/agent-entrypoint"]
 ```
+
+`ghcr.io/alee792/tenon/codex` is not yet published; build the harness image
+locally from [`images/codex/Dockerfile`](../images/codex/Dockerfile) (or
+[`images/claude/Dockerfile`](../images/claude/Dockerfile)) instead. The
+final base is a pinned Ubuntu LTS platform manifest, `linux/amd64`, glibc —
+never Alpine or another musl base without a separately built musl payload.
+See [harness images](harness-images.md) for the full compatible-base
+contract, both journeys, and what gates publication.
 
 The staged tree carries tenon, the selected harness, immutable agent source,
 the generated integration and apply record, an entrypoint, an artifact
@@ -466,15 +495,16 @@ permission to redistribute that harness.
 
 ## Installation and distribution
 
-The first supported platform is `darwin-arm64`. The exact `vX.Y.Z` tag names
-`tenon_X.Y.Z_darwin_arm64.tar.gz` (one executable at the archive root) and its
-`SHA256SUMS` manifest; the user verifies, extracts to a stable `PATH`
-location, and runs `tenon apply`. Generated MCP configuration records the
-resolved absolute executable path, so moving the binary requires reapplying.
-`go install` is not a supported end-user journey, and there is no `tenon
-package` command: agent source and lockfiles are inputs to `apply`, while
-generated hosts and dependency environments remain disposable
-workspace-local caches.
+The supported platforms are `darwin-arm64`, `linux-amd64`, and
+`linux-arm64`. The exact `vX.Y.Z` tag names, for each platform,
+`tenon_X.Y.Z_<os>_<arch>.tar.gz` (one executable at the archive root), plus
+one `tenon_X.Y.Z_SHA256SUMS` manifest covering every archive of that
+release; the user verifies, extracts to a stable `PATH` location, and runs
+`tenon apply`. Generated MCP configuration records the resolved absolute
+executable path, so moving the binary requires reapplying. `go install` is
+not a supported end-user journey, and there is no `tenon package` command:
+agent source and lockfiles are inputs to `apply`, while generated hosts and
+dependency environments remain disposable workspace-local caches.
 
 ## Deferred bets
 
@@ -560,6 +590,72 @@ credential-free tests (fake harness processes; no live model calls) prove:
 12. Validate reports the same failures as apply without mutating anything,
     and its structured diagnostics carry stable identifiers and authored
     paths that match apply's own failures.
+
+## Known limitations
+
+Recorded here rather than hidden, per the failure and safety principle
+above:
+
+- **`connection add` authors remote targets only.** The installed
+  package-and-capability target is fully specified, validated, resolved, and
+  emitted for both harnesses; only the authoring convenience is missing, so
+  `tenon connection add --package ... --capability ...` is refused with a
+  diagnostic rather than silently writing a file it cannot prove. Authors
+  write `connections/<name>.md` by hand — the two-line frontmatter shown in
+  [the native GitHub MCP journey](github-native-mcp.md) — and `connection
+  status`, `validate`, and `apply` treat the result exactly as they treat a
+  generated one.
+- **Staging.** Per [ADR 0021](adr/0021-execute-authored-tools-from-a-self-contained-closure.md),
+  the native harness runtime is not yet bundled into the staged tree
+  (expected on the base image), and the authored-tool execution closure is
+  staged whole rather than minimized, both recorded in the staging artifact
+  manifest. Go, Python, and TypeScript authored tools all stage and serve
+  from the staged tree today: the closure is a self-contained Go host
+  binary, a pinned standalone CPython interpreter with the project's locked
+  dependencies laid flat beside it (no venv), or the `deno` executable
+  itself beside a pruned, cached-only `DENO_DIR` (issue #16), reachable from
+  the staged apply record's `closure_root`. The container gate is manual: CI does not build or run
+  a staged image, so run
+  [`scripts/check-staged-images.sh`](../scripts/check-staged-images.sh)
+  (see [`docs/staged-acceptance.md`](staged-acceptance.md)) before a
+  release.
+- **Python and TypeScript runtimes are fetched once per machine, not once
+  per prepare.** `tenon validate` and `tenon apply` for a Python-tool agent
+  install the pinned standalone CPython interpreter (`uv python install`,
+  roughly 90MB) through a shared, content-addressed runtime cache under
+  `os.UserCacheDir()/tenon/runtimes/` (issue #38): the first agent on a
+  machine to resolve a given interpreter identity installs, normalizes, and
+  locks it down read-only, and every later resolution of that same identity
+  — any other agent, or `validate`'s own throwaway prepare, or a repeat
+  `apply` — hardlinks it out rather than reinstalling. The `deno` executable
+  TypeScript tools carry into their closure is shared the same way, keyed by
+  its own content hash. A network-restricted machine still needs the pinned
+  runtime artifact reachable through whatever channel supplies tenon's other
+  pinned inputs the first time any agent resolves a given version; every
+  later prepare of any agent needs no network for that runtime at all. A
+  `requires-python` constraint in `pyproject.toml` installs the *floor* of
+  the range (`>=3.11,<3.13` installs 3.11, not 3.12); a `.python-version`
+  file, when present, names the version exactly, takes precedence over
+  `requires-python`, and — being an exact pin — can resolve to a cache hit
+  without invoking `uv` at all. What still runs on every prepare regardless
+  of the shared runtime cache: `uv export`/`uv pip install` for a project's
+  own locked Python dependencies (unshared across agents, since independent
+  projects rarely lock identical dependency sets — a stated future
+  extension of issue #38) and `deno check` against a project's own tools.
+- **Real harness drivers.** The Claude and Codex drivers are validated by
+  pure-function unit tests plus manual `//go:build harness` integration
+  tests against live binaries; CI does not run the latter, so CI green means
+  "dispatcher and drivers correct as specified," not "verified against
+  today's Claude/Codex." The Codex driver's successful-turn path has not
+  been validated live — only its credential-safe 401 classification has.
+- **Manifest verification scope.** A supplied agent manifest is verified at
+  `tenon run`'s session start, not re-verified per turn within that
+  session; the recurring `schedule run` path does re-verify each
+  occurrence.
+- **Not in scope (no ADR).** Evaluations, scoring, transcript retention,
+  selection among revisions, lineage tracking, a marketplace, and network
+  acquisition of components; the conversational channel product stays in
+  the prototype.
 
 ## Explicit non-goals
 

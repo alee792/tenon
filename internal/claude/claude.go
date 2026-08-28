@@ -3,6 +3,7 @@
 package claude
 
 import (
+	"bytes"
 	"encoding/json"
 
 	"github.com/alee792/tenon/internal/agentproject"
@@ -22,7 +23,10 @@ func (Driver) Harness() string { return "claude" }
 // instructions-free project generates no always-on surface. Skill resources
 // copy byte-for-byte with their executable intent; SKILL.md carries one
 // inserted ownership marker line. A vendor surface Claude does not document
-// honoring is copied unchanged and warned.
+// honoring is copied unchanged and warned. When a model is pinned (ADR 0020),
+// it also owns .claude/settings.json — injected onto the authored base under
+// harnesses/claude/ when present, generated fresh otherwise; see
+// claudeSettingsFile.
 func (Driver) Generate(p *agentproject.Project, target apply.Target, diags *diagnostics.List) []apply.GeneratedFile {
 	connections := acceptedConnections(p, diags)
 	resolved := agentproject.ResolveInstalledConnections(p.Connections, target.IntegrationStore, target.TenonVersion, diags)
@@ -63,11 +67,21 @@ func (Driver) Generate(p *agentproject.Project, target apply.Target, diags *diag
 			Content: generated.ClaudeSubagent(sub.Name, sub.Description, sub.Effort, sub.Body),
 		})
 	}
+	settings, skipAuthoredSettings := claudeSettingsFile(p, target, diags)
+	if settings != nil {
+		files = append(files, *settings)
+	}
 	// Harness-specific files copy byte-for-byte with no marker and no
 	// transformation: tenon does not parse their semantics. Only this
 	// harness's own files apply; codex's harness-specific files contribute
-	// nothing here.
+	// nothing here. The authored .claude/settings.json is the one exception:
+	// when a model is pinned, tenon injects it above and drops the raw
+	// passthrough here so the workspace never gets two conflicting writes to
+	// the same path.
 	for _, f := range p.HarnessFiles["claude"] {
+		if skipAuthoredSettings && f.RelPath == claudeSettingsRelPath {
+			continue
+		}
 		files = append(files, apply.GeneratedFile{
 			Path:       f.RelPath,
 			Content:    f.Content,
@@ -75,6 +89,70 @@ func (Driver) Generate(p *agentproject.Project, target apply.Target, diags *diag
 		})
 	}
 	return files
+}
+
+// claudeSettingsRelPath is the workspace-relative destination of Claude's
+// native settings file — both the author's base under
+// harnesses/claude/.claude/settings.json and the generated file apply writes.
+const claudeSettingsRelPath = ".claude/settings.json"
+
+// claudeSettingsFile renders the tenon-owned .claude/settings.json carrying
+// the pinned model (ADR 0020). When target.Model is "", it returns (nil,
+// false): no model is pinned, tenon owns no settings.json, and the author's
+// base (if any) continues to pass through byte-for-byte exactly as before
+// this ADR.
+//
+// When a model is pinned, the author's base under
+// harnesses/claude/.claude/settings.json — if present — is parsed as JSON and
+// injected into: its "model" key is set or overridden, every other key is
+// preserved, and the result is marshaled deterministically (sorted keys,
+// two-space indent, trailing newline). skipAuthored reports true whenever an
+// author base was found, so the caller drops it from the raw harness-file
+// passthrough rather than writing it twice. Invalid author JSON is a
+// claude.settings.invalid diagnostic reported before any mutation; no
+// settings.json is generated for that apply, and the broken base is still
+// dropped from the passthrough since tenon attempted to own it.
+//
+// Absent an author base, the generated file carries only the model key.
+func claudeSettingsFile(p *agentproject.Project, target apply.Target, diags *diagnostics.List) (file *apply.GeneratedFile, skipAuthored bool) {
+	if target.Model == "" {
+		return nil, false
+	}
+	settings := map[string]any{}
+	for _, f := range p.HarnessFiles["claude"] {
+		if f.RelPath != claudeSettingsRelPath {
+			continue
+		}
+		// UseNumber keeps authored numeric literals exact rather than
+		// round-tripping them through float64, so tenon injects the model
+		// without silently reformatting an author's numeric setting.
+		dec := json.NewDecoder(bytes.NewReader(f.Content))
+		dec.UseNumber()
+		if err := dec.Decode(&settings); err != nil {
+			diags.Errorf("claude.settings.invalid", "harnesses/claude/"+claudeSettingsRelPath,
+				"the authored .claude/settings.json is not valid JSON and cannot receive the pinned model: %v", err)
+			return nil, true
+		}
+		skipAuthored = true
+		break
+	}
+	settings["model"] = target.Model
+	// Encode with HTML escaping off so an authored string containing <, >, or &
+	// (for example a hook command using shell operators) is preserved verbatim
+	// rather than rewritten to \u00XX escapes.
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(settings); err != nil {
+		// settings is JSON-decoded values plus one string key; marshaling it
+		// back to JSON cannot fail.
+		diags.Errorf("claude.settings.invalid", claudeSettingsRelPath,
+			"encoding the generated settings.json failed: %v", err)
+		return nil, skipAuthored
+	}
+	// json.Encoder.Encode already appends a trailing newline.
+	return &apply.GeneratedFile{Path: claudeSettingsRelPath, Content: buf.Bytes()}, skipAuthored
 }
 
 // acceptedServers expands every accepted plugin MCP server (ADR 0010) for

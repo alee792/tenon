@@ -7,6 +7,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/alee792/tenon/internal/version"
 )
 
 // stubRecorder stands in for the friction inbox: it counts calls, keeps the
@@ -102,7 +104,7 @@ func TestInitializeAnnouncesTheManagedServer(t *testing.T) {
 		t.Fatalf("capabilities = %#v", initialize["capabilities"])
 	}
 	info := initialize["serverInfo"].(map[string]any)
-	if info["name"] != "tenon-managed" || info["version"] != Version {
+	if info["name"] != "tenon-managed" || info["version"] != version.Version {
 		t.Fatalf("serverInfo = %#v", info)
 	}
 }

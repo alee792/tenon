@@ -33,7 +33,7 @@ func (Driver) Generate(p *agentproject.Project, target apply.Target, diags *diag
 		}
 	}
 	resolvedConnections := agentproject.ResolveInstalledConnections(p.Connections, target.IntegrationStore, target.TenonVersion, diags)
-	config := mcpConfig(target.Executable, p.Root, target.Workspace, resolved, p.Connections, resolvedConnections)
+	config := mcpConfig(target.Executable, p.Root, target.Workspace, target.Model, resolved, p.Connections, resolvedConnections)
 	if len(config) > generated.MaxMCPConfigBytes {
 		diags.Errorf("plugin.mcp.bounds.exceeded", "plugins",
 			"the generated .codex/config.toml may contain at most %d bytes; the accepted plugin MCP servers render %d",
@@ -89,9 +89,11 @@ func (Driver) Generate(p *agentproject.Project, target apply.Target, diags *diag
 }
 
 // mcpConfig renders .codex/config.toml: Codex's project configuration
-// carrying the tenon-owned managed stdio server, launched from the resolved
-// tenon executable against the absolute agent source and workspace, followed
-// by every accepted plugin server in lexical order, followed by every
+// carrying, when a model is pinned (ADR 0020), one top-level `model` key
+// ahead of every table (TOML requires top-level keys before tables), then the
+// tenon-owned managed stdio server, launched from the resolved tenon
+// executable against the absolute agent source and workspace, followed by
+// every accepted plugin server in lexical order, followed by every
 // standalone connection in lexical order — a remote connection as a native
 // url entry, an installed connection that resolved cleanly as a native
 // command/args/cwd/env entry from its launch descriptor, with its required
@@ -102,11 +104,16 @@ func (Driver) Generate(p *agentproject.Project, target apply.Target, diags *diag
 // audits every call that crosses its own boundary; every other generated
 // entry — including every connection, which is startup-optional — is
 // optional to start and keeps Codex's native per-server prompt approval. It
-// is model-facing configuration, so it carries no fingerprint, version, or
-// other setup metadata beyond the paths the servers themselves need.
-func mcpConfig(executable, source, workspace string, servers []agentproject.ResolvedServer, connections []agentproject.Connection, resolvedConnections map[string]*integration.LaunchDescriptor) []byte {
+// is otherwise model-facing configuration, so beyond the model pin it carries
+// no fingerprint, version, or other setup metadata beyond the paths the
+// servers themselves need. model is "" when no manifest pins one, in which
+// case the rendered file is byte-identical to before ADR 0020.
+func mcpConfig(executable, source, workspace, model string, servers []agentproject.ResolvedServer, connections []agentproject.Connection, resolvedConnections map[string]*integration.LaunchDescriptor) []byte {
 	var b strings.Builder
 	b.WriteString(generated.TOMLHeader + "\n")
+	if model != "" {
+		b.WriteString("model = " + generated.TOMLString(model) + "\n\n")
+	}
 	b.WriteString("[mcp_servers.managed]\n")
 	b.WriteString("command = " + generated.TOMLString(executable) + "\n")
 	b.WriteString("args = " + tomlArray([]string{"mcp", "serve", source, "--workspace", workspace, "--harness", "codex"}) + "\n")

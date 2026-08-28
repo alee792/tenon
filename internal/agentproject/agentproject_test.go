@@ -102,6 +102,71 @@ func TestLoadRefusesUnprovenRoot(t *testing.T) {
 	requireErrorID(t, diags, "project.root.unproven")
 }
 
+// TestLoadWithManifestProvesInstructionsFreeRoot proves acceptance item 12's
+// root-proof clause: an instructions-free directory whose supplied manifest
+// fingerprint matches loads as a valid root with an empty always-on surface,
+// while the no-manifest path stays unchanged.
+func TestLoadWithManifestProvesInstructionsFreeRoot(t *testing.T) {
+	root := writeAgent(t, "empty", "")
+
+	// The freshly computed fingerprint is reported by a deliberate mismatch.
+	_, diags, err := LoadWithManifest(root, "sha256:"+strings.Repeat("0", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireErrorID(t, diags, "project.manifest.fingerprint-mismatch")
+	computed := lastFingerprint(t, diags)
+
+	p, diags, err := LoadWithManifest(root, computed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diags.HasErrors() {
+		t.Fatalf("a matching manifest must prove the root: %v", diags.All())
+	}
+	if p == nil {
+		t.Fatal("expected a proven project")
+	}
+	if p.Instructions != nil {
+		t.Fatal("an instructions-free root must carry no instructions (empty always-on surface)")
+	}
+	if p.Fingerprint != computed {
+		t.Fatalf("fingerprint = %q, want %q", p.Fingerprint, computed)
+	}
+
+	// The no-manifest path is unchanged: still refused as unproven.
+	if _, diags, _ := LoadWithManifest(root, ""); !hasErrorID(diags, "project.root.unproven") {
+		t.Fatalf("no-manifest instructions-free path must stay unproven: %v", diags.All())
+	}
+}
+
+// lastFingerprint extracts the directory's computed fingerprint from a
+// fingerprint-mismatch diagnostic's rule text.
+func lastFingerprint(t *testing.T, diags *diagnostics.List) string {
+	t.Helper()
+	for _, d := range diags.All() {
+		if d.ID != "project.manifest.fingerprint-mismatch" {
+			continue
+		}
+		i := strings.LastIndex(d.Rule, "sha256:")
+		if i < 0 {
+			t.Fatalf("mismatch rule carries no fingerprint: %q", d.Rule)
+		}
+		return d.Rule[i:]
+	}
+	t.Fatalf("no fingerprint-mismatch diagnostic: %v", diags.All())
+	return ""
+}
+
+func hasErrorID(diags *diagnostics.List, id string) bool {
+	for _, got := range errorIDs(diags) {
+		if got == id {
+			return true
+		}
+	}
+	return false
+}
+
 func TestLoadRefusesMissingRoot(t *testing.T) {
 	_, diags, err := Load(filepath.Join(t.TempDir(), "absent"))
 	if err != nil {
@@ -173,7 +238,11 @@ func TestLoadRejectsOversizedInstructions(t *testing.T) {
 	requireErrorID(t, diags, "instructions.too-large")
 }
 
-func TestLoadRefusesUnimplementedComponents(t *testing.T) {
+// TestLoadAllowsEmptySchedules proves schedules/ is now an implemented,
+// optional component (ADR 0008): an empty schedules/ directory produces no
+// diagnostics and starts no clock. Every recognized component is implemented,
+// so there is no longer an unimplemented component to refuse.
+func TestLoadAllowsEmptySchedules(t *testing.T) {
 	root := writeAgent(t, "agent", validInstructions)
 	if err := os.Mkdir(filepath.Join(root, "schedules"), 0o755); err != nil {
 		t.Fatal(err)
@@ -182,10 +251,12 @@ func TestLoadRefusesUnimplementedComponents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p != nil {
-		t.Fatal("expected refusal: authored behavior must never be silently dropped")
+	if p == nil || diags.HasErrors() {
+		t.Fatalf("an empty schedules/ must be valid: p=%v diags=%v", p, diags.All())
 	}
-	requireErrorID(t, diags, "component.unsupported")
+	if len(p.Schedules) != 0 {
+		t.Fatalf("expected no schedules, got %d", len(p.Schedules))
+	}
 }
 
 // TestLoadAllowsEmptyConnections proves connections/ is now an implemented,

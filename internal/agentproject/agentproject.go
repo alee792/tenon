@@ -49,6 +49,9 @@ type Project struct {
 	// Connections are the validated standalone native MCP connections
 	// (ADR 0016), sorted by name.
 	Connections []Connection
+	// Schedules are the validated root schedules/ entries (ADR 0008), sorted
+	// by name. Apply validates and fingerprints them but starts no clock.
+	Schedules []Schedule
 	// HarnessFiles are the validated harness-specific files, keyed by
 	// harness name ("claude", "codex") and sorted by RelPath within each.
 	HarnessFiles map[string][]HarnessFile
@@ -77,17 +80,49 @@ type Instructions struct {
 	Body string
 }
 
-// componentDirs are the recognized authored component directories. Until a
-// component is implemented, its presence fails validation: silently dropping
-// authored behavior would pretend the compiled agent is complete.
-var componentDirs = []string{
-	"schedules",
-}
+// componentDirs are recognized authored component directories that are not yet
+// implemented. Until a component is implemented, its presence fails validation:
+// silently dropping authored behavior would pretend the compiled agent is
+// complete. Every recognized component is now implemented, so this list is
+// empty; it stays as the seam for the next unimplemented component.
+var componentDirs = []string{}
 
 // Load validates the agent project at dir. Contract violations are reported
 // on the diagnostics list; the returned error is reserved for environment
 // failures such as unreadable paths.
 func Load(dir string) (*Project, *diagnostics.List, error) {
+	return loadWithProof(dir, "", false)
+}
+
+// LoadWithManifest is Load with an optional supplied agent manifest's expected
+// source fingerprint. When instructions.md is absent, a non-empty expected
+// fingerprint that matches the freshly computed one proves the root; a
+// mismatch fails before mutation. An empty expected fingerprint reproduces
+// Load exactly.
+func LoadWithManifest(dir, expectedFingerprint string) (*Project, *diagnostics.List, error) {
+	return loadWithProof(dir, expectedFingerprint, false)
+}
+
+// LoadForManifestWrite loads a project for the sole purpose of writing its
+// agent manifest, so an instructions-free directory is not refused as
+// unproven: writing the manifest is exactly the act that will prove the root,
+// and the resulting manifest's source fingerprint is what a later apply
+// matches. Every other validation (components, bounds, fingerprint) is
+// unchanged.
+func LoadForManifestWrite(dir string) (*Project, *diagnostics.List, error) {
+	return loadWithProof(dir, "", true)
+}
+
+// loadWithProof is the shared loader behind Load, LoadWithManifest, and
+// LoadForManifestWrite. An agent root is proven either by a present
+// instructions.md or by a supplied manifest whose expected source fingerprint
+// equals the directory's freshly computed fingerprint (docs/product-spec.md
+// "The authored project"). expectedFingerprint carries that supplied
+// fingerprint (empty when none); allowUnproven relaxes the requirement for the
+// manifest-write path, which is itself minting the proving manifest. The caller
+// (cmd/tenon) parses the manifest and passes only its fingerprint string, so
+// this package never imports internal/manifest and no import cycle forms.
+func loadWithProof(dir, expectedFingerprint string, allowUnproven bool) (*Project, *diagnostics.List, error) {
 	diags := &diagnostics.List{}
 
 	root, err := filepath.Abs(dir)
@@ -124,10 +159,11 @@ func Load(dir string) (*Project, *diagnostics.List, error) {
 	instructions, instructionsBytes := loadInstructions(root, diags)
 	p.Instructions = instructions
 
-	if instructions == nil && !diags.HasErrors() {
-		// A supplied agent manifest whose expected fingerprint matches the
-		// directory also proves an agent root; manifests are not implemented
-		// yet, so an instructions-free directory is refused.
+	if instructions == nil && expectedFingerprint == "" && !allowUnproven && !diags.HasErrors() {
+		// With no instructions.md and no supplied manifest, the root has no
+		// proof. A supplied manifest whose expected fingerprint matches the
+		// freshly computed fingerprint proves it instead; that comparison needs
+		// the fingerprint and so runs once it is computed, below.
 		diags.Errorf("project.root.unproven", ".",
 			"a directory is an agent project only when instructions.md is present or a supplied agent manifest matches it; neither proof was found")
 	}
@@ -151,6 +187,9 @@ func Load(dir string) (*Project, *diagnostics.List, error) {
 	connections, connectionInputs := loadConnections(root, pluginServers, diags)
 	p.Connections = connections
 
+	schedules, scheduleInputs := loadSchedules(root, diags)
+	p.Schedules = schedules
+
 	checkNameCollisions(tools, subagents, diags)
 
 	inputs := []sourceInput{
@@ -163,7 +202,19 @@ func Load(dir string) (*Project, *diagnostics.List, error) {
 	inputs = append(inputs, toolInputs...)
 	inputs = append(inputs, harnessInputs...)
 	inputs = append(inputs, connectionInputs...)
+	inputs = append(inputs, scheduleInputs...)
 	p.FingerprintEntries, p.Fingerprint = computeFingerprint(inputs)
+
+	// An instructions-free root is proven only by a supplied manifest whose
+	// expected source fingerprint equals the directory's. A mismatch is drift
+	// reported before any mutation; a match proves the root and generates an
+	// empty always-on surface (already supported when Instructions is nil).
+	if instructions == nil && expectedFingerprint != "" && expectedFingerprint != p.Fingerprint {
+		diags.Errorf("project.manifest.fingerprint-mismatch", ".",
+			"the supplied agent manifest's expected source fingerprint %s does not match the directory's computed fingerprint %s",
+			expectedFingerprint, p.Fingerprint)
+	}
+
 	if diags.HasErrors() {
 		return nil, diags, nil
 	}

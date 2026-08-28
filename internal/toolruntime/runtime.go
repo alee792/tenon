@@ -41,20 +41,16 @@ func Open(cfg Config) (*Runtime, error) {
 	if err := verifyCache(cfg, dir); err != nil {
 		return nil, err
 	}
-	executables, err := readExecutables(dir, cfg.languages())
-	if err != nil {
-		return nil, err
-	}
-	return launch(cfg, dir, executables)
+	return launch(cfg, dir)
 }
 
 // launch starts every present language host, reads each catalog once, and
 // cross-checks the merged surface against discovery.
-func launch(cfg Config, dir string, executables map[string]string) (*Runtime, error) {
+func launch(cfg Config, dir string) (*Runtime, error) {
 	rt := &Runtime{routes: map[string]*host{}}
 	expected := cfg.expected()
 	for _, language := range cfg.languages() {
-		cmd, err := hostCommand(cfg, dir, language, executables)
+		cmd, err := hostCommand(cfg, dir, language)
 		if err != nil {
 			rt.Close()
 			return nil, err
@@ -194,23 +190,34 @@ func (r *Runtime) Close() {
 }
 
 // hostCommand builds one language host's launch command. Serving never
-// depends on PATH: the executables were resolved once at preparation and
-// recorded absolutely.
-func hostCommand(cfg Config, dir, language string, executables map[string]string) (*exec.Cmd, error) {
+// depends on PATH: every language execs its own closure-local executable,
+// found at a fixed location under dir rather than a path recorded at
+// preparation (ADR 0021) — deno and the Go host binary are both copied into
+// the closure at prepare time; the Python interpreter's closure-relative
+// location is resolved by pythonClosureLayout the same way.
+func hostCommand(cfg Config, dir, language string) (*exec.Cmd, error) {
 	var cmd *exec.Cmd
 	switch language {
 	case TypeScript:
-		cmd = exec.Command(executables["deno"], "run", "--quiet", "--cached-only", "--frozen",
+		deno := filepath.Join(dir, "deno", "bin", "deno")
+		cmd = exec.Command(deno, "run", "--quiet", "--cached-only", "--frozen",
 			"--config", filepath.Join(cfg.Source, "deno.json"),
 			"--allow-read="+cfg.Source+","+cfg.Workspace,
 			filepath.Join(dir, "typescript.ts"), cfg.Source)
 		cmd.Env = hostEnv("DENO_DIR=" + filepath.Join(dir, "deno-dir"))
 	case Python:
-		cmd = exec.Command(executables["uv"], "run", "--locked", "--no-sync", "--project", cfg.Source,
-			"python", filepath.Join(dir, "python.py"), cfg.Source)
-		cmd.Env = hostEnv(
-			"UV_PROJECT_ENVIRONMENT="+filepath.Join(dir, "python-venv"),
-			"PYTHONDONTWRITEBYTECODE=1")
+		// No uv, no venv, no PATH lookup: the closure interpreter is exec'd
+		// directly, exactly as it will be from a staged tree with no build
+		// toolchain present (ADR 0021). The dependency directory is added as
+		// a site directory by the host itself (hosts/python.py), not by an
+		// interpreter flag, so it is passed through the environment rather
+		// than the argument list the design fixes at "python.py <source>".
+		interpBin, siteDir, _, err := pythonClosureLayout(dir)
+		if err != nil {
+			return nil, err
+		}
+		cmd = exec.Command(interpBin, filepath.Join(dir, "python.py"), cfg.Source)
+		cmd.Env = append(hostEnv("PYTHONDONTWRITEBYTECODE=1"), "TENON_PYTHON_SITE="+siteDir)
 	case Go:
 		cmd = exec.Command(filepath.Join(dir, "go", "host"))
 		cmd.Env = hostEnv()
@@ -236,12 +243,27 @@ func verifyCache(cfg Config, dir string) error {
 			if !sameFile(filepath.Join(dir, "typescript.ts"), typescriptHost) {
 				return staleCache
 			}
+			info, err := os.Stat(filepath.Join(dir, "deno", "bin", "deno"))
+			if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+				return staleCache
+			}
+			// hostCommand launches with DENO_DIR pointed here unconditionally;
+			// a missing cache directory would otherwise surface as a raw Deno
+			// module-resolution error at launch instead of the uniform
+			// "run tenon apply" message every other missing-cache condition
+			// produces.
+			if info, err := os.Stat(filepath.Join(dir, "deno-dir")); err != nil || !info.IsDir() {
+				return staleCache
+			}
 		case Python:
 			if !sameFile(filepath.Join(dir, "python.py"), pythonHost) {
 				return staleCache
 			}
+			if _, _, _, err := pythonClosureLayout(dir); err != nil {
+				return staleCache
+			}
 		case Go:
-			main, _, err := renderGoHost(cfg)
+			main, _, err := renderGoHost(cfg, filepath.Join(dir, "go"), filepath.Join(dir, "agent-source"))
 			if err != nil {
 				return staleCache
 			}

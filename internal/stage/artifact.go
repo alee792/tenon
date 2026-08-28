@@ -51,6 +51,14 @@ type RuntimeInfo struct {
 	ClosurePath string   `json:"closure_path,omitempty"`
 	Minimized   bool     `json:"minimized"`
 	Note        string   `json:"note"`
+	// Interpreters records, per language, the interpreter identity and ABI
+	// the closure carries (for example "cpython-3.11.13-linux-x86_64-gnu"
+	// for python), per ADR 0021: "the staged manifest's runtime record grows
+	// the interpreter identity and ABI, so ADR 0012's one-exact-compatible-
+	// final-base contract names the libc a payload requires". A language
+	// whose closure carries no separate interpreter (Go's closure is a
+	// single self-contained host binary) has no entry here.
+	Interpreters map[string]string `json:"interpreters,omitempty"`
 }
 
 // Owner is the intended runtime ownership of a staged path. Staging records

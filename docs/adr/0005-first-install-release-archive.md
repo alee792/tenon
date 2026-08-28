@@ -2,6 +2,8 @@
 
 - Status: accepted
 - Re-records: prototype ADR 0007 (alee792/hctl)
+- Superseded in part by: [ADR 0022](0022-widen-the-release-platform-matrix.md)
+  (platform matrix widened beyond darwin-arm64)
 
 ## Decision
 

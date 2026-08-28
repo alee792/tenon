@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "target": {
+    "os": "linux",
+    "architecture": "amd64",
+    "abi": "glibc",
+    "compatible_base": "linux-amd64-glibc",
+    "base": {
+      "reference": "docker.io/library/ubuntu:24.04",
+      "digest": "TODO-pin-before-first-build"
+    },
+    "runtime": {
+      "uid": 65532,
+      "gid": 65532,
+      "home": "/home/tenon",
+      "required_executables": [
+        "/bin/sh",
+        "/usr/bin/id"
+      ],
+      "certificate_bundle": "/etc/ssl/certs/ca-certificates.crt",
+      "certificate_source_component": "TODO-decide-before-first-build",
+      "required_shared_libraries": [
+        "ld-linux-x86-64.so.2",
+        "libc.so.6",
+        "libdl.so.2",
+        "libgcc_s.so.1",
+        "libm.so.6",
+        "libpthread.so.0",
+        "librt.so.1",
+        "libutil.so.1"
+      ],
+      "writable_paths": [
+        "/home/tenon",
+        "/workspace"
+      ]
+    }
+  },
+  "tenon": {
+    "development_version": "0.1.0-dev"
+  },
+  "components": {
+    "claude": {
+      "version": "TODO-pin-before-first-build",
+      "url": "TODO-pin-before-first-build",
+      "sha256": "TODO-pin-before-first-build",
+      "format": "binary",
+      "license": "Anthropic-Commercial-Terms",
+      "publication_gate": "blocked-pending-permission",
+      "note": "Redistribution requires a current review of Anthropic's terms and explicit human authorization before any image carrying this component is published; building and exercising it locally is not gated."
+    },
+    "codex": {
+      "version": "TODO-pin-before-first-build",
+      "url": "TODO-pin-before-first-build",
+      "sha256": "TODO-pin-before-first-build",
+      "format": "tar.gz",
+      "license": "Apache-2.0",
+      "publication_gate": "blocked-pending-permission",
+      "note": "License is permissive, but publication still requires a current review of OpenAI's redistribution terms and explicit human authorization, per ADR 0012."
+    },
+    "deno": {
+      "version": "TODO-pin-before-first-build",
+      "url": "TODO-pin-before-first-build",
+      "sha256": "TODO-pin-before-first-build",
+      "format": "zip",
+      "license": "MIT",
+      "publication_gate": "open",
+      "note": "Prepare-time build tool per ADR 0021 (deno-as-compiler stays in the image); the deno-as-runtime executable enters the staged closure only once ADR 0021's TypeScript rendering lands."
+    },
+    "go": {
+      "version": "1.26.5",
+      "url": "https://go.dev/dl/go1.26.5.linux-amd64.tar.gz",
+      "sha256": "TODO-pin-before-first-build",
+      "format": "tar.gz",
+      "license": "BSD-3-Clause",
+      "publication_gate": "open",
+      "note": "Prepare-time build tool only (ADR 0021): compiles the generated Go host image-side; the toolchain itself never enters a staged closure."
+    },
+    "uv": {
+      "version": "0.8.17",
+      "url": "https://github.com/astral-sh/uv/releases/download/0.8.17/uv-x86_64-unknown-linux-gnu.tar.gz",
+      "sha256": "TODO-pin-before-first-build",
+      "format": "tar.gz",
+      "license": "Apache-2.0 OR MIT",
+      "publication_gate": "open",
+      "note": "Prepare-time acquisition tool only (ADR 0021): installs the pinned standalone CPython and locked dependencies; never runs at serve time."
+    }
+  }
+}

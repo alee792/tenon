@@ -23,12 +23,11 @@ import (
 	"regexp"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/alee792/tenon/internal/version"
 )
 
 const (
-	// Version is the single tenon version constant. A later release slice
-	// owns real versioning; every version-bearing surface reads this one.
-	Version = "0.1.0-dev"
 	// ProtocolVersion is the MCP revision this server implements.
 	ProtocolVersion = "2025-06-18"
 	// serverName identifies the managed server to its client.
@@ -180,7 +179,7 @@ func (s *server) handle(line []byte) {
 		s.writeResult(request.ID, map[string]any{
 			"protocolVersion": ProtocolVersion,
 			"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
-			"serverInfo":      map[string]any{"name": serverName, "version": Version},
+			"serverInfo":      map[string]any{"name": serverName, "version": version.Version},
 		})
 	case "tools/list":
 		s.writeResult(request.ID, map[string]any{"tools": tools(s.cfg)})

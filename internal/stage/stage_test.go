@@ -4,6 +4,7 @@ import (
 	"context"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,6 +12,7 @@ import (
 	"github.com/alee792/tenon/internal/apply"
 	"github.com/alee792/tenon/internal/claude"
 	"github.com/alee792/tenon/internal/codex"
+	"github.com/alee792/tenon/internal/diagnostics"
 )
 
 const validInstructions = `---
@@ -345,6 +347,162 @@ func TestStageGoToolCarriesRuntimeClosure(t *testing.T) {
 	}
 }
 
+const pythonTool = `"""Count the words in bounded text."""
+
+from pydantic import BaseModel
+
+description = "Count the words in bounded text."
+
+
+class Input(BaseModel):
+    text: str
+
+
+class Output(BaseModel):
+    words: int
+
+
+def execute(input: Input, context: dict) -> Output:
+    return Output(words=len(input.text.split()))
+`
+
+// requireUV skips the test when uv is absent, matching cmd/tenon's own
+// requireToolchain gate: TENON_REQUIRE_TOOLCHAINS=1 turns the gap into a
+// named failure so CI green still means the Python closure path ran.
+func requireUV(t *testing.T) string {
+	t.Helper()
+	found, err := exec.LookPath("uv")
+	if err != nil {
+		if os.Getenv("TENON_REQUIRE_TOOLCHAINS") == "1" {
+			t.Fatal("uv is not on PATH but TENON_REQUIRE_TOOLCHAINS=1 requires it")
+		}
+		t.Skip("uv is not on PATH; the Python closure staging path is proven without it")
+	}
+	isolateSharedRuntimeCache(t)
+	return found
+}
+
+// isolateSharedRuntimeCache points os.UserCacheDir() at a throwaway
+// directory for the test's lifetime, so exercising the shared Python
+// interpreter / deno runtime cache (internal/toolruntime's
+// sharedruntime.go) never reads from or writes into the machine's real,
+// persistent cache — the shared store is deliberately machine-wide by
+// design, and a test suite is not that machine's real, ongoing state.
+// os.UserCacheDir() reads $XDG_CACHE_HOME on every platform this repo
+// targets except darwin, which ignores it and always resolves
+// $HOME/Library/Caches directly, so both are overridden.
+func isolateSharedRuntimeCache(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	// chmodTreeReadOnly (internal/toolruntime/sharedruntime.go) locks down
+	// the shared cache entries this test's own Prepare calls populate.
+	// t.TempDir()'s own registered cleanup can't os.RemoveAll a read-only
+	// tree — removing a directory entry needs write permission on its
+	// parent — so this restores every write bit first. Registered after
+	// t.TempDir() itself, so LIFO cleanup order runs this before
+	// t.TempDir()'s removal, not after.
+	t.Cleanup(func() {
+		_ = filepath.WalkDir(home, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			info, ierr := d.Info()
+			if ierr != nil {
+				return nil
+			}
+			_ = os.Chmod(path, info.Mode().Perm()|0o700)
+			return nil
+		})
+	})
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+}
+
+// TestStagePythonToolCarriesRuntimeClosure proves ADR 0021's Python closure
+// stages: preparation installs a pinned standalone CPython and the project's
+// locked dependencies into the closure with no venv, staging normalizes the
+// interpreter's baked-in install path to the final canonical location, and
+// the staged tree carries no symlink and no build-machine path.
+func TestStagePythonToolCarriesRuntimeClosure(t *testing.T) {
+	uv := requireUV(t)
+	agent := writeAgent(t, "python-tool-agent")
+	writeFile(t, agent, "pyproject.toml", "[project]\nname = \"python-tool-agent\"\nversion = \"0.0.0\"\n"+
+		"requires-python = \">=3.11\"\ndependencies = [\"pydantic>=2\"]\n\n[tool.uv]\npackage = false\n")
+	writeFile(t, agent, "tools/count_words.py", pythonTool)
+	cmd := exec.Command(uv, "lock")
+	cmd.Dir = agent
+	if output, err := cmd.CombinedOutput(); err != nil {
+		if os.Getenv("TENON_REQUIRE_TOOLCHAINS") == "1" {
+			t.Fatalf("uv lock failed but TENON_REQUIRE_TOOLCHAINS=1 requires it: %v\n%s", err, output)
+		}
+		t.Skipf("uv lock could not resolve the fixture's dependencies (network needed): %v\n%s", err, output)
+	}
+	exe := fakeExecutable(t)
+
+	out := filepath.Join(t.TempDir(), "staged")
+	res, diags, err := Stage(context.Background(), Options{
+		AgentDir: agent, Harness: "claude", Output: out, Executable: exe, Driver: claude.Driver{},
+	})
+	if err != nil {
+		t.Fatalf("stage error: %v", err)
+	}
+	if diags.HasErrors() {
+		t.Fatalf("stage diagnostics: %v", diags.All())
+	}
+	if len(res.RuntimeLanguages) != 1 || res.RuntimeLanguages[0] != "python" {
+		t.Fatalf("expected a python runtime closure, got %v", res.RuntimeLanguages)
+	}
+
+	closure := filepath.Join(out, "opt", "tenon", "runtimes", "tools")
+
+	// The closure is entirely symlink-free: copyTree already refuses a
+	// symlink, but this proves the interpreter's own convenience symlinks
+	// (bin/python, bin/python3, python3-config, pydoc3, 2to3, idle3, the
+	// lib/libpython*.so link) were actually removed at preparation, not
+	// merely not-yet-encountered.
+	var interpreterBin string
+	err = filepath.WalkDir(closure, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			t.Fatalf("the staged python closure carries a symlink: %s", path)
+		}
+		if !d.IsDir() && strings.HasPrefix(d.Name(), "python3.") && filepath.Base(filepath.Dir(path)) == "bin" {
+			interpreterBin = path
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if interpreterBin == "" {
+		t.Fatal("the staged python closure must carry the versioned interpreter binary")
+	}
+
+	// The sysconfigdata rewrite left no trace of the throwaway preparation
+	// directory anywhere in the closure — the build-machine-path scan
+	// already proves this for the whole tree, but this asserts the specific
+	// mechanism this test exists to cover.
+	_ = filepath.WalkDir(closure, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasPrefix(d.Name(), "_sysconfigdata_") {
+			return nil
+		}
+		content, rerr := os.ReadFile(path)
+		if rerr != nil {
+			t.Fatal(rerr)
+		}
+		if !strings.Contains(string(content), "/opt/tenon/runtimes/tools/") {
+			t.Fatalf("the sysconfigdata file must be rewritten to the final canonical closure path: %s", path)
+		}
+		return nil
+	})
+
+	if err := Verify(filepath.Join(out, "opt", "tenon", "artifact.json"), out); err != nil {
+		t.Fatalf("a staged Python-tool tree must verify: %v", err)
+	}
+}
+
 func writeFile(t *testing.T, root, rel, content string) {
 	t.Helper()
 	full := filepath.Join(root, filepath.FromSlash(rel))
@@ -379,3 +537,402 @@ func Execute(ctx context.Context, in Input) (Output, error) {
 	return Output{Hex: hex.EncodeToString(sum[:])}, nil
 }
 `
+
+// typescriptTool is a minimal valid TypeScript tool: authored types satisfy
+// `deno check`, an npm dependency (zod) proves the downloaded package cache
+// closure staging carries, not only the local module.
+const typescriptTool = `import { z } from "zod";
+
+export default {
+  description: "Uppercase bounded text.",
+  inputSchema: z.object({ text: z.string() }).strict(),
+  outputSchema: z.object({ shouted: z.string() }).strict(),
+  execute: (input: { text: string }) => ({ shouted: input.text.toUpperCase() }),
+};
+`
+
+// requireDeno skips the test when deno is absent, matching cmd/tenon's own
+// requireToolchain gate: TENON_REQUIRE_TOOLCHAINS=1 turns the gap into a
+// named failure so CI green still means the TypeScript closure path ran.
+func requireDeno(t *testing.T) string {
+	t.Helper()
+	found, err := exec.LookPath("deno")
+	if err != nil {
+		if os.Getenv("TENON_REQUIRE_TOOLCHAINS") == "1" {
+			t.Fatal("deno is not on PATH but TENON_REQUIRE_TOOLCHAINS=1 requires it")
+		}
+		t.Skip("deno is not on PATH; the TypeScript closure staging path is proven without it")
+	}
+	isolateSharedRuntimeCache(t)
+	return found
+}
+
+// TestStageTypeScriptToolCarriesRuntimeClosure proves ADR 0021's TypeScript
+// closure stages via issue #16's fallback: preparation copies deno's own
+// executable into the closure and prunes DENO_DIR's derived, path-keyed
+// caches, and the staged tree carries no symlink and no build-machine path
+// — including inside the pruned DENO_DIR itself and the copied deno binary,
+// which carriedPayload must route to joined-path matching the same way it
+// already does for the Python and Go closures.
+func TestStageTypeScriptToolCarriesRuntimeClosure(t *testing.T) {
+	deno := requireDeno(t)
+	agent := writeAgent(t, "typescript-tool-agent")
+	writeFile(t, agent, "deno.json", "{\n  \"imports\": {\n    \"zod\": \"npm:zod@^4.1.12\"\n  }\n}\n")
+	writeFile(t, agent, "tools/shout_text.ts", typescriptTool)
+	cmd := exec.Command(deno, "install", "--entrypoint", "tools/shout_text.ts")
+	cmd.Dir = agent
+	if output, err := cmd.CombinedOutput(); err != nil {
+		if os.Getenv("TENON_REQUIRE_TOOLCHAINS") == "1" {
+			t.Fatalf("deno install failed but TENON_REQUIRE_TOOLCHAINS=1 requires it: %v\n%s", err, output)
+		}
+		t.Skipf("deno install could not resolve the fixture's dependencies (network needed): %v\n%s", err, output)
+	}
+	exe := fakeExecutable(t)
+
+	out := filepath.Join(t.TempDir(), "staged")
+	res, diags, err := Stage(context.Background(), Options{
+		AgentDir: agent, Harness: "claude", Output: out, Executable: exe, Driver: claude.Driver{},
+	})
+	if err != nil {
+		t.Fatalf("stage error: %v", err)
+	}
+	if diags.HasErrors() {
+		t.Fatalf("stage diagnostics: %v", diags.All())
+	}
+	if len(res.RuntimeLanguages) != 1 || res.RuntimeLanguages[0] != "typescript" {
+		t.Fatalf("expected a typescript runtime closure, got %v", res.RuntimeLanguages)
+	}
+
+	closure := filepath.Join(out, "opt", "tenon", "runtimes", "tools")
+
+	var denoBin string
+	err = filepath.WalkDir(closure, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			t.Fatalf("the staged typescript closure carries a symlink: %s", path)
+		}
+		if !d.IsDir() && d.Name() == "deno" && filepath.Base(filepath.Dir(path)) == "bin" {
+			denoBin = path
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if denoBin == "" {
+		t.Fatal("the staged typescript closure must carry its own deno executable")
+	}
+
+	// The derived, path-keyed DENO_DIR caches (deno check's own, and
+	// whatever Prepare's inspection launch regenerated) do not survive into
+	// the staged closure; the downloaded npm package cache does.
+	denoDir := filepath.Join(filepath.Dir(filepath.Dir(denoBin)), "..", "deno-dir")
+	for _, gone := range []string{"check_cache_v2", "dep_analysis_cache_v2", "fast_check_cache_v2",
+		"node_analysis_cache_v2", "v8_code_cache_v2", "gen", "node_compat_bin"} {
+		if _, err := os.Lstat(filepath.Join(denoDir, gone)); !os.IsNotExist(err) {
+			t.Fatalf("%s must not survive into the staged closure: %v", gone, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(denoDir, "npm")); err != nil {
+		t.Fatalf("the downloaded npm package cache must survive into the staged closure: %v", err)
+	}
+
+	if err := Verify(filepath.Join(out, "opt", "tenon", "artifact.json"), out); err != nil {
+		t.Fatalf("a staged TypeScript-tool tree must verify: %v", err)
+	}
+}
+
+// TestStageGoClosureCarriesNoBuildMachinePath stages a real Go-tool agent and
+// proves no staged file embeds a build-machine path component of the
+// fixture's own physical directories — matched exactly the way Stage's own
+// build-machine-path scan matches, component by component, not by looking
+// for the joined absolute string. A joined-absolute-string check is not
+// equivalent: it passes by construction against a relative path fragment
+// that omits the absolute prefix entirely while still leaking a directory
+// name from partway up the chain, which is exactly the shape a relative
+// go.mod replace target could take.
+//
+// The real defect this once caught: the generated Go host's go.mod named
+// its replace target with the absolute preparation-machine agent source
+// path (toolruntime.renderGoHost embedded cfg.Source verbatim), and `go
+// build -trimpath` does not scrub a module replace target the way it
+// scrubs recorded source-file paths, so the built host binary's own
+// embedded module info (visible via `go version -m`, read by
+// runtime/debug.ReadBuildInfo) carried the same absolute path even after a
+// hypothetical post-build go.mod rewrite. The fix is upstream in two parts:
+// toolruntime.renderGoHost now names the replace target relative to the
+// directory its go.mod is written into, and preparation now builds against
+// a copy of the tool source at a fixed directory name rather than cfg.Source
+// directly, so that relative target renders as a machine-independent
+// constant ("../agent-source") instead of a relative path shaped by this
+// machine's own directory layout.
+func TestStageGoClosureCarriesNoBuildMachinePath(t *testing.T) {
+	agent := writeAgent(t, "scan-go-tool-agent")
+	writeFile(t, agent, "go.mod", "module example.com/scan-go-tool-agent\n\ngo 1.24\n")
+	writeFile(t, agent, "tools/hash_text/tool.go", goTool)
+	exe := fakeExecutable(t)
+
+	out := filepath.Join(t.TempDir(), "staged")
+	res, diags, err := Stage(context.Background(), Options{
+		AgentDir: agent, Harness: "codex", Output: out, Executable: exe, Driver: codex.Driver{},
+	})
+	if err != nil {
+		t.Fatalf("stage error: %v", err)
+	}
+	if diags.HasErrors() {
+		t.Fatalf("stage diagnostics: %v", diags.All())
+	}
+	if len(res.RuntimeLanguages) != 1 || res.RuntimeLanguages[0] != "go" {
+		t.Fatalf("expected a go runtime closure, got %v", res.RuntimeLanguages)
+	}
+
+	componentNeedles := buildMachineNeedles(agent, filepath.Dir(exe), nil)
+	joinedNeedles := buildMachineJoinedNeedles(agent, filepath.Dir(exe), nil)
+	if len(componentNeedles) == 0 && len(joinedNeedles) == 0 {
+		t.Fatal("the fixture's own agent and executable directories must yield at least one dangerous needle to check against; the test proves nothing otherwise")
+	}
+	scanDiags := &diagnostics.List{}
+	if err := rejectBuildMachinePaths(out, "", componentNeedles, joinedNeedles, scanDiags); err != nil {
+		t.Fatal(err)
+	}
+	if scanDiags.HasErrors() {
+		t.Fatalf("the staged tree embeds a build-machine path: %v", scanDiags.All())
+	}
+
+	if err := Verify(filepath.Join(out, "opt", "tenon", "artifact.json"), out); err != nil {
+		t.Fatalf("the normalized staged tree must still verify: %v", err)
+	}
+}
+
+// TestBuildPathComponentsExcludesExpectedVocabulary proves the scan's
+// component extraction behaves as designed: tenon's own canonical
+// vocabulary and short segments (a Go test harness's own "001"-style
+// TempDir counters among them) never register as dangerous, a directory's
+// own final segment is dropped when skipLast names an intentionally
+// published identity (the agent name, expected in canonical output), and a
+// genuinely distinguishing segment survives either way.
+func TestBuildPathComponentsExcludesExpectedVocabulary(t *testing.T) {
+	dir := "/home/tenon/workspace/opt/go/003/sessionsuffix123456/my-agent"
+
+	got := buildPathComponents(dir, true)
+	if len(got) != 1 || got[0] != "sessionsuffix123456" {
+		t.Fatalf("buildPathComponents(skipLast) = %v, want [\"sessionsuffix123456\"]", got)
+	}
+
+	full := buildPathComponents(dir, false)
+	if len(full) != 2 || full[0] != "sessionsuffix123456" || full[1] != "my-agent" {
+		t.Fatalf("buildPathComponents(!skipLast) = %v, want [\"sessionsuffix123456\" \"my-agent\"]", full)
+	}
+}
+
+// TestRejectBuildMachinePathsFiresOnALeak proves the stage-time scan itself
+// — not just its absence of effect once the Go closure fix landed — fails
+// closed with the stable stage.tree.build-path-leaked diagnostic naming the
+// offending staged path and the exact leaked component, and leaves a clean
+// tree with no diagnostic at all.
+func TestRejectBuildMachinePathsFiresOnALeak(t *testing.T) {
+	needles := [][]byte{[]byte("sessionsuffix123456")}
+
+	clean := t.TempDir()
+	if err := os.WriteFile(filepath.Join(clean, "file.txt"), []byte("nothing interesting here"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	diags := &diagnostics.List{}
+	if err := rejectBuildMachinePaths(clean, "", needles, nil, diags); err != nil {
+		t.Fatalf("scanning a clean tree: %v", err)
+	}
+	if diags.HasErrors() {
+		t.Fatalf("a clean tree must report no diagnostic: %v", diags.All())
+	}
+
+	leaking := t.TempDir()
+	if err := os.WriteFile(filepath.Join(leaking, "go.mod"),
+		[]byte("replace example.com/x => /tmp/sessionsuffix123456/agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	diags = &diagnostics.List{}
+	if err := rejectBuildMachinePaths(leaking, "", needles, nil, diags); err != nil {
+		t.Fatalf("scanning a leaking tree: %v", err)
+	}
+	found := false
+	for _, d := range diags.All() {
+		if d.ID != "stage.tree.build-path-leaked" {
+			continue
+		}
+		found = true
+		if d.Path != "go.mod" {
+			t.Fatalf("the diagnostic must name the leaking staged file, got path %q", d.Path)
+		}
+		if !strings.Contains(d.Rule, "sessionsuffix123456") {
+			t.Fatalf("the diagnostic must name the leaked component: %q", d.Rule)
+		}
+	}
+	if !found {
+		t.Fatalf("expected stage.tree.build-path-leaked, got %v", diags.All())
+	}
+}
+
+// TestRejectBuildMachinePathsIgnoresBareComponentsInABinary proves the
+// heart of the binary/text split: a compiled binary embedding a dangerous
+// component only as a bare, isolated token (the exact shape a Go module's
+// own domain-style import prefix, owner segment, or a standard-library
+// package name legitimately takes in any binary's own build info) is not
+// flagged, where the same bytes in a text file would be.
+func TestRejectBuildMachinePathsIgnoresBareComponentsInABinary(t *testing.T) {
+	componentNeedles := [][]byte{[]byte("github.com"), []byte("someowner")}
+
+	textDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(textDir, "notes.txt"),
+		[]byte("see github.com/someowner for details"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	diags := &diagnostics.List{}
+	if err := rejectBuildMachinePaths(textDir, "", componentNeedles, nil, diags); err != nil {
+		t.Fatalf("scanning text: %v", err)
+	}
+	if !diags.HasErrors() {
+		t.Fatal("a text file embedding a dangerous component must still be flagged")
+	}
+
+	binDir := t.TempDir()
+	// A NUL byte is looksBinary's simplest reliable signal; the rest of the
+	// content is the same bare component a Go binary's own module data
+	// would legitimately carry.
+	binContent := append([]byte{0}, []byte("dep github.com/someowner/thing v1.0.0")...)
+	if err := os.WriteFile(filepath.Join(binDir, "host"), binContent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	diags = &diagnostics.List{}
+	if err := rejectBuildMachinePaths(binDir, "", componentNeedles, nil, diags); err != nil {
+		t.Fatalf("scanning a binary: %v", err)
+	}
+	if diags.HasErrors() {
+		t.Fatalf("bare components must not be checked against a binary file: %v", diags.All())
+	}
+}
+
+// TestRejectBuildMachinePathsFiresOnAJoinedLeakInABinary proves binaries are
+// not simply exempt from the scan: a binary embedding a dangerous
+// directory's full path, or its "../"+basename relative form, still fails
+// closed.
+func TestRejectBuildMachinePathsFiresOnAJoinedLeakInABinary(t *testing.T) {
+	cases := []struct {
+		name    string
+		content []byte
+	}{
+		{"absolute", []byte("...replace target => /tmp/x/sessionsuffix123456 ...")},
+		{"relative", []byte("...replace target => ../sessionsuffix123456 ...")},
+	}
+	joinedNeedles := buildMachineJoinedNeedles("/tmp/x/sessionsuffix123456", "", nil)
+	if len(joinedNeedles) < 2 {
+		t.Fatalf("expected both an absolute and a relative joined needle, got %v", joinedNeedles)
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			binContent := append([]byte{0}, c.content...)
+			if err := os.WriteFile(filepath.Join(dir, "host"), binContent, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			diags := &diagnostics.List{}
+			if err := rejectBuildMachinePaths(dir, "", nil, joinedNeedles, diags); err != nil {
+				t.Fatalf("scanning: %v", err)
+			}
+			found := false
+			for _, d := range diags.All() {
+				if d.ID == "stage.tree.build-path-leaked" {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("expected the scan to fire on a binary embedding a joined leak, got %v", diags.All())
+			}
+		})
+	}
+}
+
+// TestRejectBuildMachinePathsRoutesByProvenanceNotContentType is the
+// synthetic, network-free proof of the fix for the false-positive class a
+// real Python closure produces: a TEXT file positioned inside a carried-in
+// runtime payload (the closure's interpreter tree) that happens to carry a
+// bare component match — exactly CPython's own stdlib shape, thousands of
+// ordinary text files free to carry short tokens like "github.com" or an
+// organization name — must NOT fire, purely because of where it lives, not
+// because of whether its bytes look binary. A text file living at a
+// tenon-generated position (the workspace's own apply record, standing in
+// for go.mod/main.go/the copied agent source) carrying the identical bytes
+// still must fire: the scan is not simply disabled near a closure, only
+// re-routed within it. See carriedPayload.
+func TestRejectBuildMachinePathsRoutesByProvenanceNotContentType(t *testing.T) {
+	root := t.TempDir()
+	closureRootFinal := "/opt/tenon/runtimes/tools"
+	hash := "abc123hash"
+
+	// Carried-in payload position: a plain-text stdlib-shaped file under the
+	// closure's own interpreter tree.
+	writeFile(t, root, filepath.Join("opt", "tenon", "runtimes", "tools", hash,
+		"cpython", "cpython-3.11.13-linux-x86_64-gnu", "lib", "python3.11", "some_stdlib.py"),
+		"import os\n# see github.com/someowner for details\n")
+
+	// Generated position: text tenon itself writes (standing in for the
+	// apply record / go.mod / main.go / the copied agent source).
+	writeFile(t, root, filepath.Join("workspace", ".tenon", "apply-claude.json"),
+		`{"note":"replace target => /tmp/x/github.com/someowner/leak"}`)
+
+	componentNeedles := [][]byte{[]byte("github.com"), []byte("someowner")}
+	diags := &diagnostics.List{}
+	if err := rejectBuildMachinePaths(root, closureRootFinal, componentNeedles, nil, diags); err != nil {
+		t.Fatal(err)
+	}
+
+	flagged := map[string]bool{}
+	for _, d := range diags.All() {
+		if d.ID == "stage.tree.build-path-leaked" {
+			flagged[d.Path] = true
+		}
+	}
+	if flagged[filepath.ToSlash(filepath.Join("opt", "tenon", "runtimes", "tools", hash,
+		"cpython", "cpython-3.11.13-linux-x86_64-gnu", "lib", "python3.11", "some_stdlib.py"))] {
+		t.Fatalf("a carried-in payload text file must not be component-matched: %v", diags.All())
+	}
+	if !flagged[filepath.ToSlash(filepath.Join("workspace", ".tenon", "apply-claude.json"))] {
+		t.Fatalf("a generated text file embedding the identical bytes must still be flagged: %v", diags.All())
+	}
+}
+
+// TestBuildMachineJoinedNeedles proves the joined-needle construction: each
+// dangerous directory's own full path is always a needle, and its
+// "../"+basename relative form is a needle only when that basename clears
+// the same length and vocabulary bar component matching uses.
+func TestBuildMachineJoinedNeedles(t *testing.T) {
+	got := buildMachineJoinedNeedles("/a/b/sessionsuffix123456", "", nil)
+	want := map[string]bool{
+		"/a/b/sessionsuffix123456": true,
+		"../sessionsuffix123456":   true,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("buildMachineJoinedNeedles = %v, want exactly %v", asStrings(got), want)
+	}
+	for _, n := range got {
+		if !want[string(n)] {
+			t.Fatalf("unexpected needle %q", n)
+		}
+	}
+
+	// A short or safe-listed basename yields no relative-join needle, only
+	// the full path.
+	got = buildMachineJoinedNeedles("/a/b/opt", "", nil)
+	if len(got) != 1 || string(got[0]) != "/a/b/opt" {
+		t.Fatalf("buildMachineJoinedNeedles with a safe basename = %v", asStrings(got))
+	}
+}
+
+func asStrings(bs [][]byte) []string {
+	out := make([]string, len(bs))
+	for i, b := range bs {
+		out[i] = string(b)
+	}
+	return out
+}

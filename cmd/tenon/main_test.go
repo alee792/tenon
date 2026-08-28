@@ -11,6 +11,8 @@ import (
 	"testing"
 
 	"github.com/alee792/tenon/internal/generated"
+
+	"github.com/alee792/tenon/internal/version"
 )
 
 const validInstructions = `---
@@ -83,7 +85,12 @@ func TestFiveMinuteJourney(t *testing.T) {
 // either command on a failing project.
 func TestValidateReportsApplyFailuresWithoutMutating(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
+	// A schedule with a malformed cron fails validate and apply identically.
 	if err := os.Mkdir(filepath.Join(agent, "schedules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agent, "schedules", "bad.md"),
+		[]byte("---\ncron: not a cron\n---\n\nDo the thing.\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1320,7 +1327,7 @@ func TestApplyGeneratesTheManagedServerForBothHarnesses(t *testing.T) {
 		t.Fatalf(".codex/config.toml =\n%s\nwant\n%s", got, wantCodexConfig(executable, agent, codexWS))
 	}
 	for _, content := range []string{string(got), string(mustRead(t, filepath.Join(claudeWS, ".mcp.json")))} {
-		for _, metadata := range []string{"sha256:", "fingerprint", "0.1.0-dev"} {
+		for _, metadata := range []string{"sha256:", "fingerprint", version.Version} {
 			if strings.Contains(content, metadata) {
 				t.Fatalf("generated managed configuration must carry no setup metadata (%q): %s", metadata, content)
 			}
@@ -2113,5 +2120,174 @@ func TestInstalledConnectionFakeAmbientValueNeverLeaks(t *testing.T) {
 	}
 	if !strings.Contains(codexConfig, `env_vars = ["DEMO_TOKEN"]`) {
 		t.Fatalf("config.toml must forward the required ambient name by name only for codex: %s", codexConfig)
+	}
+}
+
+// TestRunConstructsRealDriver proves the run command constructs the real Claude
+// driver and dispatches, so it now fails closed against an unapplied workspace
+// rather than reporting a not-yet-implemented error.
+func TestRunConstructsRealDriver(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	ws := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"run", agent, "--workspace", ws, "--harness", "claude"}, nil, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("run exit = %d, want 1\nstderr: %s", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "not yet implemented") {
+		t.Fatalf("the real driver is wired; there must be no not-implemented error: %s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "carries no claude apply record") {
+		t.Fatalf("want a fail-closed unapplied-workspace error, got: %s", stderr.String())
+	}
+}
+
+// TestRunFlagValidation proves the run command rejects malformed invocations
+// before doing any work.
+func TestRunFlagValidation(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	ws := t.TempDir()
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"missing workspace", []string{"run", agent, "--harness", "claude"}},
+		{"bad harness", []string{"run", agent, "--workspace", ws, "--harness", "gpt"}},
+		{"bad input", []string{"run", agent, "--workspace", ws, "--harness", "claude", "--input", "yaml"}},
+		{"zero timeout", []string{"run", agent, "--workspace", ws, "--harness", "claude", "--timeout", "0"}},
+		{"over-max timeout", []string{"run", agent, "--workspace", ws, "--harness", "claude", "--timeout", "31m"}},
+		{"no agent", []string{"run", "--workspace", ws, "--harness", "claude"}},
+		{"two agents", []string{"run", agent, agent, "--workspace", ws, "--harness", "claude"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := run(tc.args, nil, &stdout, &stderr); code != 2 {
+				t.Fatalf("exit = %d, want 2\nstderr: %s", code, stderr.String())
+			}
+		})
+	}
+}
+
+// TestVersionCommandReportsTheStampedVersion proves `tenon version` reports
+// exactly what the binary carries. Release builds stamp that value over the
+// -dev default with -ldflags, and an agent manifest pins the same string, so
+// this command is how an operator reads what a given tenon will verify
+// against.
+func TestVersionCommandReportsTheStampedVersion(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"version"}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("version exit %d\nstderr: %s", code, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != version.Version {
+		t.Fatalf("version = %q, want %q", got, version.Version)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"version", "extra"}, nil, &stdout, &stderr); code != 2 {
+		t.Fatalf("version with an argument exit %d, want 2", code)
+	}
+}
+
+// TestConnectionCommandsProveInstructionsFreeRootByManifest proves the
+// connection subcommands accept both root proofs the specification's
+// Instructions section names, not only instructions.md: an instructions-free
+// directory proven by a supplied manifest is a legitimate agent — a candidate
+// an improvement loop may generate — and add, status, and remove all operate
+// on it. Every mutation re-mints the proving manifest, because the fingerprint
+// the manifest pins is exactly what the new connection file changes.
+func TestConnectionCommandsProveInstructionsFreeRootByManifest(t *testing.T) {
+	agent := writeAgent(t, "my-agent", "") // no instructions.md
+	withFakeResolver(t, "2.1.240", nil)
+
+	manifestPath := filepath.Join(t.TempDir(), "manifest.json")
+	mintManifest := func() {
+		t.Helper()
+		var out, errb bytes.Buffer
+		if code := run([]string{"manifest", "write", agent, "--harness", "claude", "--output", manifestPath}, nil, &out, &errb); code != 0 {
+			t.Fatalf("manifest write exit %d: %s", code, errb.String())
+		}
+	}
+	mintManifest()
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"connection", "add", agent, "catalog",
+		"--url", "https://example.com/mcp", "--manifest", manifestPath}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("add on a manifest-proven root exit %d: %s", code, stderr.String())
+	}
+	path := filepath.Join(agent, "connections", "catalog.md")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("add must have written the connection: %v", err)
+	}
+
+	// The added file changed the source, so the proving manifest is re-minted
+	// before the next command reads it.
+	mintManifest()
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"connection", "status", agent, "--manifest", manifestPath}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("status on a manifest-proven root exit %d: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "catalog: target=remote") {
+		t.Fatalf("status must report the connection: %q", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"connection", "remove", agent, "catalog", "--manifest", manifestPath}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("remove on a manifest-proven root exit %d: %s", code, stderr.String())
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("remove must have deleted the connection file")
+	}
+}
+
+// TestConnectionCommandsRefuseUnprovenRoot proves the relaxation is exactly the
+// specification's second proof and no wider: an instructions-free directory
+// with no supplied manifest, and one whose supplied manifest no longer matches
+// the directory, are both refused before any mutation.
+func TestConnectionCommandsRefuseUnprovenRoot(t *testing.T) {
+	agent := writeAgent(t, "my-agent", "") // no instructions.md
+	withFakeResolver(t, "2.1.240", nil)
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"connection", "add", agent, "catalog", "--url", "https://example.com/mcp"}, nil, &stdout, &stderr); code == 0 {
+		t.Fatal("expected failure: an instructions-free root with no manifest is unproven")
+	}
+	if _, err := os.Stat(filepath.Join(agent, "connections")); !os.IsNotExist(err) {
+		t.Fatal("a refused add must not create connections/")
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"connection", "status", agent}, nil, &stdout, &stderr); code == 0 {
+		t.Fatal("expected failure: an instructions-free root with no manifest is unproven")
+	}
+
+	manifestPath := filepath.Join(t.TempDir(), "manifest.json")
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"manifest", "write", agent, "--harness", "claude", "--output", manifestPath}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("manifest write exit %d: %s", code, stderr.String())
+	}
+	// Change the source after the manifest pinned it: the expected fingerprint
+	// no longer matches, so the manifest proves nothing.
+	if err := os.WriteFile(filepath.Join(agent, "instructions.md.bak"), []byte("drift"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(agent, "skills", "extra"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agent, "skills", "extra", "SKILL.md"),
+		[]byte("---\nname: extra\ndescription: An extra skill added after the manifest was written.\n---\n\nBody.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"connection", "status", agent, "--manifest", manifestPath}, nil, &stdout, &stderr); code == 0 {
+		t.Fatal("expected failure: a stale manifest does not prove the root")
+	}
+	if !strings.Contains(stderr.String(), "fingerprint") {
+		t.Fatalf("the refusal must name the fingerprint mismatch: %s", stderr.String())
 	}
 }

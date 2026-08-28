@@ -9,6 +9,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -107,11 +108,67 @@ def execute(input: Input, context: dict) -> Output:
     return Output(words=len(input.text.split()), calls=calls)
 `
 
+// writeTypeScriptTool gives an agent one TypeScript tool and its deno
+// dependency manifest, ready for `deno install --entrypoint` to lock.
+func writeTypeScriptTool(t *testing.T, agent string) {
+	t.Helper()
+	writeFile(t, agent, "deno.json", []byte("{\n  \"imports\": {\n    \"zod\": \"npm:zod@^4.1.12\"\n  }\n}\n"), 0o644)
+	writeFile(t, agent, "tools/shout_text.ts", []byte(typescriptToolFile), 0o644)
+}
+
+// writePythonTool gives an agent one Python tool and its native dependency
+// files, ready for `uv lock` to resolve.
+func writePythonTool(t *testing.T, agent string) {
+	t.Helper()
+	writeFile(t, agent, "pyproject.toml", []byte("[project]\nname = \"my-agent\"\nversion = \"0.0.0\"\n"+
+		"requires-python = \">=3.11\"\ndependencies = [\"pydantic>=2\"]\n\n[tool.uv]\npackage = false\n"), 0o644)
+	writeFile(t, agent, "tools/count_words.py", []byte(pythonToolFile), 0o644)
+}
+
 // writeGoTool gives an agent one Go tool and the module it belongs to.
 func writeGoTool(t *testing.T, agent, source string) {
 	t.Helper()
 	writeFile(t, agent, "go.mod", []byte("module example.com/"+filepath.Base(agent)+"\n\ngo 1.24\n"), 0o644)
 	writeFile(t, agent, "tools/hash_text/tool.go", []byte(source), 0o644)
+}
+
+// writeGoToolWithOwnModuleImport gives an agent one Go tool that imports a
+// sibling package from its own module outside tools/ — permitted by
+// docs/product-spec.md (which constrains only tools/'s own shape, not what
+// a tool imports) — proving the build source toolruntime prepares against
+// carries the whole module, not only the tool's own directory.
+func writeGoToolWithOwnModuleImport(t *testing.T, agent string) {
+	t.Helper()
+	module := "example.com/" + filepath.Base(agent)
+	writeFile(t, agent, "go.mod", []byte("module "+module+"\n\ngo 1.24\n"), 0o644)
+	writeFile(t, agent, "internal/shout/shout.go", []byte(`package shout
+
+import "strings"
+
+func Text(s string) string { return strings.ToUpper(s) }
+`), 0o644)
+	writeFile(t, agent, "tools/shout_text/tool.go", []byte(`package shout_text
+
+import (
+	"context"
+
+	"`+module+`/internal/shout"
+)
+
+var Description = "Shout bounded text."
+
+type Input struct {
+	Text string `+"`json:\"text\"`"+`
+}
+
+type Output struct {
+	Shouted string `+"`json:\"shouted\"`"+`
+}
+
+func Execute(ctx context.Context, in Input) (Output, error) {
+	return Output{Shouted: shout.Text(in.Text)}, nil
+}
+`), 0o644)
 }
 
 // serveManaged runs one managed session over the given request lines and
@@ -366,24 +423,75 @@ func TestStaleToolCacheFailsServeClosed(t *testing.T) {
 }
 
 // requireToolchain skips a leg of the polyglot journey when its toolchain is
-// absent, naming exactly what is missing.
+// absent, naming exactly what is missing. Locally that is a graceful
+// degradation: the host protocol, its bounds, and the Go tool journey are
+// still proven without it. In CI a skip here would be silent data loss —
+// green would no longer mean the TypeScript and Python closures executed —
+// so TENON_REQUIRE_TOOLCHAINS=1 (set by ci.yml) turns the same gap into a
+// failure that names the missing toolchain, keeping "CI is green" and "the
+// polyglot paths ran" the same claim.
 func requireToolchain(t *testing.T, name string) string {
 	t.Helper()
 	found, err := exec.LookPath(name)
 	if err != nil {
+		if os.Getenv("TENON_REQUIRE_TOOLCHAINS") == "1" {
+			t.Fatalf("%s is not on PATH but TENON_REQUIRE_TOOLCHAINS=1 requires it; "+
+				"the polyglot tool journey needs deno, uv, and go.", name)
+		}
 		t.Skipf("%s is not on PATH; the polyglot tool journey needs deno, uv, and go. "+
 			"The host protocol, its bounds, and the Go tool journey are proven without it.", name)
 	}
+	isolateSharedRuntimeCache(t)
 	return found
+}
+
+// isolateSharedRuntimeCache points os.UserCacheDir() at a throwaway
+// directory for the test's lifetime, so exercising the shared Python
+// interpreter / deno runtime cache (internal/toolruntime's
+// sharedruntime.go) never reads from or writes into the machine's real,
+// persistent cache. os.UserCacheDir() reads $XDG_CACHE_HOME on every
+// platform this repo targets except darwin, which ignores it and always
+// resolves $HOME/Library/Caches directly, so both are overridden.
+func isolateSharedRuntimeCache(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	// chmodTreeReadOnly locks down the shared cache entries this test's own
+	// Prepare calls populate. t.TempDir()'s own registered cleanup can't
+	// os.RemoveAll a read-only tree — removing a directory entry needs
+	// write permission on its parent — so this restores every write bit
+	// first. Registered after t.TempDir() itself, so LIFO cleanup order
+	// runs this before t.TempDir()'s removal, not after.
+	t.Cleanup(func() {
+		_ = filepath.WalkDir(home, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			info, ierr := d.Info()
+			if ierr != nil {
+				return nil
+			}
+			_ = os.Chmod(path, info.Mode().Perm()|0o700)
+			return nil
+		})
+	})
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
 }
 
 // lockDependencies resolves the fixture's own locked dependencies with its
 // native toolchain, exactly as an author would before committing the lock.
+// A failure here (cold cache, no network) is the same silent-skip risk as a
+// missing toolchain binary, so it is gated the same way: TENON_REQUIRE_TOOLCHAINS=1
+// turns it into a named failure instead of letting the test quietly skip.
 func lockDependencies(t *testing.T, dir string, name string, args ...string) {
 	t.Helper()
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
 	if output, err := cmd.CombinedOutput(); err != nil {
+		if os.Getenv("TENON_REQUIRE_TOOLCHAINS") == "1" {
+			t.Fatalf("%s %s could not resolve the fixture's locked dependencies but TENON_REQUIRE_TOOLCHAINS=1 requires it: %v\n%s",
+				name, strings.Join(args, " "), err, output)
+		}
 		t.Skipf("%s could not resolve the fixture's locked dependencies (a warm cache or network is needed): %v\n%s",
 			name, err, output)
 	}
@@ -511,5 +619,342 @@ func TestToolShapeViolationsFailInspectionNamingTheFile(t *testing.T) {
 				t.Fatal("a failing inspection must precede every generated file")
 			}
 		})
+	}
+}
+
+// TestServeCallsAGoToolFromAStagedTree is ADR 0021's acceptance shape for Go:
+// stage a Go-tool agent, then serve from the staged workspace and staged
+// closure directly, with no workspace tool cache ever prepared there, and
+// prove a tools/list and a tools/call round-trip. Before the ADR 0021 fix,
+// the closure staged at /opt/tenon/runtimes/tools/<key> was unreachable from
+// the staged workspace's own apply record, so this failed closed with "tool
+// runtime is missing or changed; run tenon apply" even though `tenon stage
+// verify` reported the tree clean.
+func TestServeCallsAGoToolFromAStagedTree(t *testing.T) {
+	agent := writeAgent(t, "staged-tool-agent", validInstructions)
+	writeGoTool(t, agent, goToolFile)
+	out := filepath.Join(t.TempDir(), "staged")
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"stage", agent, "--harness", "claude", "--output", out}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("stage exit %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+	}
+
+	artifact := filepath.Join(out, "opt", "tenon", "artifact.json")
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"stage", "verify", "--artifact", artifact, "--prefix", out}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("a staged Go-tool tree must verify: exit %d\nstderr: %s", code, stderr.String())
+	}
+
+	stagedSource := filepath.Join(out, "opt", "tenon", "agents", "staged-tool-agent")
+	stagedWorkspace := filepath.Join(out, "workspace")
+
+	// No workspace tool cache exists anywhere in the staged tree: serving
+	// must reach the closure staged under opt/tenon/runtimes, not a
+	// re-prepared workspace cache.
+	if _, err := os.Stat(filepath.Join(stagedWorkspace, ".tenon", "cache", "tools")); !os.IsNotExist(err) {
+		t.Fatalf("the staged workspace must carry no tool cache, found one (or a stat error): %v", err)
+	}
+
+	responses := serveManaged(t, stagedSource, "claude", stagedWorkspace, listRequest,
+		toolCall(2, "hash-text", `{"text":"hi"}`))
+
+	listed := listedTool(t, responses[0], "hash-text")
+	if listed["description"] != "Hash bounded text with SHA-256." {
+		t.Fatalf("description = %v", listed["description"])
+	}
+	result := callResult(t, responses[1])
+	if result["hex"] != "8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4" {
+		t.Fatalf("hash-text output = %#v", result)
+	}
+}
+
+// TestGoToolImportsOwnModulePackageOutsideTools proves a Go tool that
+// imports a sibling package from its own module outside tools/ — a shape
+// docs/product-spec.md permits (it constrains only tools/'s own shape) and
+// that `go build ./...` against the real agent source always accepted —
+// still prepares, applies, and serves. It once regressed: preparation
+// narrowed the directory it built the Go host against to only tools/ and
+// the two native dependency files, so an import like this failed inside
+// toolruntime with a diagnostic that told the author to run the toolchain
+// directly against their own source to see the failure, where it in fact
+// succeeds.
+func TestGoToolImportsOwnModulePackageOutsideTools(t *testing.T) {
+	agent := writeAgent(t, "own-module-import-agent", validInstructions)
+	writeGoToolWithOwnModuleImport(t, agent)
+	ws := t.TempDir()
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("apply exit %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+	}
+
+	responses := serveManaged(t, agent, "claude", ws, listRequest, toolCall(2, "shout-text", `{"text":"hi"}`))
+	listed := listedTool(t, responses[0], "shout-text")
+	if listed["description"] != "Shout bounded text." {
+		t.Fatalf("description = %v", listed["description"])
+	}
+	result := callResult(t, responses[1])
+	if result["shouted"] != "HI" {
+		t.Fatalf("shout-text output = %#v", result)
+	}
+}
+
+// TestStageGoToolImportsOwnModulePackageOutsideTools is the same proof
+// through the stage path: the same agent stages cleanly and the staged
+// closure serves the tool, so the whole-module build source copy fixes the
+// import for staging too, not only for the local apply/serve path.
+func TestStageGoToolImportsOwnModulePackageOutsideTools(t *testing.T) {
+	agent := writeAgent(t, "staged-own-module-import-agent", validInstructions)
+	writeGoToolWithOwnModuleImport(t, agent)
+	out := filepath.Join(t.TempDir(), "staged")
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"stage", agent, "--harness", "claude", "--output", out}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("stage exit %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+	}
+
+	stagedSource := filepath.Join(out, "opt", "tenon", "agents", "staged-own-module-import-agent")
+	stagedWorkspace := filepath.Join(out, "workspace")
+
+	responses := serveManaged(t, stagedSource, "claude", stagedWorkspace, listRequest, toolCall(2, "shout-text", `{"text":"hi"}`))
+	result := callResult(t, responses[1])
+	if result["shouted"] != "HI" {
+		t.Fatalf("shout-text output = %#v", result)
+	}
+}
+
+// TestPythonToolIsPreparedByApplyAndServedFromTheClosure is the authored-tool
+// journey end to end for Python under ADR 0021's closure model: apply
+// installs a pinned standalone CPython and the locked dependencies into the
+// workspace cache with no venv, and the managed server launches that
+// interpreter directly — never `uv run` — lists the tool, and round-trips a
+// call across two invocations of the same long-lived host process.
+func TestPythonToolIsPreparedByApplyAndServedFromTheClosure(t *testing.T) {
+	uv := requireToolchain(t, "uv")
+	agent := writeAgent(t, "my-agent", validInstructions)
+	writePythonTool(t, agent)
+	lockDependencies(t, agent, uv, "lock")
+	ws := t.TempDir()
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("apply exit %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "managed tools: echo, count-words via MCP") {
+		t.Fatalf("apply must report the authored tool after the built-ins: %q", stdout.String())
+	}
+
+	// The prepared closure carries the pinned interpreter and no venv: no
+	// pyvenv.cfg, no interpreter symlink pointing at the preparation
+	// machine's own python3.
+	cache := filepath.Join(ws, ".tenon", "cache", "tools")
+	entries, err := os.ReadDir(cache)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("apply must prepare exactly one tool cache: %v, %v", entries, err)
+	}
+	closure := filepath.Join(cache, entries[0].Name())
+	if _, err := os.Stat(filepath.Join(closure, "python-venv")); !os.IsNotExist(err) {
+		t.Fatalf("the closure must carry no venv, found python-venv (or a stat error): %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(closure, "cpython")); err != nil {
+		t.Fatalf("the closure must carry the installed interpreter: %v", err)
+	}
+	var pyvenvCfg bool
+	_ = filepath.WalkDir(closure, func(path string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && d.Name() == "pyvenv.cfg" {
+			pyvenvCfg = true
+		}
+		return nil
+	})
+	if pyvenvCfg {
+		t.Fatal("the closure must carry no pyvenv.cfg")
+	}
+
+	responses := serveManaged(t, agent, "claude", ws, listRequest,
+		toolCall(2, "count-words", `{"text":"one two three"}`),
+		toolCall(3, "count-words", `{"text":"one"}`))
+
+	listed := listedTool(t, responses[0], "count-words")
+	if listed["description"] != "Count the words in bounded text." {
+		t.Fatalf("description = %v", listed["description"])
+	}
+	first := callResult(t, responses[1])
+	if first["words"] != float64(3) || first["calls"] != float64(1) {
+		t.Fatalf("count-words output = %#v", first)
+	}
+	if second := callResult(t, responses[2]); second["calls"] != float64(2) {
+		t.Fatalf("second call count = %v, want 2 from the same host process", second["calls"])
+	}
+}
+
+// TestApplyTwiceReusesTheSharedClosureForPythonAndTypeScript proves a
+// repeat `tenon apply` of an unchanged agent — Config.CacheDir() is
+// deterministic, so the second apply reuses the same per-agent closure
+// directory the first one already populated — succeeds and still serves,
+// for both the Python (interpreter installed once, hardlinked per agent)
+// and TypeScript (deno executable copied once, hardlinked per agent)
+// shared-runtime paths (issue #38). Before hardlinkFile removed its
+// destination first, the second apply failed outright: os.Link returns
+// EEXIST against an already-populated path, where the pre-#38 code
+// (uv python install's own idempotency; writeCacheFile's plain overwrite)
+// was reapply-safe by construction.
+func TestApplyTwiceReusesTheSharedClosureForPythonAndTypeScript(t *testing.T) {
+	uv := requireToolchain(t, "uv")
+	deno := requireToolchain(t, "deno")
+
+	pyAgent := writeAgent(t, "reapply-python-agent", validInstructions)
+	writePythonTool(t, pyAgent)
+	lockDependencies(t, pyAgent, uv, "lock")
+	pyWS := t.TempDir()
+
+	tsAgent := writeAgent(t, "reapply-typescript-agent", validInstructions)
+	writeTypeScriptTool(t, tsAgent)
+	lockDependencies(t, tsAgent, deno, "install", "--entrypoint", "tools/shout_text.ts")
+	tsWS := t.TempDir()
+
+	for _, tc := range []struct {
+		name, agent, ws, tool, args string
+	}{
+		{"python", pyAgent, pyWS, "count-words", `{"text":"one two three"}`},
+		{"typescript", tsAgent, tsWS, "shout-text", `{"text":"hi"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for attempt := 1; attempt <= 2; attempt++ {
+				var stdout, stderr bytes.Buffer
+				code := run([]string{"apply", tc.agent, "--harness", "claude", "--workspace", tc.ws}, nil, &stdout, &stderr)
+				if code != 0 {
+					t.Fatalf("apply #%d exit %d\nstdout: %s\nstderr: %s", attempt, code, stdout.String(), stderr.String())
+				}
+			}
+
+			// The closure left behind by the second apply must still
+			// actually serve, not merely have exited 0: a partially
+			// overwritten closure (some files linked to a new identity,
+			// stale sibling files left from the first apply) could exit
+			// clean and still be unable to launch its host. callResult
+			// fails the test on either a JSON-RPC-level error (no "result"
+			// key) or a tool-level one (isError: true).
+			responses := serveManaged(t, tc.agent, "claude", tc.ws, listRequest, toolCall(2, tc.tool, tc.args))
+			_ = callResult(t, responses[1])
+		})
+	}
+}
+
+// TestServeCallsAPythonToolFromAStagedTree is ADR 0021's acceptance shape for
+// Python: stage a Python-tool agent, verify the staged tree, then serve from
+// the staged workspace and staged closure with no workspace tool cache ever
+// prepared there — proving the launch command execs the closure's own
+// interpreter directly rather than `uv run`, since the staged tree carries
+// no `uv` at all.
+func TestServeCallsAPythonToolFromAStagedTree(t *testing.T) {
+	uv := requireToolchain(t, "uv")
+	agent := writeAgent(t, "staged-python-tool-agent", validInstructions)
+	writePythonTool(t, agent)
+	lockDependencies(t, agent, uv, "lock")
+	out := filepath.Join(t.TempDir(), "staged")
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"stage", agent, "--harness", "claude", "--output", out}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("stage exit %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+	}
+
+	artifact := filepath.Join(out, "opt", "tenon", "artifact.json")
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"stage", "verify", "--artifact", artifact, "--prefix", out}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("a staged Python-tool tree must verify: exit %d\nstderr: %s", code, stderr.String())
+	}
+
+	// The staged closure carries no `uv` executable anywhere: launch must
+	// therefore exec the interpreter directly, not `uv run`.
+	closure := filepath.Join(out, "opt", "tenon", "runtimes", "tools")
+	_ = filepath.WalkDir(closure, func(path string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && d.Name() == "uv" {
+			t.Fatalf("the staged closure must carry no uv executable, found one at %s", path)
+		}
+		return nil
+	})
+
+	stagedSource := filepath.Join(out, "opt", "tenon", "agents", "staged-python-tool-agent")
+	stagedWorkspace := filepath.Join(out, "workspace")
+
+	if _, err := os.Stat(filepath.Join(stagedWorkspace, ".tenon", "cache", "tools")); !os.IsNotExist(err) {
+		t.Fatalf("the staged workspace must carry no tool cache, found one (or a stat error): %v", err)
+	}
+
+	responses := serveManaged(t, stagedSource, "claude", stagedWorkspace, listRequest,
+		toolCall(2, "count-words", `{"text":"one two three"}`))
+
+	listed := listedTool(t, responses[0], "count-words")
+	if listed["description"] != "Count the words in bounded text." {
+		t.Fatalf("description = %v", listed["description"])
+	}
+	result := callResult(t, responses[1])
+	if result["words"] != float64(3) {
+		t.Fatalf("count-words output = %#v", result)
+	}
+}
+
+// TestServeCallsATypeScriptToolFromAStagedTree is ADR 0021's acceptance
+// shape for TypeScript: stage a TypeScript-tool agent, verify the staged
+// tree, then serve from the staged workspace and staged closure with no
+// workspace tool cache ever prepared there — the direct regression proof
+// for issue #16's fallback (deno copied into the closure beside a pruned,
+// cached-only DENO_DIR): if DENO_DIR's derived caches were not pruned, or
+// if the launch command still depended on a build-machine PATH lookup for
+// deno, this fails exactly the way it once did staging entirely refuse
+// TypeScript.
+func TestServeCallsATypeScriptToolFromAStagedTree(t *testing.T) {
+	deno := requireToolchain(t, "deno")
+	agent := writeAgent(t, "staged-typescript-tool-agent", validInstructions)
+	writeTypeScriptTool(t, agent)
+	lockDependencies(t, agent, deno, "install", "--entrypoint", "tools/shout_text.ts")
+	out := filepath.Join(t.TempDir(), "staged")
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"stage", agent, "--harness", "claude", "--output", out}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("stage exit %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+	}
+
+	artifact := filepath.Join(out, "opt", "tenon", "artifact.json")
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"stage", "verify", "--artifact", artifact, "--prefix", out}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("a staged TypeScript-tool tree must verify: exit %d\nstderr: %s", code, stderr.String())
+	}
+
+	// The staged closure carries its own deno executable: launch execs it
+	// directly rather than depending on a build-machine PATH lookup.
+	closure := filepath.Join(out, "opt", "tenon", "runtimes", "tools")
+	found := false
+	_ = filepath.WalkDir(closure, func(path string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && filepath.Base(path) == "deno" && filepath.Base(filepath.Dir(path)) == "bin" {
+			found = true
+		}
+		return nil
+	})
+	if !found {
+		t.Fatal("the staged closure must carry its own deno executable at <closure>/deno/bin/deno")
+	}
+
+	stagedSource := filepath.Join(out, "opt", "tenon", "agents", "staged-typescript-tool-agent")
+	stagedWorkspace := filepath.Join(out, "workspace")
+
+	if _, err := os.Stat(filepath.Join(stagedWorkspace, ".tenon", "cache", "tools")); !os.IsNotExist(err) {
+		t.Fatalf("the staged workspace must carry no tool cache, found one (or a stat error): %v", err)
+	}
+
+	responses := serveManaged(t, stagedSource, "claude", stagedWorkspace, listRequest,
+		toolCall(2, "shout-text", `{"text":"hi"}`))
+
+	listed := listedTool(t, responses[0], "shout-text")
+	if listed["description"] != "Uppercase bounded text." {
+		t.Fatalf("description = %v", listed["description"])
+	}
+	result := callResult(t, responses[1])
+	if result["shouted"] != "HI" {
+		t.Fatalf("shout-text output = %#v", result)
 	}
 }

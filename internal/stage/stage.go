@@ -15,6 +15,7 @@
 package stage
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io/fs"
@@ -23,12 +24,13 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/alee792/tenon/internal/agentproject"
 	"github.com/alee792/tenon/internal/apply"
 	"github.com/alee792/tenon/internal/diagnostics"
-	"github.com/alee792/tenon/internal/mcp"
 	"github.com/alee792/tenon/internal/toolruntime"
+	"github.com/alee792/tenon/internal/version"
 )
 
 // SchemaVersion is the artifact manifest schema. It is tenon's own
@@ -143,9 +145,22 @@ func Stage(ctx context.Context, opts Options) (*Result, *diagnostics.List, error
 		return nil, diags, fmt.Errorf("reading agent source: %w", err)
 	}
 
-	languages, closureDir, err := prepareClosure(ctx, p, diags)
+	languages, closureDir, prepRoots, err := prepareClosure(ctx, p, diags)
 	if err != nil {
 		return nil, diags, err
+	}
+	if closureDir != "" {
+		// prepareClosure carries the prepared closure out into its own
+		// throwaway directory (closureDir's parent) so the later copyTree
+		// into the staged tree can read it after the prepare-time cache
+		// itself is gone. Once Stage is done with closureDir — on every
+		// return path, success or failure — that carried copy is a second,
+		// unpublished copy of the whole closure (tens to well over a
+		// hundred megabytes with a Python interpreter and its dependencies)
+		// with nothing left to clean it up; removing it only on the
+		// copy-failure path inside prepareClosure left it on disk after
+		// every successful stage.
+		defer os.RemoveAll(filepath.Dir(closureDir))
 	}
 	if diags.HasErrors() {
 		return nil, diags, nil
@@ -160,6 +175,15 @@ func Stage(ctx context.Context, opts Options) (*Result, *diagnostics.List, error
 	}
 
 	finalAgentSource := finalAgentsRoot + "/" + p.Name
+
+	// The final canonical directory the tool runtime closure will be staged
+	// under, or "" for a tool-free agent. Computed here, before the tree
+	// exists, so both the regenerated apply record (which names it) and the
+	// later copy step (which populates it) agree on the identical path.
+	var closureRootFinal string
+	if closureDir != "" {
+		closureRootFinal = finalRuntimes + "/tools"
+	}
 
 	// Directories that structure the tree. Ownership is recorded as intent;
 	// /opt is root-owned and read-only at runtime, /workspace and /home/tenon
@@ -189,7 +213,7 @@ func Stage(ctx context.Context, opts Options) (*Result, *diagnostics.List, error
 
 	// Step: generate the native integration for the final paths, writing the
 	// physical files under <tmp>/workspace while embedding /opt and /workspace.
-	genErr := generateIntegration(p, opts.Driver, finalAgentSource, tmp, diags)
+	genErr := generateIntegration(p, opts.Driver, finalAgentSource, closureRootFinal, tmp, diags)
 	if genErr != nil {
 		return nil, diags, genErr
 	}
@@ -220,8 +244,9 @@ func Stage(ctx context.Context, opts Options) (*Result, *diagnostics.List, error
 	// Step: carry the tool execution closure into /opt/tenon/runtimes.
 	runtimeInfo := RuntimeInfo{Bundled: false, Minimized: false}
 	if closureDir != "" {
-		dest := finalRuntimes + "/tools/" + filepath.Base(closureDir)
-		if err := copyTree(closureDir, physical(tmp, dest)); err != nil {
+		dest := closureRootFinal + "/" + filepath.Base(closureDir)
+		physDest := physical(tmp, dest)
+		if err := copyTree(closureDir, physDest); err != nil {
 			return nil, diags, fmt.Errorf("staging the tool runtime closure: %w", err)
 		}
 		runtimeInfo = RuntimeInfo{
@@ -229,11 +254,14 @@ func Stage(ctx context.Context, opts Options) (*Result, *diagnostics.List, error
 			Languages:   languages,
 			ClosurePath: dest,
 			Minimized:   false,
-			Note: "The prepared tool execution cache is staged whole. Build " +
-				"toolchain executables (go, deno, uv) are NOT copied: Go tools " +
-				"stage a self-contained host binary, while TypeScript and Python " +
-				"still require their interpreter on the base image PATH. The " +
-				"closure is not further minimized in this slice.",
+			Note: "The prepared tool execution cache is staged whole: Go tools " +
+				"stage a self-contained host binary and the go toolchain is NOT " +
+				"copied. The closure is not further minimized in this slice.",
+		}
+		if identity, ok, err := pythonInterpreterIdentity(physDest); err != nil {
+			return nil, diags, fmt.Errorf("recording the python interpreter identity: %w", err)
+		} else if ok {
+			runtimeInfo.Interpreters = map[string]string{toolruntime.Python: identity}
 		}
 	} else {
 		runtimeInfo.Note = "the agent declares no authored tools, so no language runtime is staged"
@@ -243,7 +271,7 @@ func Stage(ctx context.Context, opts Options) (*Result, *diagnostics.List, error
 	// so far, then publish with one rename.
 	artifact := &Artifact{
 		SchemaVersion:     SchemaVersion,
-		TenonVersion:      mcp.Version,
+		TenonVersion:      version.Version,
 		Harness:           HarnessInfo{Name: opts.Harness, Bundled: false, Note: harnessPlaceholderNote},
 		Agent:             p.Name,
 		SourceFingerprint: p.Fingerprint,
@@ -278,6 +306,29 @@ func Stage(ctx context.Context, opts Options) (*Result, *diagnostics.List, error
 		return nil, diags, fmt.Errorf("securing the artifact manifest: %w", err)
 	}
 
+	// Step: fail closed if any build-machine path survives anywhere in the
+	// staged tree, the artifact manifest included (ADR 0021's normalize-
+	// then-prove-relocatability step, widened from the prototype's
+	// generated-configuration-only rejectBuildPaths scan to the whole
+	// tree): the authored agent source directory and every throwaway root
+	// staging or tool preparation created must leave no trace once the
+	// tree is complete, whatever wrote it and however it was embedded — a
+	// rewritten go.mod (ADR 0021's own named example) proved a
+	// joined-absolute-string check insufficient on its own for text, so
+	// text is checked component by component; a compiled binary's own
+	// data is checked only for the fuller joined-path forms instead, since
+	// bare-component matching against it produces false positives no
+	// author-chosen path can dodge (see buildMachineJoinedNeedles).
+	if err := rejectBuildMachinePaths(tmp, closureRootFinal,
+		buildMachineNeedles(p.Root, tmp, prepRoots),
+		buildMachineJoinedNeedles(p.Root, tmp, prepRoots),
+		diags); err != nil {
+		return nil, diags, fmt.Errorf("scanning the staged tree for build-machine paths: %w", err)
+	}
+	if diags.HasErrors() {
+		return nil, diags, nil
+	}
+
 	if err := os.Rename(tmp, absOutput); err != nil {
 		return nil, diags, fmt.Errorf("publishing the staged tree: %w", err)
 	}
@@ -299,11 +350,15 @@ const harnessPlaceholderNote = "the native harness runtime is NOT bundled in thi
 	"/opt/tenon/harness is an empty placeholder and the entrypoint expects the harness executable on PATH or in the base image"
 
 // prepareClosure prepares the agent's authored tools into a throwaway staging
-// cache and returns the languages present and the prepared cache directory to
-// carry into the tree. A tool-free agent prepares nothing and returns "".
-func prepareClosure(ctx context.Context, p *agentproject.Project, diags *diagnostics.List) (languages []string, closureDir string, err error) {
+// cache and returns the languages present, the prepared cache directory to
+// carry into the tree, and every throwaway root it created (for the
+// build-machine-path scan Stage runs before publishing: preparation may
+// write these paths into the tree it's building, so the scan needs their
+// exact values, even though they are removed again before Stage returns).
+// A tool-free agent prepares nothing and returns no closure and no roots.
+func prepareClosure(ctx context.Context, p *agentproject.Project, diags *diagnostics.List) (languages []string, closureDir string, prepRoots []string, err error) {
 	if len(p.Tools) == 0 {
-		return nil, "", nil
+		return nil, "", nil, nil
 	}
 	langSet := map[string]bool{}
 	for _, t := range p.Tools {
@@ -317,14 +372,24 @@ func prepareClosure(ctx context.Context, p *agentproject.Project, diags *diagnos
 
 	cacheRoot, err := os.MkdirTemp("", "tenon-stage-cache-")
 	if err != nil {
-		return nil, "", fmt.Errorf("creating the staging cache: %w", err)
+		return nil, "", nil, fmt.Errorf("creating the staging cache: %w", err)
 	}
 	defer os.RemoveAll(cacheRoot)
 	workspace, err := os.MkdirTemp("", "tenon-stage-ws-")
 	if err != nil {
-		return nil, "", fmt.Errorf("creating the staging workspace: %w", err)
+		return nil, "", nil, fmt.Errorf("creating the staging workspace: %w", err)
 	}
 	defer os.RemoveAll(workspace)
+	prepRoots = []string{cacheRoot, workspace}
+	// The shared runtime cache (issue #38) is the one external location a
+	// closure is now allowed to be built from — an un-rewritten
+	// _sysconfigdata_*.py would otherwise bake in an operator's home
+	// directory path this scan would not otherwise recognize as dangerous.
+	sharedRoots, err := toolruntime.SharedRuntimeRoots()
+	if err != nil {
+		return nil, "", nil, fmt.Errorf("resolving the shared runtime cache roots: %w", err)
+	}
+	prepRoots = append(prepRoots, sharedRoots...)
 
 	cfg := toolruntime.Config{
 		Source:      p.Root,
@@ -335,23 +400,362 @@ func prepareClosure(ctx context.Context, p *agentproject.Project, diags *diagnos
 	}
 	if err := toolruntime.Prepare(ctx, cfg); err != nil {
 		diags.Errorf("stage.tool.prepare.failed", "tools", "%s", diagnostics.Bound(err.Error(), 512))
-		return nil, "", nil
+		return nil, "", nil, nil
 	}
 
 	// Copy the prepared cache out of the throwaway root before its deferred
 	// removal, into a staging-owned directory the caller then places in the
 	// tree.
 	prepared := cfg.CacheDir()
+
+	// A Python closure's standalone interpreter bakes its own install
+	// directory into one file, _sysconfigdata_*.py (ADR 0021): preparation
+	// wrote the throwaway prepare-time path, which staging now rewrites, in
+	// place, to the final canonical path the closure will actually occupy in
+	// the published tree — the same "normalize before proving
+	// relocatability" step ADR 0021 requires, and computable here because
+	// the final closure root is a function of prepared's own basename
+	// (the source fingerprint plus host digest), not of anything Stage
+	// builds later.
+	if langSet[toolruntime.Python] {
+		finalClosureRoot := finalRuntimes + "/tools/" + filepath.Base(prepared)
+		if err := toolruntime.RewritePythonSysconfigData(prepared, prepared, finalClosureRoot); err != nil {
+			return nil, "", nil, fmt.Errorf("normalizing the python closure for staging: %w", err)
+		}
+	}
+
+	// A TypeScript closure's DENO_DIR carries derived, path-keyed caches
+	// (type-check/codegen output) staging's own build-machine-path scan
+	// refuses to publish (ADR 0021): pruning them is staging-only
+	// normalization, not something a local `tenon apply`'s persistent
+	// workspace cache needs — see PruneDenoDirClosureCache. This must run
+	// after toolruntime.Prepare above has returned: Prepare's own
+	// inspection launch is itself a `deno run` that repopulates whatever
+	// derived caches it needs.
+	if langSet[toolruntime.TypeScript] {
+		if err := toolruntime.PruneDenoDirClosureCache(prepared); err != nil {
+			return nil, "", nil, fmt.Errorf("normalizing the typescript closure for staging: %w", err)
+		}
+	}
+
 	carry, err := os.MkdirTemp("", "tenon-stage-closure-")
 	if err != nil {
-		return nil, "", fmt.Errorf("creating the closure directory: %w", err)
+		return nil, "", nil, fmt.Errorf("creating the closure directory: %w", err)
 	}
+	prepRoots = append(prepRoots, carry)
 	dest := filepath.Join(carry, filepath.Base(prepared))
 	if err := copyTree(prepared, dest); err != nil {
 		os.RemoveAll(carry)
-		return nil, "", fmt.Errorf("carrying the tool runtime closure: %w", err)
+		return nil, "", nil, fmt.Errorf("carrying the tool runtime closure: %w", err)
 	}
-	return languages, dest, nil
+	return languages, dest, prepRoots, nil
+}
+
+// pythonInterpreterIdentity reads the interpreter identity a staged Python
+// closure at closureDir carries (for example
+// "cpython-3.11.13-linux-x86_64-gnu"), from the single directory name
+// `uv python install` gives it under closureDir/cpython. ok is false when
+// closureDir carries no cpython/ subdirectory at all — every other language's
+// closure, and any closure staged before Python tools existed.
+func pythonInterpreterIdentity(closureDir string) (identity string, ok bool, err error) {
+	entries, rerr := os.ReadDir(filepath.Join(closureDir, "cpython"))
+	if rerr != nil {
+		if os.IsNotExist(rerr) {
+			return "", false, nil
+		}
+		return "", false, rerr
+	}
+	for _, e := range entries {
+		if e.IsDir() && strings.HasPrefix(e.Name(), "cpython-") {
+			return e.Name(), true, nil
+		}
+	}
+	return "", false, fmt.Errorf("the staged python closure at %s carries no installed interpreter directory", closureDir)
+}
+
+// maxBuildPathScanFileBytes bounds one file the build-machine-path scan
+// reads into memory. It matches toolruntime's own bound on a runtime
+// executable copied whole into a closure (maxClosureExecutableBytes): the
+// scan must read every legitimately staged file, deno's own ~150MB
+// executable among them, whole. A file that exceeds it is an environment
+// surprise, not an authored contract violation, so it fails as an error
+// rather than a diagnostic.
+const maxBuildPathScanFileBytes = 256 << 20
+
+// minBuildPathComponentLen excludes short path segments from the
+// build-machine-path scan. A compiled binary's own data is not text: any
+// short alphanumeric run (a two- or three-character sequence, a Go test
+// harness's own "001"-style TempDir counters among them) has a real chance
+// of appearing somewhere in a nontrivial binary's bytes by pure coincidence,
+// while every realistic build-machine identifier this scan must catch — a
+// human-chosen project or session directory name, a `os.MkdirTemp` random
+// suffix — safely clears this bound.
+const minBuildPathComponentLen = 6
+
+// buildPathSafeComponents lists path segments expected to appear throughout
+// legitimate staged content — tenon's own canonical vocabulary, present in
+// every generated harness configuration and the artifact manifest, and the
+// most common generic filesystem directory names — so the build-machine-
+// path scan does not misfire on them. Every other segment of an authored
+// agent source path or a preparation temp root is specific enough (a
+// human-chosen project or session directory name, a randomly generated
+// mkdtemp suffix) that its appearance anywhere in the staged tree names a
+// leak rather than a coincidence.
+var buildPathSafeComponents = map[string]bool{
+	"tmp": true, "var": true, "private": true, "home": true, "users": true,
+	"root": true, "usr": true, "local": true, "opt": true, "go": true,
+	"src": true, "pkg": true, "bin": true, "lib": true, "etc": true,
+	"mnt": true, "data": true, "cache": true,
+	"tenon": true, "agent": true, "agents": true, "workspace": true,
+	"runtimes": true, "tools": true, "harness": true, "claude": true, "codex": true,
+	// "python" is now also a shared-runtime-cache directory name
+	// (toolruntime.SharedRuntimeRoots, issue #38) as well as ordinary
+	// content text throughout a Python-tool agent's own generated files
+	// (pyproject.toml, artifact.json's language field, .mcp.json) —
+	// tenon's own vocabulary, not an operator- or machine-specific detail.
+	"python": true,
+}
+
+// buildPathComponents splits dir into the path segments a build-machine-path
+// scan should treat as dangerous. skipLast drops the directory's own final
+// segment, for a caller whose basename is itself an expected, intentionally
+// published identity (the agent's own directory name, embedded on purpose
+// in the tree's canonical /opt/tenon/agents/<name> path) rather than a
+// build-machine detail.
+func buildPathComponents(dir string, skipLast bool) []string {
+	parts := strings.Split(filepath.ToSlash(filepath.Clean(dir)), "/")
+	if skipLast && len(parts) > 0 {
+		parts = parts[:len(parts)-1]
+	}
+	var out []string
+	for _, part := range parts {
+		if len(part) < minBuildPathComponentLen {
+			continue
+		}
+		if buildPathSafeComponents[strings.ToLower(part)] {
+			continue
+		}
+		out = append(out, part)
+	}
+	return out
+}
+
+// buildMachineNeedles collects every dangerous path component the
+// build-machine-path scan should search for in a text file: every segment
+// of the authored agent source directory except its own final segment (the
+// agent name, expected in canonical output), plus every segment of every
+// throwaway preparation root (the staging build directory and whatever
+// roots tool preparation used) — none of which may ever legitimately
+// survive inside the published tree.
+//
+// This component-by-component form is deliberately not used against a
+// binary file — see buildMachineJoinedNeedles and looksBinary.
+func buildMachineNeedles(agentRoot, stageTmp string, prepRoots []string) [][]byte {
+	seen := map[string]bool{}
+	var needles [][]byte
+	add := func(dir string, skipLast bool) {
+		for _, c := range buildPathComponents(dir, skipLast) {
+			if seen[c] {
+				continue
+			}
+			seen[c] = true
+			needles = append(needles, []byte(c))
+		}
+	}
+	add(agentRoot, true)
+	add(stageTmp, false)
+	for _, r := range prepRoots {
+		add(r, false)
+	}
+	return needles
+}
+
+// buildMachineJoinedNeedles collects the joined-path forms the
+// build-machine-path scan searches a binary file for: each dangerous
+// directory's own full path, unsplit, plus the single-level relative
+// reference ("../" + its own final segment) the same shape a fixed-name
+// build-source copy would take if it ever pointed at that directory
+// directly instead of its own safe constant name (see
+// toolruntime.copyGoModuleSource). Unlike buildMachineNeedles, these are
+// not filtered component by component: a real leak embeds a directory as
+// one contiguous run, and checking for that contiguous run is what makes
+// this safe to run against a binary's own data (see looksBinary) — a
+// compiled binary legitimately carries countless short, ordinary-looking
+// tokens (Go standard library package names, a module's own domain-style
+// import prefix and its owner segment) that collide with common directory
+// names by pure chance when matched component by component, but essentially
+// never reproduce a specific multi-segment directory path by coincidence.
+func buildMachineJoinedNeedles(agentRoot, stageTmp string, prepRoots []string) [][]byte {
+	seen := map[string]bool{}
+	var needles [][]byte
+	add := func(needle string) {
+		if needle == "" || seen[needle] {
+			return
+		}
+		seen[needle] = true
+		needles = append(needles, []byte(needle))
+	}
+	for _, dir := range append([]string{agentRoot, stageTmp}, prepRoots...) {
+		if dir == "" {
+			continue
+		}
+		clean := filepath.Clean(dir)
+		add(clean)
+		base := filepath.Base(clean)
+		if len(base) >= minBuildPathComponentLen && !buildPathSafeComponents[strings.ToLower(base)] {
+			add(".." + string(filepath.Separator) + base)
+		}
+	}
+	return needles
+}
+
+// looksBinary reports whether content is binary rather than text, by the
+// same signal most "file"-style tools use: a NUL byte, or bytes that are
+// not valid UTF-8. rejectBuildMachinePaths uses this only as a defensive
+// fallback within a file it has otherwise classified as tenon-generated
+// text (see carriedPayload): a compiled binary's own data legitimately
+// contains short generic-looking tokens a text file would not, so a
+// surprise binary landing in a "generated" position is still joined-matched
+// rather than component-matched.
+func looksBinary(content []byte) bool {
+	if bytes.IndexByte(content, 0) >= 0 {
+		return true
+	}
+	return !utf8.Valid(content)
+}
+
+// carriedPayload reports whether the staged file at rel (slash-separated,
+// relative to the staged tree root) is a runtime payload tenon carries in
+// from elsewhere — a compiled binary, or a third-party interpreter and
+// dependency tree — as opposed to text tenon itself generates or renders,
+// or the author's own copied source. The build-machine-path scan routes by
+// this provenance axis, not by whether a file's own bytes happen to look
+// binary: CPython's standalone interpreter alone ships roughly four
+// thousand ordinary TEXT files (its stdlib and C headers), each free to
+// carry short, ordinary-looking tokens ("github", "runner", "project", an
+// organization or CI runner's own directory name) that collide with a real
+// agent's path components by pure coincidence, exactly the false-positive
+// class component matching exists to avoid for a compiled binary's data —
+// so a carried-in tree is joined-matched wholesale regardless of whether
+// any one file inside it is text or binary. closureRootFinal is the
+// closure's own final canonical root (finalRuntimes+"/tools"), or "" for a
+// tool-free agent.
+func carriedPayload(rel, closureRootFinal string) bool {
+	if rel == strings.TrimPrefix(finalTenonBin, "/") {
+		return true
+	}
+	if closureRootFinal == "" {
+		return false
+	}
+	root := strings.TrimPrefix(closureRootFinal, "/") + "/"
+	withinClosureRoot, ok := strings.CutPrefix(rel, root)
+	if !ok {
+		return false
+	}
+	// withinClosureRoot is "<hash>/<rest>": one language closure sits
+	// directly under the closure root, named by source fingerprint plus
+	// host digest (toolruntime.Config.CacheDir). "<rest>" names the payload
+	// within it.
+	_, rest, ok := strings.Cut(withinClosureRoot, "/")
+	if !ok {
+		return false
+	}
+	switch {
+	case rest == "cpython" || strings.HasPrefix(rest, "cpython/"):
+		// The pinned standalone CPython interpreter tree: stdlib, C
+		// headers, the compiled interpreter binary and shared library.
+		return true
+	case rest == "site" || strings.HasPrefix(rest, "site/"):
+		// The project's own locked third-party dependencies, installed
+		// flat with no venv (ADR 0021) — carried in, not authored or
+		// rendered by tenon.
+		return true
+	case rest == "go/host":
+		// The compiled Go tool host binary. go.mod and main.go beside it
+		// are tenon-rendered text and stay component-matched.
+		return true
+	case rest == "deno" || strings.HasPrefix(rest, "deno/"):
+		// The copied deno executable itself.
+		return true
+	case rest == "deno-dir" || strings.HasPrefix(rest, "deno-dir/"):
+		// The pruned, cached-only DENO_DIR: downloaded npm package
+		// sources (arbitrary third-party text), carried in rather than
+		// authored or rendered by tenon — the same false-positive class
+		// CPython's stdlib text files exist to avoid.
+		return true
+	}
+	return false
+}
+
+// rejectBuildMachinePaths fails closed if any regular file inside root
+// embeds a dangerous build-machine path: preparation may write
+// machine-local paths, but publication may not carry them (ADR 0021). Each
+// file is routed by carriedPayload: a carried-in runtime payload (the
+// interpreter tree, the dependency directory, a compiled host binary, the
+// tenon executable) is checked only for the fuller joined-path forms
+// (joinedNeedles) — bare-component matching against payload data produces
+// the class of false positive an agent living under, say, a
+// `github.com/<org>/` path, or CPython's own thousands of ordinary stdlib
+// text files, triggers by pure coincidence; text tenon itself generates or
+// renders — the workspace integration, the apply record, a closure's own
+// go.mod/main.go, artifact.json, the copied agent source — is checked
+// component by component (componentNeedles), the same "a rewritten go.mod
+// proved a joined-absolute-string check insufficient on its own for text"
+// case ADR 0021 names, with looksBinary as a defensive fallback to joined
+// matching for the rare case a "generated" position turns out to hold
+// binary content after all. Every match is reported as a diagnostic naming
+// the offending staged path and the exact leaked text, so a caller sees
+// every leak in one run rather than stopping at the first.
+func rejectBuildMachinePaths(root, closureRootFinal string, componentNeedles, joinedNeedles [][]byte, diags *diagnostics.List) error {
+	if len(componentNeedles) == 0 && len(joinedNeedles) == 0 {
+		return nil
+	}
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !d.Type().IsRegular() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if info.Size() > maxBuildPathScanFileBytes {
+			return fmt.Errorf("the staged file %s exceeds the build-path scan's size bound", path)
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		relSlash := filepath.ToSlash(rel)
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+
+		needles := joinedNeedles
+		if !carriedPayload(relSlash, closureRootFinal) {
+			needles = componentNeedles
+			if looksBinary(content) {
+				needles = joinedNeedles
+			}
+		}
+		return matchNeedles(relSlash, content, needles, diags)
+	})
+}
+
+// matchNeedles reports every needle found in content as a
+// stage.tree.build-path-leaked diagnostic naming relSlash.
+func matchNeedles(relSlash string, content []byte, needles [][]byte, diags *diagnostics.List) error {
+	for _, needle := range needles {
+		if bytes.Contains(content, needle) {
+			diags.Errorf("stage.tree.build-path-leaked", relSlash,
+				"the staged file embeds the build-machine path %q; staging fails closed rather than publish a tree that verifies but carries preparation-machine detail",
+				string(needle))
+		}
+	}
+	return nil
 }
 
 // physical maps a canonical final path to its physical location under root.
