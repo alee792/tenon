@@ -185,7 +185,12 @@ generated always-on surface is simply empty.
 is an improvement. It collects no transcripts, no evaluations, and no
 scores. Evaluation, selection among revisions, and lineage tracking are out
 of scope absent a new ADR — lineage belongs to version control, a candidate
-being a source revision crossed with a supplied manifest. How variants are
+being a source revision crossed with a supplied manifest. Whether tenon
+should nonetheless own the *unit* that lineage is built from, and report a
+revision's change to the capability surface rather than to its bytes, is
+open: see [ADR 0024](adr/0024-add-observation-to-the-revision-leg.md) and
+[ADR 0025](adr/0025-make-the-fingerprint-the-unit-of-revision-identity.md),
+both proposed. How variants are
 isolated, whether worktrees, containers, or sandboxes, is the operator's
 infrastructure choice; tenon requires only that each variant is a directory
 that applies deterministically. The friction inbox is a supplementary
