@@ -441,7 +441,41 @@ func requireToolchain(t *testing.T, name string) string {
 		t.Skipf("%s is not on PATH; the polyglot tool journey needs deno, uv, and go. "+
 			"The host protocol, its bounds, and the Go tool journey are proven without it.", name)
 	}
+	isolateSharedRuntimeCache(t)
 	return found
+}
+
+// isolateSharedRuntimeCache points os.UserCacheDir() at a throwaway
+// directory for the test's lifetime, so exercising the shared Python
+// interpreter / deno runtime cache (internal/toolruntime's
+// sharedruntime.go) never reads from or writes into the machine's real,
+// persistent cache. os.UserCacheDir() reads $XDG_CACHE_HOME on every
+// platform this repo targets except darwin, which ignores it and always
+// resolves $HOME/Library/Caches directly, so both are overridden.
+func isolateSharedRuntimeCache(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	// chmodTreeReadOnly locks down the shared cache entries this test's own
+	// Prepare calls populate. t.TempDir()'s own registered cleanup can't
+	// os.RemoveAll a read-only tree — removing a directory entry needs
+	// write permission on its parent — so this restores every write bit
+	// first. Registered after t.TempDir() itself, so LIFO cleanup order
+	// runs this before t.TempDir()'s removal, not after.
+	t.Cleanup(func() {
+		_ = filepath.WalkDir(home, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			info, ierr := d.Info()
+			if ierr != nil {
+				return nil
+			}
+			_ = os.Chmod(path, info.Mode().Perm()|0o700)
+			return nil
+		})
+	})
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
 }
 
 // lockDependencies resolves the fixture's own locked dependencies with its
@@ -752,6 +786,59 @@ func TestPythonToolIsPreparedByApplyAndServedFromTheClosure(t *testing.T) {
 	}
 	if second := callResult(t, responses[2]); second["calls"] != float64(2) {
 		t.Fatalf("second call count = %v, want 2 from the same host process", second["calls"])
+	}
+}
+
+// TestApplyTwiceReusesTheSharedClosureForPythonAndTypeScript proves a
+// repeat `tenon apply` of an unchanged agent — Config.CacheDir() is
+// deterministic, so the second apply reuses the same per-agent closure
+// directory the first one already populated — succeeds and still serves,
+// for both the Python (interpreter installed once, hardlinked per agent)
+// and TypeScript (deno executable copied once, hardlinked per agent)
+// shared-runtime paths (issue #38). Before hardlinkFile removed its
+// destination first, the second apply failed outright: os.Link returns
+// EEXIST against an already-populated path, where the pre-#38 code
+// (uv python install's own idempotency; writeCacheFile's plain overwrite)
+// was reapply-safe by construction.
+func TestApplyTwiceReusesTheSharedClosureForPythonAndTypeScript(t *testing.T) {
+	uv := requireToolchain(t, "uv")
+	deno := requireToolchain(t, "deno")
+
+	pyAgent := writeAgent(t, "reapply-python-agent", validInstructions)
+	writePythonTool(t, pyAgent)
+	lockDependencies(t, pyAgent, uv, "lock")
+	pyWS := t.TempDir()
+
+	tsAgent := writeAgent(t, "reapply-typescript-agent", validInstructions)
+	writeTypeScriptTool(t, tsAgent)
+	lockDependencies(t, tsAgent, deno, "install", "--entrypoint", "tools/shout_text.ts")
+	tsWS := t.TempDir()
+
+	for _, tc := range []struct {
+		name, agent, ws, tool, args string
+	}{
+		{"python", pyAgent, pyWS, "count-words", `{"text":"one two three"}`},
+		{"typescript", tsAgent, tsWS, "shout-text", `{"text":"hi"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for attempt := 1; attempt <= 2; attempt++ {
+				var stdout, stderr bytes.Buffer
+				code := run([]string{"apply", tc.agent, "--harness", "claude", "--workspace", tc.ws}, nil, &stdout, &stderr)
+				if code != 0 {
+					t.Fatalf("apply #%d exit %d\nstdout: %s\nstderr: %s", attempt, code, stdout.String(), stderr.String())
+				}
+			}
+
+			// The closure left behind by the second apply must still
+			// actually serve, not merely have exited 0: a partially
+			// overwritten closure (some files linked to a new identity,
+			// stale sibling files left from the first apply) could exit
+			// clean and still be unable to launch its host. callResult
+			// fails the test on either a JSON-RPC-level error (no "result"
+			// key) or a tool-level one (isError: true).
+			responses := serveManaged(t, tc.agent, "claude", tc.ws, listRequest, toolCall(2, tc.tool, tc.args))
+			_ = callResult(t, responses[1])
+		})
 	}
 }
 

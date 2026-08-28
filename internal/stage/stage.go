@@ -381,6 +381,15 @@ func prepareClosure(ctx context.Context, p *agentproject.Project, diags *diagnos
 	}
 	defer os.RemoveAll(workspace)
 	prepRoots = []string{cacheRoot, workspace}
+	// The shared runtime cache (issue #38) is the one external location a
+	// closure is now allowed to be built from — an un-rewritten
+	// _sysconfigdata_*.py would otherwise bake in an operator's home
+	// directory path this scan would not otherwise recognize as dangerous.
+	sharedRoots, err := toolruntime.SharedRuntimeRoots()
+	if err != nil {
+		return nil, "", nil, fmt.Errorf("resolving the shared runtime cache roots: %w", err)
+	}
+	prepRoots = append(prepRoots, sharedRoots...)
 
 	cfg := toolruntime.Config{
 		Source:      p.Root,
@@ -410,7 +419,7 @@ func prepareClosure(ctx context.Context, p *agentproject.Project, diags *diagnos
 	// builds later.
 	if langSet[toolruntime.Python] {
 		finalClosureRoot := finalRuntimes + "/tools/" + filepath.Base(prepared)
-		if err := rewritePythonSysconfigData(prepared, finalClosureRoot); err != nil {
+		if err := toolruntime.RewritePythonSysconfigData(prepared, prepared, finalClosureRoot); err != nil {
 			return nil, "", nil, fmt.Errorf("normalizing the python closure for staging: %w", err)
 		}
 	}
@@ -464,52 +473,6 @@ func pythonInterpreterIdentity(closureDir string) (identity string, ok bool, err
 	return "", false, fmt.Errorf("the staged python closure at %s carries no installed interpreter directory", closureDir)
 }
 
-// rewritePythonSysconfigData rewrites, in place, every occurrence of oldRoot
-// (the throwaway directory the Python closure was actually prepared under)
-// to newRoot (the closure's final canonical path once staged) inside every
-// `_sysconfigdata_*.py` file under oldRoot — CPython's standalone interpreter
-// bakes its own install directory into exactly that one generated module
-// (verified against the closures `uv python install` produces: BINDIR,
-// BINLIBDEST, and the other absolute-path build_time_vars entries, all
-// sharing the one install-directory prefix); every other file under the
-// interpreter tree computes its paths at runtime relative to the running
-// binary. This is ADR 0021's own named example of the "rewrite the
-// enumerated files that embed an absolute preparation path" normalization
-// step, mirroring how the generated Go host's go.mod replace directive is
-// kept machine-independent (see renderGoHost).
-func rewritePythonSysconfigData(oldRoot, newRoot string) error {
-	if oldRoot == newRoot {
-		return nil
-	}
-	old := []byte(oldRoot)
-	replacement := []byte(newRoot)
-	return filepath.WalkDir(oldRoot, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() || !d.Type().IsRegular() {
-			return nil
-		}
-		name := d.Name()
-		if !strings.HasPrefix(name, "_sysconfigdata_") || !strings.HasSuffix(name, ".py") {
-			return nil
-		}
-		content, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		if !bytes.Contains(content, old) {
-			return nil
-		}
-		rewritten := bytes.ReplaceAll(content, old, replacement)
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		return os.WriteFile(path, rewritten, info.Mode().Perm())
-	})
-}
-
 // maxBuildPathScanFileBytes bounds one file the build-machine-path scan
 // reads into memory. It matches toolruntime's own bound on a runtime
 // executable copied whole into a closure (maxClosureExecutableBytes): the
@@ -545,6 +508,12 @@ var buildPathSafeComponents = map[string]bool{
 	"mnt": true, "data": true, "cache": true,
 	"tenon": true, "agent": true, "agents": true, "workspace": true,
 	"runtimes": true, "tools": true, "harness": true, "claude": true, "codex": true,
+	// "python" is now also a shared-runtime-cache directory name
+	// (toolruntime.SharedRuntimeRoots, issue #38) as well as ordinary
+	// content text throughout a Python-tool agent's own generated files
+	// (pyproject.toml, artifact.json's language field, .mcp.json) —
+	// tenon's own vocabulary, not an operator- or machine-specific detail.
+	"python": true,
 }
 
 // buildPathComponents splits dir into the path segments a build-machine-path

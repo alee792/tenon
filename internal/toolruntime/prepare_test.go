@@ -76,8 +76,11 @@ func TestNormalizePythonClosureRemovesUV0126MinorVersionSymlink(t *testing.T) {
 		t.Fatalf("fixture setup did not produce the sibling symlink: %v, %v", info, err)
 	}
 
-	if err := normalizePythonClosure(cpythonRoot, interpDir, siteDir); err != nil {
+	if err := normalizeInterpreterClosure(cpythonRoot, interpDir); err != nil {
 		t.Fatalf("normalizing a closure shaped like uv 0.12.6's output must succeed: %v", err)
+	}
+	if err := normalizeSiteClosure(siteDir); err != nil {
+		t.Fatalf("normalizing the site directory must succeed: %v", err)
 	}
 
 	// Zero symlinks survive anywhere in the closure — the same guarantee
