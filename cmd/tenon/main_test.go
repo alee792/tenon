@@ -2189,3 +2189,105 @@ func TestVersionCommandReportsTheStampedVersion(t *testing.T) {
 		t.Fatalf("version with an argument exit %d, want 2", code)
 	}
 }
+
+// TestConnectionCommandsProveInstructionsFreeRootByManifest proves the
+// connection subcommands accept both root proofs the specification's
+// Instructions section names, not only instructions.md: an instructions-free
+// directory proven by a supplied manifest is a legitimate agent — a candidate
+// an improvement loop may generate — and add, status, and remove all operate
+// on it. Every mutation re-mints the proving manifest, because the fingerprint
+// the manifest pins is exactly what the new connection file changes.
+func TestConnectionCommandsProveInstructionsFreeRootByManifest(t *testing.T) {
+	agent := writeAgent(t, "my-agent", "") // no instructions.md
+	withFakeResolver(t, "2.1.240", nil)
+
+	manifestPath := filepath.Join(t.TempDir(), "manifest.json")
+	mintManifest := func() {
+		t.Helper()
+		var out, errb bytes.Buffer
+		if code := run([]string{"manifest", "write", agent, "--harness", "claude", "--output", manifestPath}, nil, &out, &errb); code != 0 {
+			t.Fatalf("manifest write exit %d: %s", code, errb.String())
+		}
+	}
+	mintManifest()
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"connection", "add", agent, "catalog",
+		"--url", "https://example.com/mcp", "--manifest", manifestPath}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("add on a manifest-proven root exit %d: %s", code, stderr.String())
+	}
+	path := filepath.Join(agent, "connections", "catalog.md")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("add must have written the connection: %v", err)
+	}
+
+	// The added file changed the source, so the proving manifest is re-minted
+	// before the next command reads it.
+	mintManifest()
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"connection", "status", agent, "--manifest", manifestPath}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("status on a manifest-proven root exit %d: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "catalog: target=remote") {
+		t.Fatalf("status must report the connection: %q", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"connection", "remove", agent, "catalog", "--manifest", manifestPath}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("remove on a manifest-proven root exit %d: %s", code, stderr.String())
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("remove must have deleted the connection file")
+	}
+}
+
+// TestConnectionCommandsRefuseUnprovenRoot proves the relaxation is exactly the
+// specification's second proof and no wider: an instructions-free directory
+// with no supplied manifest, and one whose supplied manifest no longer matches
+// the directory, are both refused before any mutation.
+func TestConnectionCommandsRefuseUnprovenRoot(t *testing.T) {
+	agent := writeAgent(t, "my-agent", "") // no instructions.md
+	withFakeResolver(t, "2.1.240", nil)
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"connection", "add", agent, "catalog", "--url", "https://example.com/mcp"}, nil, &stdout, &stderr); code == 0 {
+		t.Fatal("expected failure: an instructions-free root with no manifest is unproven")
+	}
+	if _, err := os.Stat(filepath.Join(agent, "connections")); !os.IsNotExist(err) {
+		t.Fatal("a refused add must not create connections/")
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"connection", "status", agent}, nil, &stdout, &stderr); code == 0 {
+		t.Fatal("expected failure: an instructions-free root with no manifest is unproven")
+	}
+
+	manifestPath := filepath.Join(t.TempDir(), "manifest.json")
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"manifest", "write", agent, "--harness", "claude", "--output", manifestPath}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("manifest write exit %d: %s", code, stderr.String())
+	}
+	// Change the source after the manifest pinned it: the expected fingerprint
+	// no longer matches, so the manifest proves nothing.
+	if err := os.WriteFile(filepath.Join(agent, "instructions.md.bak"), []byte("drift"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(agent, "skills", "extra"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agent, "skills", "extra", "SKILL.md"),
+		[]byte("---\nname: extra\ndescription: An extra skill added after the manifest was written.\n---\n\nBody.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"connection", "status", agent, "--manifest", manifestPath}, nil, &stdout, &stderr); code == 0 {
+		t.Fatal("expected failure: a stale manifest does not prove the root")
+	}
+	if !strings.Contains(stderr.String(), "fingerprint") {
+		t.Fatalf("the refusal must name the fingerprint mismatch: %s", stderr.String())
+	}
+}

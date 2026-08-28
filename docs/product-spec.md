@@ -168,16 +168,19 @@ approval, authentication, discovery, calls, and effects. Name collisions with
 Authors need not hand-edit native configuration:
 
 ```text
-tenon connection add AGENT NAME --package PACKAGE --capability CAPABILITY [--context TEXT]
-tenon connection add AGENT NAME --url HTTPS_URL [--context TEXT]
-tenon connection status AGENT [NAME]
-tenon connection remove AGENT NAME
+tenon connection add AGENT NAME --url HTTPS_URL [--context TEXT] [--manifest PATH]
+tenon connection status AGENT [NAME] [--manifest PATH]
+tenon connection remove AGENT NAME [--manifest PATH]
 ```
 
-Commands take the exact positional agent root, never search ancestors or
-choose a harness, and finish by directing the author to run `tenon apply` for
-each intended workspace. There is no update command; the Markdown is ordinary
-versioned source.
+Commands take the exact positional agent root, proven either way the
+Instructions section names — so a supplied manifest proves an
+instructions-free root here exactly as it does for validate and apply — never
+search ancestors or choose a harness, and finish by directing the author to
+run `tenon apply` for each intended workspace. There is no update command;
+the Markdown is ordinary versioned source. Authoring an installed target
+through `connection add` is not available yet — the file is written by hand,
+which every other command here treats identically (see Known limitations).
 
 The GitHub connection is the canonical installed target: the official
 `github/github-mcp-server` executable, installed as an integration package,
@@ -593,6 +596,15 @@ credential-free tests (fake harness processes; no live model calls) prove:
 Recorded here rather than hidden, per the failure and safety principle
 above:
 
+- **`connection add` authors remote targets only.** The installed
+  package-and-capability target is fully specified, validated, resolved, and
+  emitted for both harnesses; only the authoring convenience is missing, so
+  `tenon connection add --package ... --capability ...` is refused with a
+  diagnostic rather than silently writing a file it cannot prove. Authors
+  write `connections/<name>.md` by hand — the two-line frontmatter shown in
+  [the native GitHub MCP journey](github-native-mcp.md) — and `connection
+  status`, `validate`, and `apply` treat the result exactly as they treat a
+  generated one.
 - **Staging.** Per [ADR 0021](adr/0021-execute-authored-tools-from-a-self-contained-closure.md),
   the native harness runtime is not yet bundled into the staged tree
   (expected on the base image), and the authored-tool execution closure is

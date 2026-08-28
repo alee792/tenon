@@ -53,9 +53,9 @@ const usage = `usage:
   tenon schedule run AGENT --workspace DIR --harness <claude|codex> [--manifest PATH] [--turn-timeout DUR] [--max-active-turns N]
   tenon stage AGENT --harness <claude|codex> --output DIR
   tenon stage verify --artifact PATH [--prefix DIR]
-  tenon connection add AGENT NAME --url HTTPS_URL [--context TEXT]
-  tenon connection status AGENT [NAME]
-  tenon connection remove AGENT NAME
+  tenon connection add AGENT NAME --url HTTPS_URL [--context TEXT] [--manifest PATH]
+  tenon connection status AGENT [NAME] [--manifest PATH]
+  tenon connection remove AGENT NAME [--manifest PATH]
   tenon integration install SOURCE --trust operator
   tenon integration inspect|verify|list|enable|disable|remove [ID]
   tenon integration update ID SOURCE --trust operator
@@ -1162,10 +1162,15 @@ func parsePositional(fs *flag.FlagSet, args []string) ([]string, bool) {
 }
 
 // proveAgentRoot resolves agent to an absolute path and proves it an agent
-// project the same way agentproject.Load does: instructions.md must be
-// present as a real regular file. It never searches ancestors and never
-// selects a workspace or harness (ADR 0016).
-func proveAgentRoot(agent, cmdName string, stderr io.Writer) (string, bool) {
+// project by either proof the specification's Instructions section names: a
+// present real regular instructions.md, or a supplied agent manifest whose
+// expected source fingerprint matches the directory. expectedFingerprint
+// carries that supplied fingerprint (empty when none), exactly as
+// agentproject.LoadWithManifest takes it; the fingerprint proof necessarily
+// loads the whole project, since the fingerprint only exists once every
+// authored input has been read. It never searches ancestors and never selects
+// a workspace or harness (ADR 0016).
+func proveAgentRoot(agent, cmdName, expectedFingerprint string, stderr io.Writer) (string, bool) {
 	root, err := filepath.Abs(agent)
 	if err != nil {
 		fmt.Fprintf(stderr, "tenon %s: %v\n", cmdName, err)
@@ -1177,11 +1182,24 @@ func proveAgentRoot(agent, cmdName string, stderr io.Writer) (string, bool) {
 		return "", false
 	}
 	instr, err := os.Lstat(filepath.Join(root, "instructions.md"))
-	if err != nil || instr.Mode()&os.ModeSymlink != 0 || !instr.Mode().IsRegular() {
-		fmt.Fprintf(stderr, "tenon %s: %s is not a proven agent project; instructions.md must be present as a real regular file\n", cmdName, agent)
+	if err == nil && instr.Mode()&os.ModeSymlink == 0 && instr.Mode().IsRegular() {
+		return root, true
+	}
+	if expectedFingerprint == "" {
+		fmt.Fprintf(stderr, "tenon %s: %s is not a proven agent project; instructions.md must be present as a real regular file, or --manifest must supply a manifest whose expected source fingerprint matches the directory\n", cmdName, agent)
 		return "", false
 	}
-	return root, true
+	p, diags, err := agentproject.LoadWithManifest(agent, expectedFingerprint)
+	if err != nil {
+		fmt.Fprintf(stderr, "tenon %s: %v\n", cmdName, err)
+		return "", false
+	}
+	if p == nil || diags.HasErrors() {
+		_ = diags.WriteProse(stderr)
+		fmt.Fprintf(stderr, "tenon %s: %s is not a proven agent project\n", cmdName, agent)
+		return "", false
+	}
+	return p.Root, true
 }
 
 // runConnectionAdd validates a new connection entirely offline — name, URL,
@@ -1195,6 +1213,7 @@ func runConnectionAdd(args []string, stdout, stderr io.Writer) int {
 	contextFlag := fs.String("context", "", "optional model-facing usage context")
 	packageFlag := fs.String("package", "", "installed package identifier (not supported yet)")
 	capabilityFlag := fs.String("capability", "", "installed capability identifier (not supported yet)")
+	manifestPath := fs.String("manifest", "", "optional supplied agent manifest proving an instructions-free root")
 
 	positional, ok := parsePositional(fs, args)
 	if !ok || len(positional) != 2 {
@@ -1212,9 +1231,18 @@ func runConnectionAdd(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	// Load proves the root and supplies the exact offline collision space
-	// (existing connections and accepted plugin MCP servers) add must check.
-	p, diags, err := agentproject.Load(agent)
+	supplied, err := readSuppliedManifest(*manifestPath)
+	if err != nil {
+		fmt.Fprintln(stderr, "tenon connection add:", err)
+		return 1
+	}
+
+	// Load proves the root — by instructions.md or by the supplied manifest's
+	// matching fingerprint, exactly as validate and apply do — and supplies the
+	// exact offline collision space (existing connections and accepted plugin
+	// MCP servers) add must check. Its proven root is the one add writes into,
+	// so add needs no separate root proof.
+	p, diags, err := agentproject.LoadWithManifest(agent, expectedFingerprint(supplied))
 	if err != nil {
 		fmt.Fprintln(stderr, "tenon connection add:", err)
 		return 1
@@ -1255,11 +1283,7 @@ func runConnectionAdd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	root, ok := proveAgentRoot(agent, "connection add", stderr)
-	if !ok {
-		return 1
-	}
-	connectionsDir := filepath.Join(root, "connections")
+	connectionsDir := filepath.Join(p.Root, "connections")
 	if err := os.MkdirAll(connectionsDir, 0o755); err != nil {
 		fmt.Fprintln(stderr, "tenon connection add:", err)
 		return 1
@@ -1299,9 +1323,10 @@ func runConnectionAdd(args []string, stdout, stderr io.Writer) int {
 func runConnectionStatus(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("connection status", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	manifestPath := fs.String("manifest", "", "optional supplied agent manifest proving an instructions-free root")
 	positional, ok := parsePositional(fs, args)
 	if !ok || len(positional) < 1 || len(positional) > 2 {
-		fmt.Fprintf(stderr, "tenon connection status: usage: tenon connection status AGENT [NAME]\n")
+		fmt.Fprintf(stderr, "tenon connection status: usage: tenon connection status AGENT [NAME] [--manifest PATH]\n")
 		return 2
 	}
 	agent := positional[0]
@@ -1310,7 +1335,12 @@ func runConnectionStatus(args []string, stdout, stderr io.Writer) int {
 		filterName = positional[1]
 	}
 
-	if _, ok := proveAgentRoot(agent, "connection status", stderr); !ok {
+	supplied, err := readSuppliedManifest(*manifestPath)
+	if err != nil {
+		fmt.Fprintln(stderr, "tenon connection status:", err)
+		return 1
+	}
+	if _, ok := proveAgentRoot(agent, "connection status", expectedFingerprint(supplied), stderr); !ok {
 		return 1
 	}
 
@@ -1405,14 +1435,20 @@ func installedConnectionHealth(store *integration.Store, c agentproject.Connecti
 func runConnectionRemove(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("connection remove", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	manifestPath := fs.String("manifest", "", "optional supplied agent manifest proving an instructions-free root")
 	positional, ok := parsePositional(fs, args)
 	if !ok || len(positional) != 2 {
-		fmt.Fprintf(stderr, "tenon connection remove: usage: tenon connection remove AGENT NAME\n")
+		fmt.Fprintf(stderr, "tenon connection remove: usage: tenon connection remove AGENT NAME [--manifest PATH]\n")
 		return 2
 	}
 	agent, name := positional[0], positional[1]
 
-	root, ok := proveAgentRoot(agent, "connection remove", stderr)
+	supplied, err := readSuppliedManifest(*manifestPath)
+	if err != nil {
+		fmt.Fprintln(stderr, "tenon connection remove:", err)
+		return 1
+	}
+	root, ok := proveAgentRoot(agent, "connection remove", expectedFingerprint(supplied), stderr)
 	if !ok {
 		return 1
 	}

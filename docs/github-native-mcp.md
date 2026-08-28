@@ -33,16 +33,15 @@ and required environment *name* with `value=not-read`. `verify` is the offline
 status check for every cached byte. Neither command starts the package or reads
 the PAT.
 
-Add the connection to the exact agent root:
+Add the connection to the exact agent root. `tenon connection add` does not
+author installed targets yet (see the specification's Known limitations), so
+write the file directly and check it offline:
 
 ```sh
-tenon connection add ./my-agent github \
-  --package github-mcp-server --capability github \
-  --context "Use the official native GitHub tools for repository, issue, and pull-request work."
 tenon connection status ./my-agent github
 ```
 
-This atomically creates the ordinary versioned source:
+The connection is ordinary versioned source:
 
 ```text
 my-agent/
