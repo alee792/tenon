@@ -151,6 +151,52 @@ The north star's own rule requires that separation — it changes "only
 through a dedicated ADR naming the evidence that changed, never in the same
 change that benefits from the amendment."
 
+## Capturing the edge
+
+Lineage is cheap to keep and impossible to reconstruct, so the sequence
+matters more than the storage. An outer loop driving one revision:
+
+```sh
+# 1. Name the parent BEFORE the inner loop touches anything.
+parent=$(tenon fingerprint show "$AGENT" --diagnostics jsonl | tail -1 |
+         jq -r .fingerprint)
+
+# 2. Let the inner loop mutate the source. Tenon is not present for this.
+
+# 3. Gate the result. A revision that fails here has no fingerprint, so
+#    record it by the identifiers that rejected it and stop.
+if ! rejected=$(tenon validate "$AGENT" --harness claude \
+                  --diagnostics jsonl); then
+  record_rejection "$parent" "$(jq -rs 'map(select(.id).id)|unique' \
+                                 <<<"$rejected")"
+  exit 0
+fi
+
+# 4. Name the child, apply, and record the edge.
+child=$(tenon apply "$AGENT" --harness claude --diagnostics jsonl |
+        tail -1 | jq -r .fingerprint)
+record_edge "$parent" "$child"
+```
+
+The whole discipline is step 1. Steps 3 and 4 read identities tenon hands
+back anyway; step 1 is the only one that captures something tenon will
+never be able to supply again, because after step 2 the parent tree no
+longer exists anywhere. A loop that fingerprints only after mutating has
+well-formed nodes and no edges, and no later inspection recovers them.
+
+Two details worth getting right. The rollup arrives on the stream's final
+line, which is shaped differently from the per-file entries — it carries
+`fingerprint` and no `path` — so `tail -1` is reading a documented shape
+rather than guessing. And a rejected revision is still a node: recording
+the parent alongside the identifier set is what distinguishes "the loop
+explored this direction and it was malformed" from "the loop never tried
+it," which an outer loop scoring exploration wants to tell apart.
+
+Everything above is the consumer's code, not tenon's. Tenon's obligation
+is only that the identities are there to capture, which
+[ADR 0025](../adr/0025-make-the-fingerprint-the-unit-of-revision-identity.md)
+states as the four properties of the unit.
+
 ## What this does not argue for
 
 - Not a replacement for git. The outer loop should keep using git for

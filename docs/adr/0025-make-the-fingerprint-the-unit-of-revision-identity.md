@@ -46,6 +46,25 @@ identifier set that rejected it — stable across releases, matching apply's
 own failures, and parseable without reading prose. An outer loop's lineage
 thus has two node kinds and needs no tenon-side history to build either.
 
+**The edge is captured, never recovered.** The fingerprint is a content
+digest, so nothing about a revision's parent is derivable from it: two
+fingerprints establish same or different, and no ordering, distance, or
+ancestry. Chaining the parent into the digest — what a commit hash does —
+would supply ancestry at the cost of determinism, and recognizing a
+revision already seen is worth more to a loop than deriving where it came
+from, so the fingerprint stays parentless by construction.
+
+The consequence binds the consumer rather than tenon: an outer loop that
+wants an edge must fingerprint the source **before** handing it to the
+inner loop, not only after. Tenon cannot supply the edge even in
+principle, because it is not present when the edge is created — the inner
+loop mutates files inside the harness, and tenon first sees the directory
+at the next validate or apply, by which time the parent state is gone.
+Capture is therefore the loop's own discipline, and a parent not captured
+at dispatch time is unrecoverable rather than merely inconvenient. The
+[revision observability record](../workbench/revision-observability.md)
+carries the sequence and what each step buys.
+
 Tenon retains no sequence of revisions, no parent pointers, no scores, and
 no transcripts, and never decides which revision supersedes which. This is
 not a re-decision of the lineage-tracking non-goal in `AGENTS.md`: it draws
