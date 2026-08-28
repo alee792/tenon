@@ -155,7 +155,10 @@ func prepareLanguage(ctx context.Context, cfg Config, dir, language string) erro
 		if err != nil {
 			return err
 		}
-		return hardlinkFile(sharedDeno, filepath.Join(dir, "deno", "bin", "deno"))
+		if err := hardlinkFile(sharedDeno, filepath.Join(dir, "deno", "bin", "deno")); err != nil {
+			return prepareFailure(TypeScript, "the deno executable could not be linked into the closure: %v", err)
+		}
+		return nil
 
 	case Python:
 		if err := writeCacheFile(filepath.Join(dir, "python.py"), pythonHost, 0o600); err != nil {
@@ -313,7 +316,21 @@ func prepareClosurePython(ctx context.Context, cfg Config, dir, uv string) error
 		return err
 	}
 	sharedIdentityDir := filepath.Join(sharedRoot, identity)
-	perAgentIdentityDir := filepath.Join(dir, "cpython", identity)
+	perAgentCpythonRoot := filepath.Join(dir, "cpython")
+	perAgentIdentityDir := filepath.Join(perAgentCpythonRoot, identity)
+	// A repeat prepare of an already-populated closure (Config.CacheDir()
+	// is deterministic, so an unchanged agent's second `tenon apply` reuses
+	// the same dir) must not accumulate a stale sibling identity directory
+	// if a floor spec (requires-python, no exact .python-version pin)
+	// resolves to a different patch than it did last time — pythonClosureLayout
+	// errors if it ever finds more than one cpython-* match. Clearing the
+	// whole per-agent cpython/ root first, every prepare, keeps exactly one
+	// identity present regardless of what the previous prepare wrote;
+	// hardlinkFile's own remove-before-link handles same-identity
+	// overwrite, this handles identity change.
+	if err := os.RemoveAll(perAgentCpythonRoot); err != nil {
+		return prepareFailure(Python, "the previous python closure could not be cleared: %v", err)
+	}
 	// Every file except _sysconfigdata_*.py is a plain hardlink: the shared
 	// store was already normalized once, so the per-agent closure inherits
 	// "already symlink-free" for free. sysconfigdata bakes in its own

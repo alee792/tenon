@@ -381,6 +381,15 @@ func prepareClosure(ctx context.Context, p *agentproject.Project, diags *diagnos
 	}
 	defer os.RemoveAll(workspace)
 	prepRoots = []string{cacheRoot, workspace}
+	// The shared runtime cache (issue #38) is the one external location a
+	// closure is now allowed to be built from — an un-rewritten
+	// _sysconfigdata_*.py would otherwise bake in an operator's home
+	// directory path this scan would not otherwise recognize as dangerous.
+	sharedRoots, err := toolruntime.SharedRuntimeRoots()
+	if err != nil {
+		return nil, "", nil, fmt.Errorf("resolving the shared runtime cache roots: %w", err)
+	}
+	prepRoots = append(prepRoots, sharedRoots...)
 
 	cfg := toolruntime.Config{
 		Source:      p.Root,
@@ -499,6 +508,12 @@ var buildPathSafeComponents = map[string]bool{
 	"mnt": true, "data": true, "cache": true,
 	"tenon": true, "agent": true, "agents": true, "workspace": true,
 	"runtimes": true, "tools": true, "harness": true, "claude": true, "codex": true,
+	// "python" is now also a shared-runtime-cache directory name
+	// (toolruntime.SharedRuntimeRoots, issue #38) as well as ordinary
+	// content text throughout a Python-tool agent's own generated files
+	// (pyproject.toml, artifact.json's language field, .mcp.json) —
+	// tenon's own vocabulary, not an operator- or machine-specific detail.
+	"python": true,
 }
 
 // buildPathComponents splits dir into the path segments a build-machine-path

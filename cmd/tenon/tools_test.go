@@ -789,6 +789,59 @@ func TestPythonToolIsPreparedByApplyAndServedFromTheClosure(t *testing.T) {
 	}
 }
 
+// TestApplyTwiceReusesTheSharedClosureForPythonAndTypeScript proves a
+// repeat `tenon apply` of an unchanged agent — Config.CacheDir() is
+// deterministic, so the second apply reuses the same per-agent closure
+// directory the first one already populated — succeeds and still serves,
+// for both the Python (interpreter installed once, hardlinked per agent)
+// and TypeScript (deno executable copied once, hardlinked per agent)
+// shared-runtime paths (issue #38). Before hardlinkFile removed its
+// destination first, the second apply failed outright: os.Link returns
+// EEXIST against an already-populated path, where the pre-#38 code
+// (uv python install's own idempotency; writeCacheFile's plain overwrite)
+// was reapply-safe by construction.
+func TestApplyTwiceReusesTheSharedClosureForPythonAndTypeScript(t *testing.T) {
+	uv := requireToolchain(t, "uv")
+	deno := requireToolchain(t, "deno")
+
+	pyAgent := writeAgent(t, "reapply-python-agent", validInstructions)
+	writePythonTool(t, pyAgent)
+	lockDependencies(t, pyAgent, uv, "lock")
+	pyWS := t.TempDir()
+
+	tsAgent := writeAgent(t, "reapply-typescript-agent", validInstructions)
+	writeTypeScriptTool(t, tsAgent)
+	lockDependencies(t, tsAgent, deno, "install", "--entrypoint", "tools/shout_text.ts")
+	tsWS := t.TempDir()
+
+	for _, tc := range []struct {
+		name, agent, ws, tool, args string
+	}{
+		{"python", pyAgent, pyWS, "count-words", `{"text":"one two three"}`},
+		{"typescript", tsAgent, tsWS, "shout-text", `{"text":"hi"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for attempt := 1; attempt <= 2; attempt++ {
+				var stdout, stderr bytes.Buffer
+				code := run([]string{"apply", tc.agent, "--harness", "claude", "--workspace", tc.ws}, nil, &stdout, &stderr)
+				if code != 0 {
+					t.Fatalf("apply #%d exit %d\nstdout: %s\nstderr: %s", attempt, code, stdout.String(), stderr.String())
+				}
+			}
+
+			// The closure left behind by the second apply must still
+			// actually serve, not merely have exited 0: a partially
+			// overwritten closure (some files linked to a new identity,
+			// stale sibling files left from the first apply) could exit
+			// clean and still be unable to launch its host. callResult
+			// fails the test on either a JSON-RPC-level error (no "result"
+			// key) or a tool-level one (isError: true).
+			responses := serveManaged(t, tc.agent, "claude", tc.ws, listRequest, toolCall(2, tc.tool, tc.args))
+			_ = callResult(t, responses[1])
+		})
+	}
+}
+
 // TestServeCallsAPythonToolFromAStagedTree is ADR 0021's acceptance shape for
 // Python: stage a Python-tool agent, verify the staged tree, then serve from
 // the staged workspace and staged closure with no workspace tool cache ever

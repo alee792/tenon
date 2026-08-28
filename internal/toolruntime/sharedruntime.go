@@ -37,6 +37,26 @@ import (
 // contended shared-runtime-cache lock.
 const runtimeLockPollInterval = 100 * time.Millisecond
 
+// SharedRuntimeRoots returns every machine-wide shared runtime cache root
+// this package may install into (issue #38) — the one location outside an
+// agent's own closure, source, and workspace that a prepared closure is
+// now allowed to be built from. Exported so staging's own build-machine-
+// path leak scan (ADR 0021) can name these as needle roots alongside the
+// throwaway prepare and workspace roots it already scans: an un-rewritten
+// _sysconfigdata_*.py (see RewritePythonSysconfigData) would otherwise bake
+// in an operator's home directory path that scan has no way to recognize.
+func SharedRuntimeRoots() ([]string, error) {
+	var roots []string
+	for _, kind := range []string{"python", "deno"} {
+		root, err := sharedRuntimeRoot(kind)
+		if err != nil {
+			return nil, err
+		}
+		roots = append(roots, root)
+	}
+	return roots, nil
+}
+
 // sharedRuntimeRoot is the machine-wide directory one runtime kind's shared
 // cache lives under, matching the machine-wide cache convention
 // internal/schedule already established for its own lock files
@@ -101,6 +121,33 @@ func markSharedRuntimeReady(path string) error {
 	return os.Rename(tmp, path)
 }
 
+// resetSharedEntry wipes a shared runtime cache entry directory that
+// exists but was never marked ready — either uv's own leftover partial
+// install, or the debris of a crash between chmodTreeReadOnly securing an
+// entry and markSharedRuntimeReady recording it — so installation always
+// starts from a clean, writable slate rather than building on untrusted,
+// possibly read-only state (a build tool re-pointed at an already
+// chmodTreeReadOnly'd directory that was never marked ready is exactly how
+// normalizeInterpreterClosure and writeCacheFile were found to fail:
+// os.RemoveAll and a fresh os.WriteFile both need write permission the
+// prior, half-finished attempt already stripped). A path that does not
+// exist is a silent no-op, so callers may call this unconditionally before
+// a fresh install rather than gating it on an existence check themselves.
+func resetSharedEntry(dir string) error {
+	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil // best effort; RemoveAll below reports the real failure
+		}
+		info, ierr := d.Info()
+		if ierr != nil {
+			return nil
+		}
+		_ = os.Chmod(path, info.Mode().Perm()|0o700) // best effort; keep walking regardless
+		return nil
+	})
+	return os.RemoveAll(dir)
+}
+
 // chmodTreeReadOnly strips every write bit under root, recursively —
 // defense in depth against a multiply-hardlinked shared-cache file ever
 // being mutated in place. Because a hardlink shares one inode with its
@@ -130,8 +177,19 @@ var linkFn = os.Link
 // filesystem boundary — a shared cache under the user's home directory and
 // a workspace on a different volume or network mount is a realistic local
 // layout, not just a portability nicety.
+//
+// dst is removed first, ignoring a not-exist error, so a repeat prepare of
+// an already-populated closure — an unchanged agent's second `tenon
+// apply`, concretely, since Config.CacheDir() is deterministic and Prepare
+// runs unconditionally — overwrites rather than failing on os.Link's
+// EEXIST. Removing dst needs only write permission on its parent
+// directory, never on dst itself, so this succeeds even though dst may be
+// a hardlink sharing an inode with the shared store's own read-only copy.
 func hardlinkFile(src, dst string) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+		return err
+	}
+	if err := os.Remove(dst); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	if err := linkFn(src, dst); err != nil {

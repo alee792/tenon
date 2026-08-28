@@ -78,9 +78,21 @@ func ensureSharedPythonInterpreter(ctx context.Context, uv, spec string) (string
 		// resolve a second time at all.
 		if found, ok, serr := scanSharedIdentity(root, spec); serr != nil {
 			return serr
-		} else if ok && markerReady(sharedReadyMarker(root, found)) {
-			identity = found
-			return nil
+		} else if ok {
+			if markerReady(sharedReadyMarker(root, found)) {
+				identity = found
+				return nil
+			}
+			// Found but never marked ready: either uv's own leftover
+			// partial install, or a crash between chmodTreeReadOnly
+			// securing this entry and markSharedRuntimeReady recording it.
+			// Left in place, its read-only permissions make uv's own
+			// re-install attempt fail, permanently poisoning this identity
+			// for every future prepare on the machine — wipe it first so
+			// installation starts clean.
+			if err := resetSharedEntry(filepath.Join(root, found)); err != nil {
+				return prepareFailure(Python, "an incomplete shared python runtime entry could not be cleared: %v", err)
+			}
 		}
 
 		env := hostEnv("PYTHONDONTWRITEBYTECODE=1")
@@ -166,10 +178,18 @@ func scanSharedIdentity(root, spec string) (identity string, ok bool, err error)
 // half of what normalizePythonClosure used to do in one pass.
 //
 // The allowed symlink-target root is cpythonRoot alone, narrower than the
-// combined cpythonRoot-plus-siteDir set the single prior pass used: see
-// sharedpython_test.go for the proof `uv pip install --target` never
-// produces a symlink pointing back into the interpreter tree, which is
-// what makes this narrowing safe rather than merely convenient.
+// combined cpythonRoot-plus-siteDir set the single prior pass used. This
+// assumes `uv pip install --target` never produces a symlink pointing back
+// into the interpreter tree — unverified against every uv release, unlike
+// the interpreter's own convenience-symlink shape, which prior CI failures
+// have already forced this package to characterize precisely (see
+// removePythonClosureSymlinks's doc). If that assumption is ever wrong,
+// the narrowing fails safe rather than silently: removePythonClosureSymlinks
+// refuses a symlink whose target resolves outside its own allowed roots
+// rather than deleting or ignoring it (TestRemovePythonClosureSymlinksRefusesATargetOutsideTheClosure
+// proves the general mechanism; TestNormalizeSiteClosureFailsClosedOnASymlinkIntoTheInterpreterTree
+// proves this specific narrowing does too), so a wrong assumption here
+// surfaces as a named preparation failure, not a leaked or lost file.
 func normalizeInterpreterClosure(cpythonRoot, interpDir string) error {
 	for _, p := range []string{
 		filepath.Join(interpDir, "share", "terminfo"),

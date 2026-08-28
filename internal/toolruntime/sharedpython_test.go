@@ -77,6 +77,42 @@ func TestScanSharedIdentityMatchesFloorAndExactSpecs(t *testing.T) {
 	}
 }
 
+// TestNormalizeSiteClosureFailsClosedOnASymlinkIntoTheInterpreterTree
+// proves normalizeInterpreterClosure/normalizeSiteClosure's split scan is
+// safe even if its own stated assumption — `uv pip install --target` never
+// produces a symlink pointing back into the interpreter tree — is ever
+// wrong: since normalizeSiteClosure's allowed target root is siteDir
+// alone, narrower than the single prior combined-root pass, a symlink
+// under siteDir pointing into a sibling interpreter directory must be
+// refused (a named preparation failure) rather than silently deleted,
+// silently kept, or misinterpreted as pointing nowhere.
+func TestNormalizeSiteClosureFailsClosedOnASymlinkIntoTheInterpreterTree(t *testing.T) {
+	dir := t.TempDir()
+	cpythonRoot := filepath.Join(dir, "cpython")
+	interpDir := filepath.Join(cpythonRoot, "cpython-3.11.13-linux-x86_64-gnu")
+	siteDir := filepath.Join(dir, "site")
+	if err := os.MkdirAll(interpDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(siteDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A hypothetical console-script shim in siteDir pointing back into the
+	// interpreter tree — exactly the shape the doc comment says
+	// normalizeSiteClosure no longer tolerates, now that its allowed
+	// target root no longer includes cpythonRoot.
+	if err := os.Symlink(interpDir, filepath.Join(siteDir, "surprise-shim")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := normalizeSiteClosure(siteDir); err == nil {
+		t.Fatal("a symlink from siteDir into the interpreter tree must be refused now that the scan is siteDir-only, not silently accepted")
+	}
+	if _, err := os.Lstat(filepath.Join(siteDir, "surprise-shim")); err != nil {
+		t.Fatalf("a refused symlink must be left in place, not silently removed: %v", err)
+	}
+}
+
 func TestScanSharedIdentityOnMissingRootIsNotAnError(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "does-not-exist")
 	if _, ok, err := scanSharedIdentity(root, "3.11"); err != nil || ok {

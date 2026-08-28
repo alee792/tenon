@@ -84,17 +84,30 @@ func TestWithRuntimeLockHonorsContextCancellation(t *testing.T) {
 	<-held
 	defer close(release)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	const timeout = 300 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	start := time.Now()
 	err := withRuntimeLock(ctx, "ctxtest", func() error {
 		t.Fatal("fn must not run while the lock is held elsewhere")
 		return nil
 	})
-	if err == nil {
-		t.Fatal("a contended lock must fail once ctx is done, not block forever")
+	// Asserting errors.Is(err, context.DeadlineExceeded) specifically,
+	// not just err != nil, proves the poll loop actually waited out ctx
+	// rather than failing immediately for an unrelated reason (a bad
+	// UserCacheDir, an unopenable lock file) that would trivially satisfy
+	// a bare non-nil check.
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("a contended lock must fail with the context's own deadline error, got: %v", err)
 	}
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
+	// The lower bound proves the poll loop genuinely waited near the full
+	// timeout rather than returning early for some other reason; the upper
+	// bound proves it did not miss the deadline and keep polling past it.
+	elapsed := time.Since(start)
+	if elapsed < timeout-50*time.Millisecond {
+		t.Fatalf("withRuntimeLock returned too early (%v) for a %v timeout; it may not have actually waited", elapsed, timeout)
+	}
+	if elapsed > 2*time.Second {
 		t.Fatalf("ctx cancellation must unblock promptly, took %v", elapsed)
 	}
 }

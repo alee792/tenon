@@ -50,6 +50,17 @@ func ensureSharedDeno(ctx context.Context, deno string) (identity, sharedPath st
 		if markerReady(marker) {
 			return nil
 		}
+		// The entry directory may already exist but never have been marked
+		// ready — either a previous call's leftover partial write, or a
+		// crash between chmodTreeReadOnly securing it and
+		// markSharedRuntimeReady recording it. Left in place, its
+		// read-only permissions make a fresh writeCacheFile fail,
+		// permanently poisoning this identity for every future prepare on
+		// the machine — wipe it first so this call starts clean.
+		// resetSharedEntry is a silent no-op when nothing is there yet.
+		if err := resetSharedEntry(filepath.Dir(dst)); err != nil {
+			return prepareFailure(TypeScript, "an incomplete shared deno runtime entry could not be cleared: %v", err)
+		}
 		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
 			return prepareFailure(TypeScript, "the shared deno runtime directory could not be created")
 		}
