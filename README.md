@@ -62,6 +62,16 @@ The measure of the product is that the journey above is only the first leg:
 
 All of it without editing the folder.
 
+## What people use it for
+
+Seven concrete jobs, each grounded in behavior that exists today: authoring an
+agent as reviewable files, carrying one source of truth across harnesses,
+composing vendored plugins and native MCP connections, giving an improvement
+loop a substrate, running the same folder headless or scheduled, staging it
+for a container, and fixing a reproducible baseline for evaluation. Each
+names its own boundary and what is not yet built. See
+[use cases](docs/use-cases.md).
+
 ## Install
 
 The first release, v0.1.0, is not yet published — this section is written
@@ -132,7 +142,9 @@ tenon apply . --harness claude   # or: --harness codex
 
 Apply materializes the revision into the workspace and records a source
 fingerprint with the apply, tying the revision to its exact configuration —
-whatever runs next joins back to that fingerprint.
+whatever runs next joins back to that fingerprint. The loop's full boundary —
+what tenon proves and what it deliberately leaves outside — is
+[use case four](docs/use-cases.md#give-an-improvement-loop-a-substrate).
 
 ## Reproducible baselines
 
