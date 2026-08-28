@@ -144,12 +144,18 @@ func prepareLanguage(ctx context.Context, cfg Config, dir, language string) erro
 			cfg.Source, hostEnv("DENO_DIR="+denoDir)); err != nil {
 			return err
 		}
-		// Copying deno into the closure now, ahead of Prepare's inspection
+		// Linking deno into the closure now, ahead of Prepare's inspection
 		// launch below, is what lets hostCommand exec it. DENO_DIR is left
 		// unpruned here: only staging needs it pruned, and only after
 		// Prepare's own inspection launch has run (see
-		// PruneDenoDirClosureCache).
-		return copyClosureDeno(dir, deno)
+		// PruneDenoDirClosureCache). The shared deno runtime cache
+		// (shareddeno.go) means this copies the executable at most once per
+		// machine, not once per agent.
+		_, sharedDeno, err := ensureSharedDeno(ctx, deno)
+		if err != nil {
+			return err
+		}
+		return hardlinkFile(sharedDeno, filepath.Join(dir, "deno", "bin", "deno"))
 
 	case Python:
 		if err := writeCacheFile(filepath.Join(dir, "python.py"), pythonHost, 0o600); err != nil {
@@ -220,39 +226,6 @@ func prepareLanguage(ctx context.Context, cfg Config, dir, language string) erro
 // staging disk space.
 const maxClosureExecutableBytes = 256 << 20
 
-// copyClosureDeno copies deno's own executable into the closure at a fixed,
-// closure-relative location (ADR 0021's prototype-proven fallback — the
-// closure carries the runtime itself rather than a path back to the machine
-// that prepared it, exactly like the Go host binary and the Python
-// interpreter), so launch (hostCommand) execs it directly rather than
-// depending on PATH.
-func copyClosureDeno(dir, deno string) error {
-	binDir := filepath.Join(dir, "deno", "bin")
-	if err := os.MkdirAll(binDir, 0o700); err != nil {
-		return prepareFailure(TypeScript, "the deno closure directory could not be created")
-	}
-	return copyClosureExecutable(filepath.Join(binDir, "deno"), deno)
-}
-
-// copyClosureExecutable resolves source (a build tool commonly found on
-// PATH as a symlink, e.g. a Homebrew install) and writes its bytes to dest,
-// verifying a bounded, regular, executable file first.
-func copyClosureExecutable(dest, source string) error {
-	resolved, err := filepath.EvalSymlinks(source)
-	if err != nil {
-		return prepareFailure(TypeScript, "the deno executable could not be resolved")
-	}
-	info, err := os.Stat(resolved)
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 || info.Size() > maxClosureExecutableBytes {
-		return prepareFailure(TypeScript, "the deno executable must be a bounded regular executable file")
-	}
-	data, err := os.ReadFile(resolved)
-	if err != nil {
-		return prepareFailure(TypeScript, "the deno executable could not be read")
-	}
-	return writeCacheFile(dest, data, 0o755)
-}
-
 // denoCacheEntryPrefixes are DENO_DIR entries `deno check`/`deno run` derive
 // from the source files' own absolute paths at preparation time: type-check
 // and code-generation caches keyed by preparation-time specifiers, which
@@ -313,7 +286,9 @@ func pruneDenoCache(dir string) error {
 	})
 }
 
-// prepareClosurePython installs a pinned standalone CPython into dir/cpython
+// prepareClosurePython links a pinned standalone CPython (installed at
+// most once per machine, per resolved identity, by
+// ensureSharedPythonInterpreter — see sharedpython.go) into dir/cpython,
 // and lays the project's own `uv export --locked` dependencies flat into
 // dir/site (ADR 0021). No venv is created — no pyvenv.cfg, no activation
 // scripts, no interpreter symlink — so launch (hostCommand) execs the
@@ -324,21 +299,39 @@ func prepareClosurePython(ctx context.Context, cfg Config, dir, uv string) error
 	if err != nil {
 		return err
 	}
-	cpythonRoot := filepath.Join(dir, "cpython")
-	if err := os.MkdirAll(cpythonRoot, 0o700); err != nil {
-		return prepareFailure(Python, "the python interpreter directory could not be created")
-	}
-	env := hostEnv("PYTHONDONTWRITEBYTECODE=1")
-	// The exact patch is not chosen here: it is whatever this pinned uv
+	// The exact patch isn't chosen here: it's whatever this pinned uv
 	// release resolves the requested minor version to, the same fetch
 	// digest-pinned by uv itself, so two prepares against the same uv
-	// version agree. The installed directory name, read back below, names
-	// the exact patch and platform the closure actually carries.
-	if err := run(ctx, Python, "uv python install", exec.CommandContext(ctx, uv,
-		"python", "install", "--no-bin", "--install-dir", cpythonRoot, spec), dir, env); err != nil {
+	// version agree — identity names the exact patch and platform the
+	// closure actually carries.
+	identity, err := ensureSharedPythonInterpreter(ctx, uv, spec)
+	if err != nil {
 		return err
 	}
+	sharedRoot, err := sharedRuntimeRoot("python")
+	if err != nil {
+		return err
+	}
+	sharedIdentityDir := filepath.Join(sharedRoot, identity)
+	perAgentIdentityDir := filepath.Join(dir, "cpython", identity)
+	// Every file except _sysconfigdata_*.py is a plain hardlink: the shared
+	// store was already normalized once, so the per-agent closure inherits
+	// "already symlink-free" for free. sysconfigdata bakes in its own
+	// install directory (see RewritePythonSysconfigData's doc), so it must
+	// carry per-agent-rewritten content, never a link to the shared store's
+	// own path — hardlinkTree skips it here, and it's populated by the two
+	// calls immediately below instead.
+	if err := hardlinkTree(sharedIdentityDir, perAgentIdentityDir, isSysconfigdataFile); err != nil {
+		return prepareFailure(Python, "the python interpreter could not be linked into the closure: %v", err)
+	}
+	if err := copySysconfigdataFiles(sharedIdentityDir, perAgentIdentityDir); err != nil {
+		return prepareFailure(Python, "the python interpreter's sysconfig data could not be copied: %v", err)
+	}
+	if err := RewritePythonSysconfigData(perAgentIdentityDir, sharedIdentityDir, perAgentIdentityDir); err != nil {
+		return prepareFailure(Python, "the python interpreter's sysconfig data could not be localized: %v", err)
+	}
 
+	env := hostEnv("PYTHONDONTWRITEBYTECODE=1")
 	requirements := filepath.Join(dir, "requirements.txt")
 	if err := run(ctx, Python, "uv export", exec.CommandContext(ctx, uv,
 		"export", "--locked", "--no-dev", "--no-emit-project", "--format", "requirements.txt",
@@ -350,10 +343,11 @@ func prepareClosurePython(ctx context.Context, cfg Config, dir, uv string) error
 	if err := os.MkdirAll(siteDir, 0o700); err != nil {
 		return prepareFailure(Python, "the python dependency directory could not be created")
 	}
-	interpBin, _, _, err := pythonClosureLayout(dir)
+	binName, err := pythonBinaryName(identity)
 	if err != nil {
-		return prepareFailure(Python, "the installed python interpreter could not be found after `uv python install`")
+		return prepareFailure(Python, "%v", err)
 	}
+	interpBin := filepath.Join(perAgentIdentityDir, "bin", binName)
 	if err := run(ctx, Python, "uv pip install", exec.CommandContext(ctx, uv,
 		"pip", "install", "--python", interpBin, "--target", siteDir,
 		"--require-hashes", "--no-deps", "-r", requirements), dir, env); err != nil {
@@ -367,7 +361,7 @@ func prepareClosurePython(ctx context.Context, cfg Config, dir, uv string) error
 		return prepareFailure(Python, "the intermediate requirements file could not be removed")
 	}
 
-	return normalizePythonClosure(cpythonRoot, filepath.Dir(filepath.Dir(interpBin)), siteDir)
+	return normalizeSiteClosure(siteDir)
 }
 
 // ResolvePythonVersionSpec resolves the Python version specification a
@@ -449,72 +443,6 @@ func pythonClosureLayout(dir string) (interpBin, siteDir, identity string, err e
 		return "", "", "", staleCache
 	}
 	return bin, site, found, nil
-}
-
-// normalizePythonClosure removes everything the closure does not need to
-// launch: the interpreter's own convenience symlinks (never referenced —
-// launch execs the versioned interpreter binary directly, per
-// pythonClosureLayout), the terminfo and man-page trees, and any
-// console-script shims a dependency install placed under the site
-// directory's own bin/. copyTree refuses a symlink outright, so the closure
-// must already be symlink-free before it can ever be staged; local
-// apply/serve normalizes exactly the same way, per ADR 0021's "one
-// contract, not a staging mode".
-// cpythonRoot is the --install-dir uv python install was given (the parent
-// of interpDir, the one versioned interpreter directory it installed).
-//
-// Symlink removal walks cpythonRoot and siteDir themselves, exhaustively,
-// rather than enumerating the specific symlinks a known uv release
-// produces: uv 0.8.17 (this repo's pinned release, and what every other
-// comment here was written against) lays every one of its own
-// convenience symlinks inside interpDir, but uv 0.12.6 additionally
-// creates a minor-version symlink as interpDir's own SIBLING —
-// cpython/cpython-3.11-linux-x86_64-gnu -> cpython/cpython-3.11.13-linux-x86_64-gnu/
-// — outside anything an interpDir-scoped walk ever visits, and CI hitting
-// exactly that shape (an unpinned setup-uv resolving "latest") is what
-// first surfaced this. Walking cpythonRoot itself, not interpDir, tolerates
-// a layout change like that instead of chasing it: whatever a future uv
-// release names its own symlinks or wherever it places them within the
-// closure, they are found and removed.
-func normalizePythonClosure(cpythonRoot, interpDir, siteDir string) error {
-	for _, p := range []string{
-		filepath.Join(interpDir, "share", "terminfo"),
-		filepath.Join(interpDir, "share", "man"),
-		filepath.Join(siteDir, "bin"),
-		// uv's own bookkeeping at the install-dir and target-dir roots
-		// (its cross-process install lock, a scratch .temp/ directory it
-		// uses mid-install, and a .gitignore convenience for the
-		// directory) — never referenced by anything on tenon's launch
-		// path, and no more tenon's to ship than the uv binary itself.
-		filepath.Join(cpythonRoot, ".lock"),
-		filepath.Join(cpythonRoot, ".temp"),
-		filepath.Join(cpythonRoot, ".gitignore"),
-		filepath.Join(siteDir, ".lock"),
-		filepath.Join(siteDir, ".temp"),
-		filepath.Join(siteDir, ".gitignore"),
-	} {
-		if err := os.RemoveAll(p); err != nil {
-			return prepareFailure(Python, "the python closure could not be normalized: %v", err)
-		}
-	}
-	closureRoots := []string{cpythonRoot, siteDir}
-	for _, root := range closureRoots {
-		if err := removePythonClosureSymlinks(root, closureRoots); err != nil {
-			return prepareFailure(Python, "the python closure could not be normalized: %v", err)
-		}
-	}
-	// Defense in depth, and the proof this normalization actually worked:
-	// copyTree refuses a symlink at staging time regardless, but that
-	// failure names only "a non-regular entry" from a much later, less
-	// specific caller. Asserting here, right after normalization, fails
-	// closed with a diagnostic that names the exact survivor and points at
-	// the layout that produced it.
-	for _, root := range closureRoots {
-		if err := assertPythonClosureHasNoSymlinks(root); err != nil {
-			return prepareFailure(Python, "the python closure could not be normalized: %v", err)
-		}
-	}
-	return nil
 }
 
 // removePythonClosureSymlinks deletes every symlink under root, whatever its

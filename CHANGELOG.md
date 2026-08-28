@@ -84,6 +84,34 @@ The first release, v0.1.0, ships the core described in
   scan's carried-payload routing and its one-file size bound both extend to
   cover the copied `deno` executable and the pruned `DENO_DIR`.
 
+- The pinned CPython interpreter and `deno` executable are shared across
+  every agent project on one machine through a content-addressed runtime
+  cache under `os.UserCacheDir()/tenon/runtimes/` (issue #38), rather than
+  each agent's closure installing or copying its own: the first prepare to
+  resolve a given interpreter identity or `deno` content hash installs it
+  once, normalizes it (Python) or validates it (TypeScript), and locks it
+  read-only, guarded by a namespace-scoped advisory lock so two concurrent
+  `tenon` processes never race the same install; every later resolution —
+  another agent, a repeat `apply`, or `validate`'s own throwaway prepare,
+  which previously reinstalled a full CPython on every single call — gets
+  it via hardlink (falling back to a real copy across a filesystem
+  boundary) rather than reinstalling or recopying. An exact `.python-version`
+  pin can resolve to a cache hit without invoking `uv` at all; a floor
+  `requires-python` spec still calls `uv python install` to resolve the
+  exact patch, but only reaches the network the first time any agent
+  resolves that identity on the machine. Fixed a real correctness gap this
+  surfaced: CPython's standalone build bakes its own install directory into
+  `_sysconfigdata_*.py`, so a shared, multiply-referenced install can never
+  be hardlinked into a closure like every other interpreter file — this one
+  file is copied instead and rewritten to the per-agent closure's own path
+  (the same rewrite `tenon stage` already performs for its own
+  prepared-to-final-staged relocation, now shared as one exported
+  function). Every downstream consumer of a per-agent closure —
+  `pythonClosureLayout`, `hostCommand`, `verifyCache` — is unchanged: a
+  hardlinked file satisfies every existing regular-file check identically
+  to an independently installed one, so only how a closure gets populated
+  changed, never its on-disk shape or what staging or serving read from it.
+
 - `tenon drift` reports per-file divergence between a workspace and its
   apply record without mutating anything, and `tenon apply --discard-local`
   explicitly overwrites modified tenon-owned files (hand-authored files stay
@@ -149,11 +177,11 @@ The first release, v0.1.0, ships the core described in
 See [the specification's known limitations](docs/product-spec.md#known-limitations)
 for the full list. Notably:
 
-- Python tool preparation fetches the pinned standalone CPython
-  interpreter on every `validate`/`apply` run, not only the first, because
-  `uv` does not cache the interpreter download itself; a network-restricted
-  machine needs it reachable through whatever channel supplies tenon's
-  other pinned inputs.
+- Locked Python dependencies (`uv export`/`uv pip install`) and TypeScript
+  type-checking (`deno check`) still run on every `validate`/`apply`, since
+  they are specific to each project's own source; only the pinned CPython
+  interpreter and `deno` executable themselves are shared machine-wide
+  (issue #38), not a project's locked dependencies.
 - A supplied manifest is verified at `tenon run`'s session start, not
   re-verified per turn within that session (`schedule run` re-verifies
   each occurrence).

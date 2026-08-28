@@ -441,7 +441,41 @@ func requireToolchain(t *testing.T, name string) string {
 		t.Skipf("%s is not on PATH; the polyglot tool journey needs deno, uv, and go. "+
 			"The host protocol, its bounds, and the Go tool journey are proven without it.", name)
 	}
+	isolateSharedRuntimeCache(t)
 	return found
+}
+
+// isolateSharedRuntimeCache points os.UserCacheDir() at a throwaway
+// directory for the test's lifetime, so exercising the shared Python
+// interpreter / deno runtime cache (internal/toolruntime's
+// sharedruntime.go) never reads from or writes into the machine's real,
+// persistent cache. os.UserCacheDir() reads $XDG_CACHE_HOME on every
+// platform this repo targets except darwin, which ignores it and always
+// resolves $HOME/Library/Caches directly, so both are overridden.
+func isolateSharedRuntimeCache(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	// chmodTreeReadOnly locks down the shared cache entries this test's own
+	// Prepare calls populate. t.TempDir()'s own registered cleanup can't
+	// os.RemoveAll a read-only tree — removing a directory entry needs
+	// write permission on its parent — so this restores every write bit
+	// first. Registered after t.TempDir() itself, so LIFO cleanup order
+	// runs this before t.TempDir()'s removal, not after.
+	t.Cleanup(func() {
+		_ = filepath.WalkDir(home, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			info, ierr := d.Info()
+			if ierr != nil {
+				return nil
+			}
+			_ = os.Chmod(path, info.Mode().Perm()|0o700)
+			return nil
+		})
+	})
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
 }
 
 // lockDependencies resolves the fixture's own locked dependencies with its

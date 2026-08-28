@@ -607,18 +607,29 @@ above:
   [`scripts/check-staged-images.sh`](../scripts/check-staged-images.sh)
   (see [`docs/staged-acceptance.md`](staged-acceptance.md)) before a
   release.
-- **Python tool preparation requires the network, every run.** `tenon
-  validate` and `tenon apply` for a Python-tool agent fetch the pinned
-  standalone CPython interpreter (`uv python install`, roughly 90MB) even
-  when it was already fetched by a previous run: `uv` does not cache the
-  downloaded interpreter tarball itself (only its already-installed,
-  already-normalized closure is cached, per source fingerprint), so a
-  network-restricted machine needs the pinned interpreter artifact
-  reachable through whatever channel supplies tenon's other pinned inputs,
-  on every prepare, not only the first. A `requires-python` constraint in
-  `pyproject.toml` installs the *floor* of the range (`>=3.11,<3.13`
-  installs 3.11, not 3.12); a `.python-version` file, when present, names
-  the version exactly and takes precedence over `requires-python`.
+- **Python and TypeScript runtimes are fetched once per machine, not once
+  per prepare.** `tenon validate` and `tenon apply` for a Python-tool agent
+  install the pinned standalone CPython interpreter (`uv python install`,
+  roughly 90MB) through a shared, content-addressed runtime cache under
+  `os.UserCacheDir()/tenon/runtimes/` (issue #38): the first agent on a
+  machine to resolve a given interpreter identity installs, normalizes, and
+  locks it down read-only, and every later resolution of that same identity
+  — any other agent, or `validate`'s own throwaway prepare, or a repeat
+  `apply` — hardlinks it out rather than reinstalling. The `deno` executable
+  TypeScript tools carry into their closure is shared the same way, keyed by
+  its own content hash. A network-restricted machine still needs the pinned
+  runtime artifact reachable through whatever channel supplies tenon's other
+  pinned inputs the first time any agent resolves a given version; every
+  later prepare of any agent needs no network for that runtime at all. A
+  `requires-python` constraint in `pyproject.toml` installs the *floor* of
+  the range (`>=3.11,<3.13` installs 3.11, not 3.12); a `.python-version`
+  file, when present, names the version exactly, takes precedence over
+  `requires-python`, and — being an exact pin — can resolve to a cache hit
+  without invoking `uv` at all. What still runs on every prepare regardless
+  of the shared runtime cache: `uv export`/`uv pip install` for a project's
+  own locked Python dependencies (unshared across agents, since independent
+  projects rarely lock identical dependency sets — a stated future
+  extension of issue #38) and `deno check` against a project's own tools.
 - **Real harness drivers.** The Claude and Codex drivers are validated by
   pure-function unit tests plus manual `//go:build harness` integration
   tests against live binaries; CI does not run the latter, so CI green means

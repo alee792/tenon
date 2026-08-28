@@ -410,7 +410,7 @@ func prepareClosure(ctx context.Context, p *agentproject.Project, diags *diagnos
 	// builds later.
 	if langSet[toolruntime.Python] {
 		finalClosureRoot := finalRuntimes + "/tools/" + filepath.Base(prepared)
-		if err := rewritePythonSysconfigData(prepared, finalClosureRoot); err != nil {
+		if err := toolruntime.RewritePythonSysconfigData(prepared, prepared, finalClosureRoot); err != nil {
 			return nil, "", nil, fmt.Errorf("normalizing the python closure for staging: %w", err)
 		}
 	}
@@ -462,52 +462,6 @@ func pythonInterpreterIdentity(closureDir string) (identity string, ok bool, err
 		}
 	}
 	return "", false, fmt.Errorf("the staged python closure at %s carries no installed interpreter directory", closureDir)
-}
-
-// rewritePythonSysconfigData rewrites, in place, every occurrence of oldRoot
-// (the throwaway directory the Python closure was actually prepared under)
-// to newRoot (the closure's final canonical path once staged) inside every
-// `_sysconfigdata_*.py` file under oldRoot — CPython's standalone interpreter
-// bakes its own install directory into exactly that one generated module
-// (verified against the closures `uv python install` produces: BINDIR,
-// BINLIBDEST, and the other absolute-path build_time_vars entries, all
-// sharing the one install-directory prefix); every other file under the
-// interpreter tree computes its paths at runtime relative to the running
-// binary. This is ADR 0021's own named example of the "rewrite the
-// enumerated files that embed an absolute preparation path" normalization
-// step, mirroring how the generated Go host's go.mod replace directive is
-// kept machine-independent (see renderGoHost).
-func rewritePythonSysconfigData(oldRoot, newRoot string) error {
-	if oldRoot == newRoot {
-		return nil
-	}
-	old := []byte(oldRoot)
-	replacement := []byte(newRoot)
-	return filepath.WalkDir(oldRoot, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() || !d.Type().IsRegular() {
-			return nil
-		}
-		name := d.Name()
-		if !strings.HasPrefix(name, "_sysconfigdata_") || !strings.HasSuffix(name, ".py") {
-			return nil
-		}
-		content, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		if !bytes.Contains(content, old) {
-			return nil
-		}
-		rewritten := bytes.ReplaceAll(content, old, replacement)
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		return os.WriteFile(path, rewritten, info.Mode().Perm())
-	})
 }
 
 // maxBuildPathScanFileBytes bounds one file the build-machine-path scan
