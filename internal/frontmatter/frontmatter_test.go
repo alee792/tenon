@@ -216,6 +216,54 @@ func TestDocStringMap(t *testing.T) {
 	}
 }
 
+// TestDocStringList proves the exact accepted and rejected shapes for a
+// list-of-strings field: a plain list of strings succeeds; a non-string
+// item, a nested list, an alias reference, and a non-sequence node each fail
+// with an error naming the field (or, for an alias, fail earlier at Parse,
+// since aliases are rejected unconditionally).
+func TestDocStringList(t *testing.T) {
+	doc, err := Parse([]byte("args:\n  - a\n  - b\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	got, err := doc.StringList("args")
+	if err != nil {
+		t.Fatalf("StringList(args) = %v", err)
+	}
+	if want := []string{"a", "b"}; !slices.Equal(got, want) {
+		t.Fatalf("StringList(args) = %v, want %v", got, want)
+	}
+
+	cases := map[string]string{
+		"non-string item": "args:\n  - a\n  - 5\n",
+		"nested list":     "args:\n  - a\n  - [b, c]\n",
+		"non-sequence":    "args: a\n",
+	}
+	for name, raw := range cases {
+		t.Run(name, func(t *testing.T) {
+			doc, err := Parse([]byte(raw))
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if _, err := doc.StringList("args"); err == nil {
+				t.Fatal("StringList(args) succeeded, want error")
+			} else if !strings.Contains(err.Error(), "args") {
+				t.Fatalf("error %q must name the field %q", err, "args")
+			}
+		})
+	}
+
+	// An alias inside the list fails at Parse itself, before StringList ever
+	// runs: aliases are rejected unconditionally (see the anchor-rejection
+	// cases in TestParse), so a list carrying one is never a StringList
+	// concern specifically.
+	t.Run("alias", func(t *testing.T) {
+		if _, err := Parse([]byte("anchor: &a b\nargs:\n  - *a\n")); err == nil {
+			t.Fatal("Parse succeeded, want an error: aliases are not supported")
+		}
+	})
+}
+
 func TestDocIsNull(t *testing.T) {
 	doc := parseAccessorDoc(t)
 	if !doc.IsNull("empty") {

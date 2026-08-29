@@ -16,14 +16,17 @@ package agentproject
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/alee792/tenon/internal/diagnostics"
+	"github.com/alee792/tenon/internal/frontmatter"
 )
 
 // Plugin bounds (ADR 0013): safety ceilings, not ordinary-use quotas.
@@ -35,7 +38,24 @@ const (
 	MaxPluginSkillEntries = 1024
 	// MaxPluginManifestBytes bounds plugin.json.
 	MaxPluginManifestBytes = 128 * 1024
+	// MaxPluginReferenceBytes bounds one plugins/<name>.md reference file,
+	// mirroring mcp/<name>.md's MaxConnectionBytes exactly (ADR 0026).
+	MaxPluginReferenceBytes = 8 * 1024
+	// MaxPluginReferenceBodyRunes bounds a plugin reference file's optional
+	// trimmed Markdown body, mirroring MaxConnectionContextRunes exactly.
+	MaxPluginReferenceBodyRunes = 1024
 )
+
+// pluginReferenceRevPattern is the exact grammar a plugin reference file's
+// pinned revision must match: a full, lowercase 40-character git commit SHA
+// (ADR 0026 "plugin acquisition by pointer and pin"). A short SHA, a branch,
+// or a tag is refused: the review-and-pin discipline this record preserves
+// depends on an unambiguous, immutable commit identity.
+var pluginReferenceRevPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
+
+// pluginReferenceFields are the only two recognized plugins/<name>.md
+// reference frontmatter fields; every other field is unknown.
+var pluginReferenceFields = map[string]bool{"source": true, "rev": true}
 
 // pluginSchemaID is the exact canonical Agent Plugins v1.0.0 schema
 // identifier every plugin.json must target. Tenon implements this small
@@ -70,72 +90,137 @@ type pluginSkill struct {
 // resolution against root skills happens in the caller, which alone knows the
 // root names; server names have no root surface, so they are resolved here.
 // budget is the aggregate skill-set budget shared with root skills/ (ADR
-// 0013); it is not reset here.
-func loadPlugins(root string, budget *skillSetBudget, diags *diagnostics.List) ([]pluginSkill, []PluginServer, []sourceInput) {
+// 0013); it is not reset here. skippedServers carries every plugin server
+// that lost a plugin-to-plugin naming collision (see mergePluginServers);
+// it exists only so a masking declaration naming a server that lost such a
+// collision can report exactly that (ADR 0026, issue #53 review) — Load's
+// own composition never consults it.
+func loadPlugins(root string, budget *skillSetBudget, diags *diagnostics.List) ([]pluginSkill, []PluginServer, []PluginServer, []sourceInput) {
 	dir := filepath.Join(root, "plugins")
 	info, err := os.Lstat(dir)
 	if err != nil {
-		return nil, nil, nil // missing plugins/ is normal
+		return nil, nil, nil, nil // missing plugins/ is normal
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		diags.Errorf("plugin.entry.invalid", "plugins",
 			"plugins must be a real directory; symlinks are never followed")
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		diags.Errorf("plugin.entry.invalid", "plugins", "plugins could not be read: %v", err)
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 
-	var names []string
+	// Each entry is either a vendored plugin directory or a plugin reference
+	// file (plugins/<name>.md, ADR 0026); every other shape is invalid. Both
+	// forms share one name space and one bound, and a reference colliding
+	// with a directory of the same name fails closed before either is
+	// loaded, since the two forms could otherwise silently coexist under
+	// different vocabularies for what an author intends as one plugin.
+	type pluginEntry struct {
+		name     string
+		fileName string
+		isRef    bool
+	}
+	var found []pluginEntry
+	seenNames := map[string]bool{}
 	count := 0
 	truncated := false
 	for _, entry := range entries {
 		entryPath := "plugins/" + entry.Name()
 		if entry.Type()&os.ModeSymlink != 0 {
 			diags.Errorf("plugin.entry.invalid", entryPath,
-				"each plugins entry must be a real plugin directory; symlinks are never followed")
+				"each plugins entry must be a real plugin directory or plugin reference file; symlinks are never followed")
 			continue
 		}
-		if !entry.IsDir() {
+		var name string
+		isRef := false
+		switch {
+		case entry.IsDir():
+			name = entry.Name()
+		case entry.Type().IsRegular() && strings.HasSuffix(entry.Name(), ".md"):
+			name = strings.TrimSuffix(entry.Name(), ".md")
+			isRef = true
+			if name == "" {
+				diags.Errorf("plugin.entry.invalid", entryPath,
+					"a plugin reference filename must carry a non-empty name before .md")
+				continue
+			}
+		default:
 			diags.Errorf("plugin.entry.invalid", entryPath,
-				"each plugins entry must be a real plugin directory")
+				"each plugins entry must be a real plugin directory or a plugin reference file (<name>.md)")
+			continue
+		}
+		// The derived name becomes the plugin storage name (docs/product-spec.md
+		// "plugins/<storage-name>/"), which in turn becomes one path segment
+		// under PluginDataDir. Validating it against the component grammar here
+		// — the same lowercase-hyphenated-words shape skills.go enforces for a
+		// skill directory name — closes a real escape: an unvalidated
+		// "plugins/....md" reference derives the name "..", which
+		// filepath.Join's cleaning would walk PluginDataDir's per-plugin data
+		// directory straight out of its intended tree (#52 review finding 2).
+		if len(name) > 64 || !skillNamePattern.MatchString(name) {
+			diags.Errorf("plugin.entry.invalid", entryPath,
+				"a plugin storage name must be 1-64 characters of lowercase hyphenated words (letters, digits, and single internal hyphens): %q", name)
 			continue
 		}
 		count++
 		if count > MaxPluginEntries {
 			if !truncated {
 				diags.Warnf("plugin.bounds.exceeded", "plugins",
-					"plugins may contain at most %d plugin directories; later entries are ignored", MaxPluginEntries)
+					"plugins may contain at most %d entries (directories and reference files combined); later entries are ignored", MaxPluginEntries)
 				truncated = true
 			}
 			continue
 		}
-		names = append(names, entry.Name())
+		if seenNames[name] {
+			diags.Errorf("plugin.entry.collision", entryPath,
+				"the plugin name %q collides with another plugins/ entry of the same name; a plugin reference file and a vendored plugin directory may not share a name",
+				name)
+			continue
+		}
+		seenNames[name] = true
+		found = append(found, pluginEntry{name: name, fileName: entry.Name(), isRef: isRef})
 	}
-	sort.Strings(names)
+	sort.Slice(found, func(i, j int) bool { return found[i].name < found[j].name })
 
 	var candidates []pluginSkill
 	var servers []PluginServer
 	var inputs []sourceInput
-	for _, name := range names {
-		pluginCandidates, pluginServers, pluginInputs := loadPlugin(dir, name, budget, diags)
+	for _, f := range found {
+		var pluginCandidates []pluginSkill
+		var pluginServers []PluginServer
+		var pluginInputs []sourceInput
+		if f.isRef {
+			pluginCandidates, pluginServers, pluginInputs, _ = loadPluginReference(dir, f.fileName, budget, diags)
+		} else {
+			pluginCandidates, pluginServers, pluginInputs = loadPlugin(filepath.Join(dir, f.fileName), "plugins/"+f.fileName, f.fileName, true, budget, diags)
+		}
 		candidates = append(candidates, pluginCandidates...)
 		servers = append(servers, pluginServers...)
 		inputs = append(inputs, pluginInputs...)
 	}
-	return candidates, mergePluginServers(servers, diags), inputs
+	accepted, skipped := mergePluginServers(servers, diags)
+	return candidates, accepted, skipped, inputs
 }
 
-// loadPlugin validates one plugin directory's manifest and, when it is valid,
-// its two supported component locations: skills/ and mcp.json. A manifest
-// violation makes the plugin contribute nothing, but its bytes still join the
-// fingerprint once read.
-func loadPlugin(pluginsDir, dirName string, budget *skillSetBudget, diags *diagnostics.List) ([]pluginSkill, []PluginServer, []sourceInput) {
-	pluginRoot := filepath.Join(pluginsDir, dirName)
-	authoredRoot := "plugins/" + dirName
-
+// loadPlugin validates one plugin's manifest and, when it is valid, its two
+// supported component locations: skills/ and mcp.json. A manifest violation
+// makes the plugin contribute nothing, but its bytes still join the
+// fingerprint once read. pluginRoot is the real filesystem directory to read
+// from — a vendored plugins/<dirName>/ directory, or a plugin reference
+// file's resolved cache tree — and authoredRoot is the stable path every
+// diagnostic and fingerprint entry reports, which for a resolved reference is
+// the synthetic "plugins/<name>.md -> <rev>" form rather than a real
+// filesystem path. vendored is true only for a real plugins/<dirName>/
+// directory under the agent root, never for a resolved reference's cache
+// tree; it is threaded down to every declared MCP server (PluginServer.
+// Vendored) so ResolveServers knows which servers must be re-anchored
+// against the agent root staging hands it at generation time, rather than
+// trusting the absolute path captured here at Load time (Blocker 2,
+// post-review).
+func loadPlugin(pluginRoot, authoredRoot, pluginName string, vendored bool, budget *skillSetBudget, diags *diagnostics.List) ([]pluginSkill, []PluginServer, []sourceInput) {
 	valid, manifestInput := loadPluginManifest(pluginRoot, authoredRoot, diags)
 	var inputs []sourceInput
 	if manifestInput != nil {
@@ -149,7 +234,7 @@ func loadPlugin(pluginsDir, dirName string, budget *skillSetBudget, diags *diagn
 
 	skillsDir := filepath.Join(pluginRoot, "skills")
 	candidates := loadPluginSkills(skillsDir, authoredRoot+"/skills", budget, diags)
-	servers, mcpInputs := loadPluginMCP(pluginRoot, authoredRoot, dirName, diags)
+	servers, mcpInputs := loadPluginMCP(pluginRoot, authoredRoot, pluginName, vendored, diags)
 	inputs = append(inputs, mcpInputs...)
 	return candidates, servers, inputs
 }
@@ -414,4 +499,197 @@ func jsonTypeName(v any) string {
 	default:
 		return "value"
 	}
+}
+
+// loadPluginReference validates one plugins/<name>.md reference file and, on
+// success, resolves it against the injected plugin cache (ConfigurePluginCache)
+// and loads the cached tree through the exact same loadPlugin path a vendored
+// plugins/<name>/ directory uses (ADR 0026): the same manifest, skills, and
+// mcp.json validation, the same collision checks, and the same fingerprint
+// treatment for its component bytes. The reference file's own bytes always
+// join the fingerprint once read, independent of whether resolution
+// succeeds; a failed resolution contributes no candidates but is always a
+// project error, naming `tenon plugin fetch`, because an authored reference
+// is a first-class request exactly like mcp/<name>.md (ADR 0026), never a
+// silently-skipped optional plugin component.
+func loadPluginReference(dir, filename string, budget *skillSetBudget, diags *diagnostics.List) ([]pluginSkill, []PluginServer, []sourceInput, string) {
+	sourcePath := "plugins/" + filename
+	name := strings.TrimSuffix(filename, ".md")
+
+	full := filepath.Join(dir, filename)
+	info, err := os.Lstat(full)
+	if err != nil {
+		diags.Errorf("plugin.reference.invalid", sourcePath, "the plugin reference file could not be read: %v", err)
+		return nil, nil, nil, name
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		diags.Errorf("plugin.reference.invalid", sourcePath,
+			"a plugin reference must be a real regular file; symlinks are never followed")
+		return nil, nil, nil, name
+	}
+	if info.Size() > MaxPluginReferenceBytes {
+		diags.Errorf("plugin.reference.invalid", sourcePath,
+			"a plugin reference file may contain at most %d bytes; found %d", MaxPluginReferenceBytes, info.Size())
+		return nil, nil, nil, name
+	}
+	raw, err := os.ReadFile(full)
+	if err != nil {
+		diags.Errorf("plugin.reference.invalid", sourcePath, "the plugin reference file could not be read: %v", err)
+		return nil, nil, nil, name
+	}
+	inputs := []sourceInput{{Path: sourcePath, Content: raw, Executable: false}}
+
+	if !utf8.Valid(raw) {
+		diags.Errorf("plugin.reference.invalid", sourcePath, "the plugin reference file must be valid UTF-8")
+		return nil, nil, inputs, name
+	}
+
+	source, rev, ok := parsePluginReference(raw, sourcePath, diags)
+	if !ok {
+		return nil, nil, inputs, name
+	}
+
+	if pluginCache == nil {
+		diags.Errorf("plugin.reference.unresolved", sourcePath,
+			"plugin reference %q pins rev %s, which is not cached; run `tenon plugin fetch` before apply or validate",
+			name, rev)
+		return nil, nil, inputs, name
+	}
+	cachedRoot, err := pluginCache.Resolve(source, rev)
+	if err != nil {
+		diags.Errorf("plugin.reference.unresolved", sourcePath,
+			"plugin reference %q could not be resolved against the plugin cache for rev %s: %s; run `tenon plugin fetch`",
+			name, rev, diagnostics.Bound(err.Error(), 256))
+		return nil, nil, inputs, name
+	}
+
+	authoredRoot := fmt.Sprintf("plugins/%s.md -> %s", name, rev)
+	candidates, servers, pluginInputs := loadPlugin(cachedRoot, authoredRoot, name, false, budget, diags)
+	inputs = append(inputs, pluginInputs...)
+	return candidates, servers, inputs, name
+}
+
+// parsePluginReference validates a plugin reference file's closed frontmatter
+// contract: exactly the fields "source" (an absolute https URL, mirroring
+// mcp/<name>.md's remote target rule exactly) and "rev" (a full 40-character
+// lowercase git commit SHA), plus an optional bounded informational body that
+// is never rendered into instructions. It is shared by Load (via
+// loadPluginReference) and LoadPluginReferencesForStatus, so `tenon plugin
+// fetch|update|status` read a reference file under the identical rule Load
+// enforces.
+func parsePluginReference(raw []byte, sourcePath string, diags *diagnostics.List) (source, rev string, ok bool) {
+	rawFM, bodyStart, err := frontmatter.Split(raw)
+	if err != nil {
+		diags.Errorf("plugin.reference.frontmatter.missing", sourcePath,
+			"a plugin reference file must start with YAML frontmatter delimited by --- lines")
+		return "", "", false
+	}
+	doc, err := frontmatter.Parse(rawFM)
+	if err != nil {
+		diags.Errorf("plugin.reference.frontmatter.invalid", sourcePath, "%s", err)
+		return "", "", false
+	}
+	for _, key := range doc.Keys() {
+		if !pluginReferenceFields[key] {
+			diags.Errorf("plugin.reference.frontmatter.unknown-field", sourcePath,
+				"a plugin reference frontmatter permits only source and rev; found %q", key)
+			return "", "", false
+		}
+	}
+	source, err = doc.String("source")
+	if err != nil || source == "" {
+		diags.Errorf("plugin.reference.frontmatter.invalid", sourcePath,
+			"frontmatter field \"source\" must be a non-empty string")
+		return "", "", false
+	}
+	if err := validConnectionURL(source); err != nil {
+		diags.Errorf("plugin.reference.source.invalid", sourcePath, "%s", err)
+		return "", "", false
+	}
+	rev, err = doc.String("rev")
+	if err != nil || !pluginReferenceRevPattern.MatchString(rev) {
+		diags.Errorf("plugin.reference.rev.invalid", sourcePath,
+			"frontmatter field \"rev\" must be a full 40-character lowercase hexadecimal git commit SHA")
+		return "", "", false
+	}
+
+	body := string(raw[bodyStart:])
+	if after, cut := strings.CutPrefix(body, "\r\n"); cut {
+		body = after
+	} else {
+		body = strings.TrimPrefix(body, "\n")
+	}
+	body = strings.TrimSpace(body)
+	if n := utf8.RuneCountInString(body); n > MaxPluginReferenceBodyRunes {
+		diags.Errorf("plugin.reference.body.too-long", sourcePath,
+			"the optional Markdown body may contain at most %d Unicode characters; found %d", MaxPluginReferenceBodyRunes, n)
+		return "", "", false
+	}
+	return source, rev, true
+}
+
+// PluginReferenceInfo is one independently-validated plugins/<name>.md
+// reference file's declared source and pin.
+type PluginReferenceInfo struct {
+	// Name is the filename-derived plugin name.
+	Name string
+	// Source is the exact validated absolute HTTPS URL.
+	Source string
+	// Rev is the exact validated 40-character lowercase git commit SHA.
+	Rev string
+	// SourcePath is the authored path relative to the agent root:
+	// "plugins/<name>.md".
+	SourcePath string
+}
+
+// LoadPluginReferencesForStatus validates every plugins/<name>.md reference
+// file's frontmatter independently of the rest of the project and of cache
+// resolution: unlike Load, one malformed reference or an unresolved pin never
+// suppresses reporting the others. It never resolves the pin against a cache
+// and never touches a vendored plugins/<name>/ directory (Load remains the
+// authority for the reference/directory collision check). This is what
+// `tenon plugin fetch|status|update` read directly, since fetch necessarily
+// runs before a pin can resolve.
+func LoadPluginReferencesForStatus(root string) ([]PluginReferenceInfo, *diagnostics.List, error) {
+	diags := &diagnostics.List{}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return nil, diags, fmt.Errorf("resolving agent root: %w", err)
+	}
+	info, err := os.Stat(abs)
+	if err != nil || !info.IsDir() {
+		diags.Errorf("project.root.missing", ".", "the agent root must be an existing directory: %s", root)
+		return nil, diags, nil
+	}
+	dir := filepath.Join(abs, "plugins")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, diags, nil // missing plugins/ is normal
+	}
+
+	var out []PluginReferenceInfo
+	for _, entry := range entries {
+		if entry.Type()&os.ModeSymlink != 0 || !entry.Type().IsRegular() || !strings.HasSuffix(entry.Name(), ".md") {
+			continue // directories and non-reference entries are Load's concern
+		}
+		sourcePath := "plugins/" + entry.Name()
+		name := strings.TrimSuffix(entry.Name(), ".md")
+		full := filepath.Join(dir, entry.Name())
+		raw, err := os.ReadFile(full)
+		if err != nil {
+			diags.Errorf("plugin.reference.invalid", sourcePath, "the plugin reference file could not be read: %v", err)
+			continue
+		}
+		if !utf8.Valid(raw) {
+			diags.Errorf("plugin.reference.invalid", sourcePath, "the plugin reference file must be valid UTF-8")
+			continue
+		}
+		source, rev, ok := parsePluginReference(raw, sourcePath, diags)
+		if !ok {
+			continue
+		}
+		out = append(out, PluginReferenceInfo{Name: name, Source: source, Rev: rev, SourcePath: sourcePath})
+	}
+	slices.SortFunc(out, func(a, b PluginReferenceInfo) int { return strings.Compare(a.Name, b.Name) })
+	return out, diags, nil
 }

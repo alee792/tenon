@@ -170,10 +170,9 @@ func loadWithProof(dir, expectedFingerprint string, allowUnproven bool) (*Projec
 
 	skillBudget := &skillSetBudget{}
 	skills, skillInputs := loadSkills(root, skillBudget, diags)
-	pluginSkills, pluginServers, pluginInputs := loadPlugins(root, skillBudget, diags)
+	pluginSkills, pluginServers, skippedPluginServers, pluginInputs := loadPlugins(root, skillBudget, diags)
 	mergedSkills, pluginSkillInputs := mergeSkills(skills, pluginSkills, diags)
 	p.Skills = mergedSkills
-	p.PluginServers = pluginServers
 
 	subagents, subagentInputs := loadSubagents(root, diags)
 	p.Subagents = subagents
@@ -184,8 +183,13 @@ func loadWithProof(dir, expectedFingerprint string, allowUnproven bool) (*Projec
 	harnessFiles, harnessInputs := loadHarnessFiles(root, diags)
 	p.HarnessFiles = harnessFiles
 
-	connections, connectionInputs := loadConnections(root, pluginServers, diags)
+	// loadConnections is the central composition seam (ADR 0026, issue #53):
+	// it returns pluginServers with every author-shadowed or masked name
+	// already removed, so both native drivers see one already-composed
+	// server set and carry no composition logic of their own.
+	connections, composedPluginServers, _, _, connectionInputs := loadConnections(root, pluginServers, skippedPluginServers, true, diags)
 	p.Connections = connections
+	p.PluginServers = composedPluginServers
 
 	schedules, scheduleInputs := loadSchedules(root, diags)
 	p.Schedules = schedules
@@ -377,8 +381,23 @@ type sourceInput struct {
 // itself is unchanged by having a caller for the per-file detail.
 func computeFingerprint(inputs []sourceInput) ([]FingerprintEntry, string) {
 	inputs = slices.Clone(inputs)
+	// The sort key is total — Path, then Executable — as a belt-and-braces
+	// guard: two inputs sharing one Path but disagreeing on Executable
+	// (which should never arise once every producer enforces the ADR 0026
+	// mcp/ containment rule) would otherwise leave slices.SortFunc's order
+	// between them unspecified, which would make the fingerprint hash
+	// nondeterministic across otherwise-identical runs.
 	slices.SortFunc(inputs, func(a, b sourceInput) int {
-		return strings.Compare(a.Path, b.Path)
+		if c := strings.Compare(a.Path, b.Path); c != 0 {
+			return c
+		}
+		if a.Executable == b.Executable {
+			return 0
+		}
+		if !a.Executable {
+			return -1
+		}
+		return 1
 	})
 	h := sha256.New()
 	entries := make([]FingerprintEntry, 0, len(inputs))

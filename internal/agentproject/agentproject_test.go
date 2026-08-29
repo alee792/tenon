@@ -259,12 +259,11 @@ func TestLoadAllowsEmptySchedules(t *testing.T) {
 	}
 }
 
-// TestLoadAllowsEmptyConnections proves connections/ is now an implemented,
-// optional component: an empty connections/ directory produces no
-// diagnostics.
+// TestLoadAllowsEmptyConnections proves mcp/ is now an implemented, optional
+// component: an empty mcp/ directory produces no diagnostics.
 func TestLoadAllowsEmptyConnections(t *testing.T) {
 	root := writeAgent(t, "agent", validInstructions)
-	if err := os.Mkdir(filepath.Join(root, "connections"), 0o755); err != nil {
+	if err := os.Mkdir(filepath.Join(root, "mcp"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	p, diags, err := Load(root)
@@ -272,7 +271,7 @@ func TestLoadAllowsEmptyConnections(t *testing.T) {
 		t.Fatal(err)
 	}
 	if diags.HasErrors() {
-		t.Fatalf("empty connections/ must be valid: %v", diags.All())
+		t.Fatalf("empty mcp/ must be valid: %v", diags.All())
 	}
 	if p == nil || len(p.Connections) != 0 {
 		t.Fatalf("expected zero connections, got %v", p)

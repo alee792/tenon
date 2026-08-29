@@ -40,6 +40,27 @@ func requireWarningID(t *testing.T, diags *diagnostics.List, id string) {
 	t.Fatalf("expected warning diagnostic %q, got %v", id, diags.All())
 }
 
+// TestLoadPluginVendoredDirNameGrammar proves a vendored plugins/ directory
+// name is validated against the same component grammar a plugin reference's
+// derived name is (#52 review finding 2): lowercase hyphenated words only,
+// so an uppercase letter or an underscore is rejected with
+// plugin.entry.invalid rather than silently becoming the plugin storage name
+// baked into PluginDataDir.
+func TestLoadPluginVendoredDirNameGrammar(t *testing.T) {
+	cases := []string{"Vendor-X", "vendor_x", "-vendor", "vendor-"}
+	for _, name := range cases {
+		t.Run(name, func(t *testing.T) {
+			root := writeAgent(t, "agent", validInstructions)
+			writePluginManifest(t, root, name, validPluginJSON(name))
+			_, diags, err := Load(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			requireErrorID(t, diags, "plugin.entry.invalid")
+		})
+	}
+}
+
 // TestLoadPluginImportsSkillsInOrder proves a valid plugin's skills import,
 // with plugin skill directories loaded in lexical order.
 func TestLoadPluginImportsSkillsInOrder(t *testing.T) {

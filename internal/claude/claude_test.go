@@ -188,7 +188,7 @@ func projectWithConnection(name, url, context string) *agentproject.Project {
 		Name:         "my-agent",
 		Instructions: &agentproject.Instructions{Body: "Body text.\n"},
 		Connections: []agentproject.Connection{
-			{Name: name, URL: url, Context: context, SourcePath: "connections/" + name + ".md"},
+			{Kind: agentproject.ConnectionKindRemote, Name: name, URL: url, Context: context, SourcePath: "mcp/" + name + ".md"},
 		},
 	}
 }
@@ -236,6 +236,107 @@ func TestConnectionRendersAsNativeHTTPServer(t *testing.T) {
 	}
 }
 
+// TestConnectionHeadersRenderVerbatim proves a remote connection's declared
+// headers render into .mcp.json's native headers field, with ${VAR}
+// references left verbatim for Claude's own expansion (issue #49).
+func TestConnectionHeadersRenderVerbatim(t *testing.T) {
+	p := &agentproject.Project{
+		Root:         "/src/my-agent",
+		Name:         "my-agent",
+		Instructions: &agentproject.Instructions{Body: "Body text.\n"},
+		Connections: []agentproject.Connection{
+			{
+				Kind:       agentproject.ConnectionKindRemote,
+				Name:       "catalog",
+				URL:        "https://example.com/mcp",
+				Headers:    map[string]string{"Authorization": "Bearer ${ACME_TOKEN}"},
+				SourcePath: "mcp/catalog.md",
+			},
+		},
+	}
+	diags := &diagnostics.List{}
+	files := Driver{}.Generate(p, apply.Target{Workspace: "/ws", Executable: "/bin/tenon"}, diags)
+	if diags.HasErrors() {
+		t.Fatalf("unexpected diagnostics: %v", diags.All())
+	}
+
+	var mcpJSON []byte
+	for _, f := range files {
+		if f.Path == ".mcp.json" {
+			mcpJSON = f.Content
+		}
+	}
+	var doc struct {
+		MCPServers map[string]json.RawMessage `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(mcpJSON, &doc); err != nil {
+		t.Fatal(err)
+	}
+	var entry map[string]any
+	if err := json.Unmarshal(doc.MCPServers["catalog"], &entry); err != nil {
+		t.Fatal(err)
+	}
+	headers, _ := entry["headers"].(map[string]any)
+	if headers["Authorization"] != "Bearer ${ACME_TOKEN}" {
+		t.Fatalf("connection entry headers = %+v", entry["headers"])
+	}
+}
+
+// TestComposedProjectOmitsShadowedAndMaskedPluginServers proves the driver
+// renders exactly the composition internal/agentproject already decided
+// (ADR 0026, issue #53): a Project as Load would hand back after shadowing
+// or masking a plugin server carries no trace of the suppressed server in
+// PluginServers, so the driver needs no shadow- or mask-aware logic of its
+// own — it only ever sees the composed set.
+func TestComposedProjectOmitsShadowedAndMaskedPluginServers(t *testing.T) {
+	p := &agentproject.Project{
+		Root:         "/src/my-agent",
+		Name:         "my-agent",
+		Instructions: &agentproject.Instructions{Body: "Body text.\n"},
+		// "catalog" was shadowed by the authored connection below and
+		// "legacy" was masked outright; a real Load already removed both
+		// from PluginServers, leaving only "other" from the accepted plugin.
+		PluginServers: []agentproject.PluginServer{{
+			Name:       "other",
+			Plugin:     "vendor-x",
+			PluginRoot: "/src/my-agent/plugins/vendor-x",
+			SourcePath: "plugins/vendor-x/mcp.json",
+			Transport:  agentproject.TransportStdio,
+			Command:    "other-server",
+		}},
+		Connections: []agentproject.Connection{
+			{Kind: agentproject.ConnectionKindRemote, Name: "catalog", URL: "https://example.com/mcp", SourcePath: "mcp/catalog.md"},
+		},
+	}
+	diags := &diagnostics.List{}
+	files := Driver{}.Generate(p, apply.Target{Workspace: "/ws", Executable: "/bin/tenon"}, diags)
+	if diags.HasErrors() {
+		t.Fatalf("unexpected diagnostics: %v", diags.All())
+	}
+
+	var mcpJSON []byte
+	for _, f := range files {
+		if f.Path == ".mcp.json" {
+			mcpJSON = f.Content
+		}
+	}
+	var doc struct {
+		MCPServers map[string]json.RawMessage `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(mcpJSON, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := doc.MCPServers["catalog"]; !ok {
+		t.Fatalf("expected the authored catalog server to render: %v", doc.MCPServers)
+	}
+	if _, ok := doc.MCPServers["other"]; !ok {
+		t.Fatalf("expected the surviving plugin server other to render: %v", doc.MCPServers)
+	}
+	if _, ok := doc.MCPServers["legacy"]; ok {
+		t.Fatalf("expected the masked plugin server legacy to never render: %v", doc.MCPServers)
+	}
+}
+
 // TestClaudeReservedConnectionNameFailsForClaude proves the Claude-only
 // native project surface names are rejected at generation for claude, with
 // an error that stops apply before it mutates the workspace.
@@ -247,13 +348,13 @@ func TestClaudeReservedConnectionNameFailsForClaude(t *testing.T) {
 
 		found := false
 		for _, d := range diags.All() {
-			if d.ID == "connection.name.reserved" && d.Severity == diagnostics.Error &&
-				d.Path == "connections/"+name+".md" {
+			if d.ID == "mcp.name.reserved" && d.Severity == diagnostics.Error &&
+				d.Path == "mcp/"+name+".md" {
 				found = true
 			}
 		}
 		if !found {
-			t.Fatalf("name %q: expected an error connection.name.reserved, got %v", name, diags.All())
+			t.Fatalf("name %q: expected an error mcp.name.reserved, got %v", name, diags.All())
 		}
 		for _, f := range files {
 			if f.Path == ".mcp.json" && strings.Contains(string(f.Content), `"`+name+`"`) {
@@ -347,7 +448,7 @@ func projectWithInstalledConnection(name, pkg, capability string) *agentproject.
 		Root: "/src/my-agent",
 		Name: "my-agent",
 		Connections: []agentproject.Connection{
-			{Kind: agentproject.ConnectionKindInstalled, Name: name, Package: pkg, Capability: capability, SourcePath: "connections/" + name + ".md"},
+			{Kind: agentproject.ConnectionKindInstalled, Name: name, Package: pkg, Capability: capability, SourcePath: "mcp/" + name + ".md"},
 		},
 	}
 }
@@ -415,7 +516,7 @@ func TestInstalledConnectionRendersNativeStdioEntry(t *testing.T) {
 
 // TestInstalledConnectionServerNameMismatchFailsBeforeMutation proves a
 // connection whose filename differs from the capability's declared native
-// server name fails with connection.package.mismatch and contributes no
+// server name fails with mcp.package.mismatch and contributes no
 // entry.
 func TestInstalledConnectionServerNameMismatchFailsBeforeMutation(t *testing.T) {
 	base := installClaudeFixture(t, "demo-pkg", "actual-name")
@@ -428,18 +529,18 @@ func TestInstalledConnectionServerNameMismatchFailsBeforeMutation(t *testing.T) 
 
 	found := false
 	for _, d := range diags.All() {
-		if d.ID == "connection.package.mismatch" {
+		if d.ID == "mcp.package.mismatch" {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("expected connection.package.mismatch, got %v", diags.All())
+		t.Fatalf("expected mcp.package.mismatch, got %v", diags.All())
 	}
 }
 
 // TestInstalledConnectionUnconfiguredStoreFailsClearly proves an installed
 // connection with no configured integration store fails with
-// connection.package.unresolved rather than panicking.
+// mcp.package.unresolved rather than panicking.
 func TestInstalledConnectionUnconfiguredStoreFailsClearly(t *testing.T) {
 	p := projectWithInstalledConnection("demo", "demo-pkg", "mcp")
 	diags := &diagnostics.List{}
@@ -447,11 +548,128 @@ func TestInstalledConnectionUnconfiguredStoreFailsClearly(t *testing.T) {
 
 	found := false
 	for _, d := range diags.All() {
-		if d.ID == "connection.package.unresolved" {
+		if d.ID == "mcp.package.unresolved" {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("expected connection.package.unresolved, got %v", diags.All())
+		t.Fatalf("expected mcp.package.unresolved, got %v", diags.All())
+	}
+}
+
+// --- Stdio connection rendering (ADR 0026, issue #50) -----------------------
+
+func stdioConnectionProject() *agentproject.Project {
+	return &agentproject.Project{
+		Root:         "/src/my-agent",
+		Name:         "my-agent",
+		Instructions: &agentproject.Instructions{Body: "Body text.\n"},
+		Connections: []agentproject.Connection{
+			{
+				Kind:       agentproject.ConnectionKindStdio,
+				Name:       "deployctl",
+				Command:    "servers/deployctl/bin/deployctl",
+				Args:       []string{"--flag"},
+				Env:        map[string]string{"TOKEN": "Bearer ${ACME_TOKEN}", "MODE": "prod"},
+				SourcePath: "mcp/deployctl.md",
+			},
+		},
+	}
+}
+
+// TestStdioConnectionRendersNativeStdioEntry proves a repo-relative stdio
+// connection renders as Claude's env -C working-directory adapter around the
+// absolute resolved command, with an undeclared cwd defaulting to the agent
+// root, args verbatim, and env verbatim including its ${VAR} reference left
+// for Claude's own expansion.
+func TestStdioConnectionRendersNativeStdioEntry(t *testing.T) {
+	p := stdioConnectionProject()
+	diags := &diagnostics.List{}
+	files := Driver{}.Generate(p, apply.Target{Workspace: "/ws", Executable: "/bin/tenon"}, diags)
+	if diags.HasErrors() {
+		t.Fatalf("unexpected diagnostics: %v", diags.All())
+	}
+
+	var mcpJSON []byte
+	for _, f := range files {
+		if f.Path == ".mcp.json" {
+			mcpJSON = f.Content
+		}
+	}
+	var doc struct {
+		MCPServers map[string]json.RawMessage `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(mcpJSON, &doc); err != nil {
+		t.Fatal(err)
+	}
+	var entry struct {
+		Type    string            `json:"type"`
+		Command string            `json:"command"`
+		Args    []string          `json:"args"`
+		Env     map[string]string `json:"env"`
+	}
+	if err := json.Unmarshal(doc.MCPServers["deployctl"], &entry); err != nil {
+		t.Fatal(err)
+	}
+	if entry.Type != "stdio" || entry.Command != "/usr/bin/env" {
+		t.Fatalf("entry = %+v", entry)
+	}
+	wantArgs := []string{"-C", "/src/my-agent", "--", "/src/my-agent/servers/deployctl/bin/deployctl", "--flag"}
+	if len(entry.Args) != len(wantArgs) {
+		t.Fatalf("args = %v, want %v", entry.Args, wantArgs)
+	}
+	for i, a := range wantArgs {
+		if entry.Args[i] != a {
+			t.Fatalf("args = %v, want %v", entry.Args, wantArgs)
+		}
+	}
+	if entry.Env["TOKEN"] != "Bearer ${ACME_TOKEN}" || entry.Env["MODE"] != "prod" {
+		t.Fatalf("env = %+v", entry.Env)
+	}
+}
+
+// TestStdioConnectionDeclaredCwdOverridesDefault proves a declared cwd is
+// used verbatim instead of the agent-root default.
+func TestStdioConnectionDeclaredCwdOverridesDefault(t *testing.T) {
+	p := stdioConnectionProject()
+	p.Connections[0].Cwd = "servers/deployctl"
+	diags := &diagnostics.List{}
+	files := Driver{}.Generate(p, apply.Target{Workspace: "/ws", Executable: "/bin/tenon"}, diags)
+	if diags.HasErrors() {
+		t.Fatalf("unexpected diagnostics: %v", diags.All())
+	}
+	var mcpJSON []byte
+	for _, f := range files {
+		if f.Path == ".mcp.json" {
+			mcpJSON = f.Content
+		}
+	}
+	if !strings.Contains(string(mcpJSON), `"/src/my-agent/servers/deployctl"`) {
+		t.Fatalf("declared cwd must render verbatim: %s", mcpJSON)
+	}
+}
+
+// TestClaudeMCPConfigDeterministic proves two renders of the same project
+// produce byte-identical .mcp.json output, including a stdio connection's
+// env map.
+func TestClaudeMCPConfigDeterministic(t *testing.T) {
+	p := stdioConnectionProject()
+	render := func() []byte {
+		diags := &diagnostics.List{}
+		files := Driver{}.Generate(p, apply.Target{Workspace: "/ws", Executable: "/bin/tenon"}, diags)
+		if diags.HasErrors() {
+			t.Fatalf("unexpected diagnostics: %v", diags.All())
+		}
+		for _, f := range files {
+			if f.Path == ".mcp.json" {
+				return f.Content
+			}
+		}
+		t.Fatal(".mcp.json not generated")
+		return nil
+	}
+	a, b := render(), render()
+	if string(a) != string(b) {
+		t.Fatalf("identical input must render byte-identical output:\n%s\nvs\n%s", a, b)
 	}
 }

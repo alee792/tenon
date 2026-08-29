@@ -84,7 +84,7 @@ correctly compute from bytes. Tenon already computes it, on every load.
 
 The two are only loosely correlated, and the correlation fails in both
 directions. Rewording an instruction body produces a large textual diff and
-zero capability change. Adding one line to `connections/` produces a
+zero capability change. Adding one line to `mcp/` produces a
 one-line diff and gives the agent a whole new MCP server. Reordering
 frontmatter keys or reflowing a skill's prose is textually noisy and
 semantically null.

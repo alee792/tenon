@@ -38,20 +38,20 @@ func ResolveInstalledConnections(connections []Connection, storeBase, tenonVersi
 			continue
 		}
 		if store == nil {
-			diags.Errorf("connection.package.unresolved", c.SourcePath,
+			diags.Errorf("mcp.package.unresolved", c.SourcePath,
 				"connection %q selects installed package %q capability %q, but no integration store is configured",
 				c.Name, c.Package, c.Capability)
 			continue
 		}
 		desc, err := store.Resolve(c.Package, c.Capability, tenonVersion, runtime.GOOS, runtime.GOARCH)
 		if err != nil {
-			diags.Errorf("connection.package.unresolved", c.SourcePath,
+			diags.Errorf("mcp.package.unresolved", c.SourcePath,
 				"connection %q could not be resolved against the integration store (package %q, capability %q): %s",
 				c.Name, c.Package, c.Capability, diagnostics.Bound(err.Error(), 256))
 			continue
 		}
 		if desc.ServerName != c.Name {
-			diags.Errorf("connection.package.mismatch", c.SourcePath,
+			diags.Errorf("mcp.package.mismatch", c.SourcePath,
 				"connection %q selects capability %q of package %q, whose declared native server name %q does not equal the connection filename",
 				c.Name, c.Capability, c.Package, desc.ServerName)
 			continue

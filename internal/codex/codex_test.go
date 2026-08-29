@@ -149,13 +149,55 @@ func TestRemoteHeadersWarnForCodex(t *testing.T) {
 	}
 }
 
+// TestConnectionHeadersWarnForCodex proves a remote connection's declared
+// headers, which the generated Codex configuration does not carry, are
+// reported rather than silently dropped, while the url entry itself still
+// renders (issue #49).
+func TestConnectionHeadersWarnForCodex(t *testing.T) {
+	p := &agentproject.Project{
+		Root:         "/src/my-agent",
+		Name:         "my-agent",
+		Instructions: &agentproject.Instructions{Body: "Body text.\n"},
+		Connections: []agentproject.Connection{
+			{
+				Kind:       agentproject.ConnectionKindRemote,
+				Name:       "catalog",
+				URL:        "https://example.com/mcp",
+				Headers:    map[string]string{"Authorization": "Bearer ${ACME_TOKEN}"},
+				SourcePath: "mcp/catalog.md",
+			},
+		},
+	}
+	diags := &diagnostics.List{}
+	files := Driver{}.Generate(p, apply.Target{Workspace: "/ws", Executable: "/bin/tenon"}, diags)
+
+	found := false
+	for _, d := range diags.All() {
+		if d.ID == "mcp.header.not-honored" && d.Severity == diagnostics.Warning &&
+			d.Path == "mcp/catalog.md" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected mcp.header.not-honored warning, got %v", diags.All())
+	}
+	for _, f := range files {
+		if f.Path == ".codex/config.toml" {
+			if !strings.Contains(string(f.Content), "[mcp_servers.catalog]") ||
+				strings.Contains(string(f.Content), "ACME_TOKEN") {
+				t.Fatalf("connection must render without headers: %s", f.Content)
+			}
+		}
+	}
+}
+
 func projectWithConnection(name, url, context string) *agentproject.Project {
 	return &agentproject.Project{
 		Root:         "/src/my-agent",
 		Name:         "my-agent",
 		Instructions: &agentproject.Instructions{Body: "Body text.\n"},
 		Connections: []agentproject.Connection{
-			{Name: name, URL: url, Context: context, SourcePath: "connections/" + name + ".md"},
+			{Kind: agentproject.ConnectionKindRemote, Name: name, URL: url, Context: context, SourcePath: "mcp/" + name + ".md"},
 		},
 	}
 }
@@ -189,6 +231,52 @@ func TestConnectionRendersAsCodexHTTPServer(t *testing.T) {
 	}
 	if !strings.Contains(agentsMD, "### catalog") || !strings.Contains(agentsMD, "Use for the catalog.") {
 		t.Fatalf("expected the connections section in AGENTS.md: %s", agentsMD)
+	}
+}
+
+// TestComposedProjectOmitsShadowedAndMaskedPluginServers proves the codex
+// driver, like the claude driver, renders exactly the composition
+// internal/agentproject already decided (ADR 0026, issue #53): a Project as
+// Load would hand back after shadowing or masking a plugin server carries no
+// trace of the suppressed server in PluginServers, so neither driver needs
+// any shadow- or mask-aware logic of its own.
+func TestComposedProjectOmitsShadowedAndMaskedPluginServers(t *testing.T) {
+	p := &agentproject.Project{
+		Root:         "/src/my-agent",
+		Name:         "my-agent",
+		Instructions: &agentproject.Instructions{Body: "Body text.\n"},
+		PluginServers: []agentproject.PluginServer{{
+			Name:       "other",
+			Plugin:     "vendor-x",
+			PluginRoot: "/src/my-agent/plugins/vendor-x",
+			SourcePath: "plugins/vendor-x/mcp.json",
+			Transport:  agentproject.TransportHTTP,
+			URL:        "https://example.com/other",
+		}},
+		Connections: []agentproject.Connection{
+			{Kind: agentproject.ConnectionKindRemote, Name: "catalog", URL: "https://example.com/mcp", SourcePath: "mcp/catalog.md"},
+		},
+	}
+	diags := &diagnostics.List{}
+	files := Driver{}.Generate(p, apply.Target{Workspace: "/ws", Executable: "/bin/tenon"}, diags)
+	if diags.HasErrors() {
+		t.Fatalf("unexpected diagnostics: %v", diags.All())
+	}
+
+	var config string
+	for _, f := range files {
+		if f.Path == ".codex/config.toml" {
+			config = string(f.Content)
+		}
+	}
+	if !strings.Contains(config, "[mcp_servers.catalog]") {
+		t.Fatalf("expected the authored catalog server to render: %s", config)
+	}
+	if !strings.Contains(config, "[mcp_servers.other]") {
+		t.Fatalf("expected the surviving plugin server other to render: %s", config)
+	}
+	if strings.Contains(config, "[mcp_servers.legacy]") {
+		t.Fatalf("expected the masked plugin server legacy to never render: %s", config)
 	}
 }
 
@@ -299,7 +387,7 @@ func projectWithInstalledConnection(name, pkg, capability string) *agentproject.
 		Root: "/src/my-agent",
 		Name: "my-agent",
 		Connections: []agentproject.Connection{
-			{Kind: agentproject.ConnectionKindInstalled, Name: name, Package: pkg, Capability: capability, SourcePath: "connections/" + name + ".md"},
+			{Kind: agentproject.ConnectionKindInstalled, Name: name, Package: pkg, Capability: capability, SourcePath: "mcp/" + name + ".md"},
 		},
 	}
 }
@@ -349,7 +437,7 @@ func TestInstalledConnectionRendersNativeCommandEntry(t *testing.T) {
 
 // TestInstalledConnectionServerNameMismatchFailsForCodex proves a connection
 // whose filename differs from the capability's declared native server name
-// fails with connection.package.mismatch.
+// fails with mcp.package.mismatch.
 func TestInstalledConnectionServerNameMismatchFailsForCodex(t *testing.T) {
 	base := installCodexFixture(t, "demo-pkg", "actual-name")
 	p := projectWithInstalledConnection("demo", "demo-pkg", "mcp")
@@ -361,11 +449,121 @@ func TestInstalledConnectionServerNameMismatchFailsForCodex(t *testing.T) {
 
 	found := false
 	for _, d := range diags.All() {
-		if d.ID == "connection.package.mismatch" {
+		if d.ID == "mcp.package.mismatch" {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("expected connection.package.mismatch, got %v", diags.All())
+		t.Fatalf("expected mcp.package.mismatch, got %v", diags.All())
+	}
+}
+
+// --- Stdio connection rendering (ADR 0026, issue #50) -----------------------
+
+func stdioConnectionProject() *agentproject.Project {
+	return &agentproject.Project{
+		Root:         "/src/my-agent",
+		Name:         "my-agent",
+		Instructions: &agentproject.Instructions{Body: "Body text.\n"},
+		Connections: []agentproject.Connection{
+			{
+				Kind:    agentproject.ConnectionKindStdio,
+				Name:    "deployctl",
+				Command: "servers/deployctl/bin/deployctl",
+				Args:    []string{"--flag"},
+				Env: map[string]string{
+					"MODE": "prod",
+					// A bare ${VAR} reference whose env key matches the
+					// referenced variable's name is forwarded by name only
+					// (Blocker 1, post-review): codex forwards the ambient
+					// ACME_TOKEN, never the value tenon read.
+					"ACME_TOKEN": "${ACME_TOKEN}",
+					// A bare ${VAR} reference whose env key does NOT match
+					// the referenced variable cannot be forwarded: codex's
+					// env_vars mechanism forwards only the ambient value
+					// under its own name, and cannot rename it to TOKEN.
+					"TOKEN":  "${ACME_TOKEN}",
+					"PREFIX": "Bearer ${ACME_TOKEN}",
+				},
+				SourcePath: "mcp/deployctl.md",
+			},
+		},
+	}
+}
+
+// TestStdioConnectionRendersForCodex proves command/args/cwd render directly
+// under the agent root, a literal env value renders verbatim, a bare ${VAR}
+// reference whose env key matches the referenced variable is forwarded by
+// name only through env_vars (Blocker 1, post-review), a bare ${VAR}
+// reference whose env key does NOT match the referenced variable cannot be
+// forwarded (codex cannot rename a forwarded variable) and is reported and
+// omitted rather than silently forwarding the wrong ambient value, and a
+// prefixed reference is likewise reported unforwardable and omitted rather
+// than rendered as a literal nobody expands.
+func TestStdioConnectionRendersForCodex(t *testing.T) {
+	p := stdioConnectionProject()
+	diags := &diagnostics.List{}
+	files := Driver{}.Generate(p, apply.Target{Workspace: "/ws", Executable: "/bin/tenon"}, diags)
+
+	var config string
+	for _, f := range files {
+		if f.Path == ".codex/config.toml" {
+			config = string(f.Content)
+		}
+	}
+	if !strings.Contains(config, "[mcp_servers.deployctl]") {
+		t.Fatalf("missing the deployctl table: %s", config)
+	}
+	if !strings.Contains(config, `command = "/src/my-agent/servers/deployctl/bin/deployctl"`) {
+		t.Fatalf("missing the absolute resolved command: %s", config)
+	}
+	if !strings.Contains(config, `args = ["--flag"]`) {
+		t.Fatalf("missing the literal args: %s", config)
+	}
+	if !strings.Contains(config, `cwd = "/src/my-agent"`) {
+		t.Fatalf("an undeclared cwd must default to the agent root: %s", config)
+	}
+	if !strings.Contains(config, `"MODE" = "prod"`) {
+		t.Fatalf("a literal env value must render verbatim: %s", config)
+	}
+	if strings.Contains(config, `"TOKEN"`) {
+		t.Fatalf("a bare ${VAR} reference whose key does not match the referenced variable must never render, forwarded or literal: %s", config)
+	}
+	if !strings.Contains(config, `env_vars = ["ACME_TOKEN"]`) {
+		t.Fatalf("a bare ${VAR} reference whose key matches the referenced variable must be forwarded by name only through env_vars: %s", config)
+	}
+	if strings.Contains(config, "PREFIX") {
+		t.Fatalf("a prefixed ${VAR} reference must be omitted entirely, not rendered: %s", config)
+	}
+	warnings := 0
+	for _, d := range diags.All() {
+		if d.ID == "mcp.env.not-honored" && d.Severity == diagnostics.Warning {
+			warnings++
+		}
+	}
+	if warnings != 2 {
+		t.Fatalf("expected 2 mcp.env.not-honored warnings (TOKEN and PREFIX), got %d: %v", warnings, diags.All())
+	}
+}
+
+// TestCodexMCPConfigDeterministic proves two renders of the same project
+// produce byte-identical .codex/config.toml output, including a stdio
+// connection's split env.
+func TestCodexMCPConfigDeterministic(t *testing.T) {
+	p := stdioConnectionProject()
+	render := func() []byte {
+		diags := &diagnostics.List{}
+		files := Driver{}.Generate(p, apply.Target{Workspace: "/ws", Executable: "/bin/tenon"}, diags)
+		for _, f := range files {
+			if f.Path == ".codex/config.toml" {
+				return f.Content
+			}
+		}
+		t.Fatal(".codex/config.toml not generated")
+		return nil
+	}
+	a, b := render(), render()
+	if string(a) != string(b) {
+		t.Fatalf("identical input must render byte-identical output:\n%s\nvs\n%s", a, b)
 	}
 }

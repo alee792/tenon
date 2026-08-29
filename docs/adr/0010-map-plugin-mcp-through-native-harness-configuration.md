@@ -6,6 +6,11 @@
   [ADR 0013](0013-bound-authored-projects-with-aggregate-budgets.md)
 - Reused by:
   [ADR 0015](0015-use-the-official-github-server-as-native-unmanaged-mcp.md)
+- Amended by: [ADR 0026](0026-author-remote-first-spec-aligned-mcp.md),
+  which changes the "exact name collisions are skipped with a warning"
+  outcome for the author↔plugin case — an authored server of the same name
+  wins with a warning, and an authored masking form suppresses a
+  plugin-declared server; plugin↔plugin collisions are unchanged
 
 ## Plain-English summary
 

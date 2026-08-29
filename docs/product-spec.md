@@ -76,10 +76,10 @@ lowercase hyphenated words. The full component set:
 my-agent/
   instructions.md          # optional; see the root rule below
   skills/                  # Agent Skills directories
-  plugins/                 # complete publisher-authored Agent Plugin packages
+  plugins/                 # vendored Agent Plugin packages, or <name>.md pointer+pin references
   tools/                   # one typed function per TS/Python file or Go dir
   subagents/               # one instructions.md per immediate subagent
-  connections/             # one <name>.md per standalone MCP connection
+  mcp/                     # one <name>.md per authored MCP server, or a mask
   schedules/               # nested Markdown cron tasks
   harnesses/               # literal harness-specific native files
   channels/                # second product; specified separately
@@ -114,7 +114,9 @@ strips, or enforces them. The dated per-field behavior matrix is
 one complete publisher-authored package. A consumer vendors the reviewed
 directory intact beneath `plugins/<storage-name>/`; review, pinning, and
 provenance belong to the author's version control. Tenon records no dependency
-lock and performs no network acquisition. Each plugin requires a bounded
+lock, resolves no transitive graph, and acquires nothing during any project
+load — the one online step is the explicit `tenon plugin fetch` described
+below. Each plugin requires a bounded
 `plugin.json` targeting the canonical v1.0.0 schema, validated locally
 without fetching. Skills import only from the plugin's fixed `skills/`
 location; root skills load first and the first skill name wins, with later
@@ -126,12 +128,33 @@ schema; `stdio` and `streamable-http` supported, SSE warned and skipped).
 Accepted servers are emitted as native project MCP configuration — the
 harness owns startup, approval, transport, authentication, and runtime
 behavior; tenon does not proxy, supervise, or audit plugin MCP calls. `managed`
-is reserved; exact name collisions are skipped with a warning. Plugin-relative
+is reserved; exact name collisions between two plugins are skipped with a
+warning (first-wins, never renamed). A collision with an authored `mcp/`
+server is different — the authored server wins instead, and a mask suppresses
+a plugin's server outright (see Authored MCP servers). Plugin-relative
 commands stay inside the real plugin tree; tenon expands exactly
 `${PLUGIN_ROOT}` and `${PLUGIN_DATA}` once and provides an owner-only
 persistent data directory per agent and plugin. Remote URLs are absolute
 HTTPS (loopback excepted), without user info or fragments; headers are
 literal package-visible values and must not contain secrets.
+
+A plugin may also be declared by pointer and pin: `plugins/<name>.md`
+carries closed frontmatter naming a `source` (an absolute HTTPS URL) and a
+full 40-character commit `rev`, plus an optional bounded body of
+informational provenance prose that is never rendered into instructions
+(ADR 0026). `tenon plugin fetch` is the one explicitly online command that
+resolves a reference into the owner-only, content-addressed plugin cache;
+`tenon apply` and every other load stay fully offline and fail, naming
+`tenon plugin fetch`, when a pin's cached tree is absent or no longer
+matches its recorded digest. A resolved reference loads through the exact
+same manifest, `skills/`, and `mcp.json` validation a vendored directory
+uses, and its resolved bytes join the project fingerprint exactly as
+vendored bytes do. A reference and a vendored directory sharing a name fail
+the project before any workspace mutation. `tenon plugin update AGENT NAME
+--rev REV` fetches the new revision, prints a bounded added/removed/changed
+component-path diff against the currently pinned revision, and only then
+rewrites the reference file's `rev`; `tenon plugin status` reports each
+reference's declared pin and offline resolution health.
 
 **Tools.** Visible `tools/*.ts` and `tools/*.py` files and `tools/NAME/tool.go`
 directories each declare one tool; filenames supply tool names, with
@@ -151,26 +174,94 @@ instructions, skills, managed tools, and permissions. Child skills, tools,
 dependencies, and nested subagents are rejected, not ignored. Subagent and
 tool names may not collide.
 
-**Connections.** Each `connections/<name>.md` authors one standalone native
-MCP connection; the filename supplies the connection and native server name
-(`managed` reserved). Closed YAML frontmatter declares `type: mcp` plus
-exactly one target form: an installed stdio target (`package` +
-`capability`, resolved offline through the integration store, whose stable
-server name must equal the filename) or a credential-free remote target
-(`transport: streamable-http` + absolute HTTPS `url`, validated without
-contact). No headers, tokens, OAuth, timeouts, or tool filters in v1.
+**Authored MCP servers.** Each `mcp/<name>.md` authors one native MCP server
+(the CLI verb, the diagnostic identifiers, and the older term for it are all
+`mcp`/`connection`; they name the same thing). The filename supplies the
+native server name under a fixed grammar, and `managed` is reserved for
+tenon's own managed server. Frontmatter is closed YAML whose `type` field
+selects exactly one of four arms (ADR 0026); three declare a server in the
+[Agent Plugins 1.0](https://agent-plugins.org/specification) `mcp.json`
+server-entry vocabulary used verbatim, and the fourth is tenon's own
+composition form:
+
+- `type: streamable-http` — an absolute HTTPS `url` (nonempty host; no user
+  information, query, or fragment; validated without contact) plus optional
+  `headers`, a string-to-string map.
+- `type: stdio` — an agent-root-relative `command` (`./…`,
+  containment-validated the way a plugin-relative command is but anchored at
+  the agent root) naming an existing regular file whose bytes and executable
+  bit join the fingerprint, plus optional `args` (plain strings;
+  `${PLUGIN_ROOT}`/`${PLUGIN_DATA}` rejected by name, any other `$` left
+  literal), `env`, and `cwd` (the same containment rule as `command`,
+  defaulting to the agent root when absent). Bare PATH-resolved names and
+  absolute paths are refused: PATH lookup is exactly the drift this design
+  declines. The executable is ordinary agent source living outside `mcp/`,
+  so the repository is its pin and no package store participates.
+- `type: installed` — `package` + `capability`, resolved offline through the
+  integration store, whose stable server name must equal the filename. This
+  arm is tenon's own, not spec vocabulary, and `headers` is an unknown field
+  on it.
+- A mask — exactly `override: plugins/<name>` (the plugin's storage
+  directory) and `enabled: false`, no `type`, no other field, and no body. It
+  suppresses a plugin-declared server of this file's name without replacing
+  it.
+
+`headers` and `env` share one value grammar: a literal containing no `$`, or
+an optional literal prefix containing no `$` followed by exactly one `${VAR}`
+reference whose name matches `[A-Z_][A-Z0-9_]*`, with nothing after it.
+`${PLUGIN_ROOT}` and `${PLUGIN_DATA}` are rejected by name — they are
+plugin-root machinery with no meaning in an authored file. Tenon never reads,
+resolves, copies, or persists a *value*; only the variable *name* reaches
+generated configuration, and the harness's own process environment is what
+resolves it, if anything does. Literal header and `env` values are
+package-visible configuration that must not contain secrets — the author's
+responsibility, since tenon claims no heuristic for recognizing one.
+
+Authentication is discovered, never declared: there is no `auth` field, no
+OAuth configuration, no token, and no credential reference in authored
+source. Declaring a remote endpoint that requires OAuth is fine — an HTTP
+server answering `401` advertises its authorization server and the native
+harness performs the flow and owns the resulting tokens. Tenon renders the
+URL and stops. `type: sse` fails as a deprecated, unsupported transport,
+before workspace mutation, rather than being warned and skipped the way a
+plugin's SSE server is: an authored file is a first-class request, and
+silently dropping it would leave an agent short of a capability its own
+source says it has. A leftover `connections/` directory (the prior name)
+fails closed with a migration diagnostic naming `mcp/`
+(`mcp.migration.connections-dir`) rather than being silently ignored, and
+nothing is auto-migrated.
+
 Optional trimmed Markdown after the frontmatter (at most 1,024 characters) is
-model-facing usage context rendered once into generated instructions, with
-one boundary statement that the native harness owns MCP startup, trust,
-approval, authentication, discovery, calls, and effects. Name collisions with
-`managed`, another connection, or a plugin server fail before mutation.
+model-facing usage context rendered once into generated instructions in
+lexical order, with one boundary statement that the native harness owns MCP
+startup, trust, approval, authentication, discovery, calls, and effects. A
+mask carries no body: it declares absence, not guidance.
+
+Composition splits by relationship (ADR 0026), and the composed set is
+computed once so both drivers render an identical result:
+
+| Collision | Outcome |
+| --- | --- |
+| Any server claiming `managed` | Fails closed; `managed` is reserved and unmaskable |
+| Two plugins declaring one name | First wins, with a warning (ADR 0010, unchanged) |
+| Authored server vs. plugin server | The authored server wins and is emitted; the plugin's is not; a warning (`mcp.name.shadowed`) names both sources |
+| A mask vs. the plugin server it names | The plugin's server is suppressed, silently — masking is deliberate, and the mask file is the record |
+
+An authored `mcp/<name>.md` file is one per name, so two authored servers
+cannot otherwise collide; the `mcp.name.collision` check exists only as
+defense-in-depth against a future change to that structure. A dangling
+override — the named plugin absent, or present but not actually contributing
+a server named for this file — fails before mutation
+(`mcp.override.dangling`), as does `enabled: true` (`mcp.override.enabled`; a
+true mask would be a no-op, since the plugin's server is already emitted) and
+a non-empty body (`mcp.override.body`).
 
 Authors need not hand-edit native configuration:
 
 ```text
-tenon connection add AGENT NAME --url HTTPS_URL [--context TEXT] [--manifest PATH]
-tenon connection status AGENT [NAME] [--manifest PATH]
-tenon connection remove AGENT NAME [--manifest PATH]
+tenon mcp add AGENT NAME --url HTTPS_URL [--header 'K: V'] [--context TEXT] [--manifest PATH]
+tenon mcp status AGENT [NAME] [--manifest PATH]
+tenon mcp remove AGENT NAME [--manifest PATH]
 ```
 
 Commands take the exact positional agent root, proven either way the
@@ -178,23 +269,31 @@ Instructions section names — so a supplied manifest proves an
 instructions-free root here exactly as it does for validate and apply — never
 search ancestors or choose a harness, and finish by directing the author to
 run `tenon apply` for each intended workspace. There is no update command;
-the Markdown is ordinary versioned source. Authoring an installed target
-through `connection add` is not available yet — the file is written by hand,
-which every other command here treats identically (see Known limitations).
+the Markdown is ordinary versioned source. `mcp add` writes the
+`streamable-http` arm only; the stdio, installed, and masking arms are typed
+by hand, which every other command here treats identically (see Known
+limitations). `mcp status` is the one offline view of the agent's entire
+composed MCP surface (issue #54): one row per authored server, one per
+accepted plugin-provided server, one per plugin server an authored server
+shadows, and one per masking declaration. It contacts nothing — a remote
+entry reports `runtime=unchecked` — and required ambient environment
+variable names are reported by name only, matching `integration inspect`'s
+convention.
 
-The GitHub connection is the canonical installed target: the official
-`github/github-mcp-server` executable, installed as an integration package,
-emitted into native Claude and Codex configuration with server name `github`
-and rejection on collision. Authentication is deliberately unmanaged: the
-operator injects `GITHUB_PERSONAL_ACCESS_TOKEN` into the harness launch
-environment, the official server reads it directly, and tenon never writes it
-into source, generated files, state, staging, logs, or evidence. **The
-harness, model-accessible execution tools, and processes inheriting that
-environment may read or transmit the PAT; tenon does not claim otherwise, and
-a read-only workspace does not constrain GitHub effects.** Fine-grained
-scope, short expiration, native-harness trust, and operator judgment are the
-security boundary. The operator journey, lifecycle, and troubleshooting live
-in [the native GitHub MCP journey](github-native-mcp.md).
+GitHub is the reference journey, and it is a hosted remote server: four lines
+of `mcp/github.md` naming `https://api.githubcopilot.com/mcp/`, one apply,
+and one browser consent the harness itself conducts. Tenon holds no token and
+writes no credential store. **The authorization the operator grants lives in
+harness-owned storage tenon neither writes nor reads, and the harness,
+model-accessible execution tools, and processes with access to that storage
+may use it; a read-only workspace does not constrain GitHub effects.** The
+curated `github/github-mcp-server` integration package with a
+`GITHUB_PERSONAL_ACCESS_TOKEN` in the harness environment remains fully
+specified, validated, resolved, and emitted as the `type: installed` arm, and
+remains the answer for air-gapped or org-policy operators; ADR 0026 deferred
+it as the *reference* journey without withdrawing it. Both journeys, their
+lifecycles, and their troubleshooting live in
+[the native GitHub MCP journey](github-native-mcp.md).
 
 **Schedules.** Nested Markdown files under `schedules/`; the relative path
 without `.md` is the schedule name. Strict frontmatter carries exactly one
@@ -222,10 +321,12 @@ workspace mutation:
 | Authored tools | 128 | 1,024 source and dependency files; 1 MiB each and 64 MiB aggregate |
 | Immediate subagents | 128 | 128 KiB each and 16 MiB aggregate |
 | Schedules | 256 | 128 KiB per source, including a 32 KiB prompt; 16 MiB aggregate |
-| Vendored plugins | 128 directory entries | `plugin.json` and `mcp.json` 128 KiB each; 1,024 entries per plugin `skills/` location |
+| Plugins (`plugins/`: vendored directories and reference files) | 128 entries, combined | `plugin.json` and `mcp.json` 128 KiB each; 1,024 entries per plugin `skills/` location; a reference file 8 KiB, body at most 1,024 characters |
+| Fetched plugin reference tree (`tenon plugin fetch`'s cache) | Not aggregate-bounded across references | 64 MiB and 8,192 files per fetched tree |
 | Accepted plugin MCP servers | 128 aggregate | Generated native MCP configuration at most 8 MiB |
 | Selected harness-specific files | 1,024 | 1 MiB each and 8 MiB aggregate |
-| Standalone MCP connections | 128 | 8 KiB per source; context at most 1,024 characters |
+| Authored MCP servers (`mcp/`) | 128 | 8 KiB per source; context at most 1,024 characters |
+| Declared `type: stdio` command executables | 16 declared stdio servers | 16 MiB per resolved command file; 64 MiB aggregate across every distinct one |
 | Agent manifest | One optional file, supplied at application | 32 KiB |
 
 Everywhere: authored entries are bounded regular files and real directories
@@ -369,8 +470,9 @@ observe, or retry harness-native tools.
 
 Codex treats the generated managed server as required and delegates its tool
 approval to tenon, so an authorized managed call does not draw a second
-harness prompt; every other generated MCP entry — plugin, connection, or
-installed — keeps native per-call prompt approval. This exemption applies
+harness prompt; every other generated MCP entry — plugin-provided or
+authored, remote or stdio or installed — keeps native per-call prompt
+approval. This exemption applies
 only to the managed server and does not affect native or unrelated MCP
 tools.
 
@@ -389,6 +491,17 @@ tool hosts, harnesses, models, generated files, or audit, and no backend or
 broker code is scaffolded until a concrete operation is selected.
 
 ## Integration packages
+
+The integration store is machinery, not the front door. ADR 0026 moved the
+reference journey for a third-party server to the hosted remote endpoint, so
+no authoring journey requires an installed package any more. What the store
+kept is what it was actually good at: an owner-only, immutable,
+content-addressed, offline-verifiable place to put bytes an operator has
+reviewed and trusted. Two consumers use it today — the `type: installed` arm,
+for an air-gapped or org-policy operator who wants an exact pinned executable,
+and, as a sibling built on the same properties rather than the same code, the
+plugin-reference cache `tenon plugin fetch` fills. The commands below remain
+supported; they are no longer the way an author adds a server.
 
 Machine-installed third-party integrations use a metadata-first package
 contract distinct from vendored `plugins/`. A bounded schema-version-1
@@ -411,7 +524,7 @@ package, grant trust, or carry a credential; apply gains no network path.
 Recognized capabilities are closed schemas. The core implements `native-mcp`
 v1: a stable native server name, executable, bounded literal launch data,
 required ambient environment names without values, and supported harness
-targets — consumed by installed connections. `channel-adapter` v1 belongs to
+targets — consumed by the `type: installed` arm. `channel-adapter` v1 belongs to
 the channel product, specified in the prototype repository: the core does
 not implement its recognition and it is not acceptance-gating; it is
 reintroduced only if the channel product is ported onto this core. The native harness owns
@@ -565,11 +678,13 @@ credential-free tests (fake harness processes; no live model calls) prove:
    full ownership protection.
 5. Plugin skills and plugin MCP declarations import with deterministic
    collision handling and isolated component failure.
-6. Connections generate exact native configuration for installed and remote
-   targets without contacting anything; a name collision with `managed`,
-   another connection, or a plugin server fails before mutation; and a
-   conspicuous fake ambient value never appears in generated files, state,
-   staging, or evidence.
+6. Authored MCP servers generate exact native configuration for the remote,
+   stdio, and installed arms without contacting anything; a name claiming
+   `managed` fails before mutation, a collision with a plugin server resolves
+   author-wins with a warning, a mask suppresses exactly the plugin server it
+   names and a dangling one fails before mutation; and a conspicuous fake
+   ambient value never appears in generated files, state, staging, or
+   evidence.
 7. Headless dispatch durably queues FIFO input, deduplicates input IDs,
    resumes sessions, and marks unproven restart work uncertain.
 8. Schedules validate and fingerprint identically for both harnesses;
@@ -596,15 +711,46 @@ credential-free tests (fake harness processes; no live model calls) prove:
 Recorded here rather than hidden, per the failure and safety principle
 above:
 
-- **`connection add` authors remote targets only.** The installed
-  package-and-capability target is fully specified, validated, resolved, and
-  emitted for both harnesses; only the authoring convenience is missing, so
-  `tenon connection add --package ... --capability ...` is refused with a
+- **Remote server behavior is not pinned by the fingerprint.** The project
+  fingerprint covers *declared source* — a URL, its headers, the guidance
+  body, and the staged bytes of anything local — and has never covered what a
+  hosted endpoint does. A remote server's tool catalog, schemas, and results
+  can change under an unchanged fingerprint, and tenon will not notice.
+  Reproducibility is therefore asymmetric on purpose (ADR 0026): local bytes
+  are pinned by the repository, remote behavior is not pinned at all. Probing
+  remote catalogs for drift is a possible future `tenon mcp status --probe`
+  and is deliberately out of scope.
+- **`mcp add` authors the `streamable-http` arm only.** The stdio, installed,
+  and masking arms are fully specified, validated, resolved, and emitted for
+  both harnesses; only the authoring convenience is missing, so
+  `tenon mcp add --package ... --capability ...` is refused with a
   diagnostic rather than silently writing a file it cannot prove. Authors
-  write `connections/<name>.md` by hand — the two-line frontmatter shown in
-  [the native GitHub MCP journey](github-native-mcp.md) — and `connection
+  write those `mcp/<name>.md` files by hand — the frontmatter is shown above
+  and in [the native GitHub MCP journey](github-native-mcp.md) — and `mcp
   status`, `validate`, and `apply` treat the result exactly as they treat a
   generated one.
+- **`tenon plugin fetch` and `tenon plugin update` shell out to the system
+  `git` executable.** Resolving a `plugins/<name>.md` reference's pinned
+  revision is the one online operation in tenon's plugin story (ADR 0026),
+  and it is an operator-owned tool dependency rather than a vendored git
+  implementation: a machine without `git` on `PATH` cannot fetch a plugin
+  reference, though it can still `apply` a project whose references are
+  already cached from an earlier fetch. `tenon plugin status` and `tenon
+  apply` never invoke `git`.
+- **Staging does not yet materialize a fetched plugin reference's resolved
+  bytes into the tree it publishes.** `tenon stage` copies the authored
+  source directory byte-for-byte, so a `plugins/<name>.md` reference's own
+  bytes stage, but the plugin content it resolves to (in the operator's
+  plugin cache) does not travel into the staged tree the way vendored
+  `plugins/<name>/` bytes do. A staged agent that needs its plugins present
+  at container runtime should vendor them until a later slice threads the
+  plugin cache through OCI staging
+  ([issue #58](https://github.com/alee792/tenon/issues/58)). The same issue
+  carries a related wart in plain local apply: a resolved reference's stdio
+  `mcp.json` servers render `PLUGIN_ROOT` as the operator's absolute per-user
+  cache path, so pruning the cache silently breaks an already-applied
+  workspace until the next `tenon plugin fetch`. Vendored plugins are
+  re-anchored into the tree and are unaffected.
 - **Staging.** Per [ADR 0021](adr/0021-execute-authored-tools-from-a-self-contained-closure.md),
   the native harness runtime is not yet bundled into the staged tree
   (expected on the base image), and the authored-tool execution closure is
@@ -653,15 +799,16 @@ above:
   session; the recurring `schedule run` path does re-verify each
   occurrence.
 - **Not in scope (no ADR).** Evaluations, scoring, transcript retention,
-  selection among revisions, lineage tracking, a marketplace, and network
-  acquisition of components; the conversational channel product stays in
-  the prototype.
+  selection among revisions, lineage tracking, a marketplace, and any
+  acquisition beyond `tenon plugin fetch`'s explicit pointer-and-pin
+  resolution; the conversational channel product stays in the prototype.
 
 ## Explicit non-goals
 
 - A model loop, context manager, or cross-harness chat UI
-- A marketplace, automatic updater, network acquisition, or dependency lock
-  for vendored components
+- A marketplace, automatic updater, dependency resolver, or lock file; the
+  one acquisition path is an explicit `tenon plugin fetch` of a pointer the
+  author wrote and pinned, and no project load ever acquires anything
 - Claude Agent SDK or hosted OpenAI agent runtimes
 - Background or distributed schedule clocks, workflows, independently
   configured nested subagents, or deployment orchestration

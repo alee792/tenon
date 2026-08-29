@@ -6,7 +6,7 @@ growth requires stated payment.
 
 - **Agent project** — a directory whose layout is the API: optional
   `instructions.md` plus conventional component directories (`skills/`,
-  `plugins/`, `tools/`, `subagents/`, `connections/`, `schedules/`,
+  `plugins/`, `tools/`, `subagents/`, `mcp/`, `schedules/`,
   `harnesses/`). The directory name supplies the agent name. A directory is
   proven an agent project by a present `instructions.md` or by a supplied
   agent manifest whose expected source fingerprint matches it.
@@ -32,12 +32,24 @@ growth requires stated payment.
   specification: a `SKILL.md` plus arbitrary resources, copied byte-for-byte
   into the selected harness's native skill location.
 - **Plugin** — one complete publisher-authored Agent Plugin v1 package,
-  vendored intact beneath `plugins/` and validated locally; its skills and
-  MCP declarations map into native harness configuration.
-- **Connection** — one `connections/<name>.md` authoring a standalone native
-  MCP server: either an installed integration-package capability or a
-  credential-free remote HTTPS endpoint. The harness owns everything at
-  runtime.
+  validated locally; its skills and MCP declarations map into native harness
+  configuration. It is either vendored intact beneath `plugins/<name>/` or
+  declared by a **plugin reference file**, `plugins/<name>.md`, whose closed
+  frontmatter names a `source` and a full commit `rev`. Only the explicitly
+  online `tenon plugin fetch` resolves a reference into the content-addressed
+  plugin cache; every other command stays offline.
+- **Authored MCP server** — one `mcp/<name>.md` declaring a native MCP server
+  in the Agent Plugins `mcp.json` server-entry vocabulary: `streamable-http`
+  (an HTTPS `url` with optional `headers`), `stdio` (a command in the agent
+  tree), or tenon's own `installed` (an integration-package capability). The
+  filename is the server name. The harness owns everything at runtime,
+  including any authentication the endpoint requires — tenon renders the
+  declaration and stops. The CLI verb and diagnostics call it `mcp`; older
+  documents call it a *connection*.
+- **Mask** — the fourth `mcp/<name>.md` form: `override: plugins/<name>` with
+  `enabled: false`, suppressing a plugin-declared server of that name without
+  replacing it. An authored server of the same name instead wins outright,
+  with a warning naming both sources.
 - **Schedule** — one Markdown file under `schedules/` whose path is its name,
   whose frontmatter holds one five-field cron string, and whose body is the
   task prompt. Apply validates and fingerprints it; only an explicit

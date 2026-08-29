@@ -232,6 +232,26 @@ func (d *Doc) StringMap(key string) (map[string]string, error) {
 	return out, nil
 }
 
+// StringList returns the field as a list of plain string scalars; any other
+// node shape, item shape, or tag is an error.
+func (d *Doc) StringList(key string) ([]string, error) {
+	n, ok := d.fields[key]
+	if !ok {
+		return nil, fmt.Errorf("frontmatter field %q is missing", key)
+	}
+	if n.Kind != yaml.SequenceNode {
+		return nil, fmt.Errorf("frontmatter field %q must be a list of strings", key)
+	}
+	out := make([]string, 0, len(n.Content))
+	for _, item := range n.Content {
+		if item.Kind != yaml.ScalarNode || item.Tag != "!!str" {
+			return nil, fmt.Errorf("frontmatter field %q must be a list of plain strings", key)
+		}
+		out = append(out, item.Value)
+	}
+	return out, nil
+}
+
 // IsNull reports whether the field exists and its value is null.
 func (d *Doc) IsNull(key string) bool {
 	n, ok := d.fields[key]

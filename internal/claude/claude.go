@@ -5,6 +5,7 @@ package claude
 import (
 	"bytes"
 	"encoding/json"
+	"path/filepath"
 
 	"github.com/alee792/tenon/internal/agentproject"
 	"github.com/alee792/tenon/internal/apply"
@@ -163,7 +164,7 @@ func claudeSettingsFile(p *agentproject.Project, target apply.Target, diags *dia
 // tenon skips such a server for this harness alone rather than risk it.
 func acceptedServers(p *agentproject.Project, target apply.Target, diags *diagnostics.List) []agentproject.ResolvedServer {
 	var out []agentproject.ResolvedServer
-	for _, s := range agentproject.ResolveServers(p.PluginServers, target.Workspace, p.Name) {
+	for _, s := range agentproject.ResolveServers(p.PluginServers, p.Root, target.Workspace, p.Name) {
 		if s.Placeholder != "" {
 			diags.Warnf("plugin.mcp.claude-expansion", s.SourcePath,
 				"MCP server %q is skipped for the selected harness (claude): its %s %q still contains placeholder-like ${...} text after portable expansion, and claude expands project MCP values itself",
@@ -193,7 +194,7 @@ func acceptedConnections(p *agentproject.Project, diags *diagnostics.List) []age
 	var out []agentproject.Connection
 	for _, c := range p.Connections {
 		if claudeReservedConnectionNames[c.Name] {
-			diags.Errorf("connection.name.reserved", c.SourcePath,
+			diags.Errorf("mcp.name.reserved", c.SourcePath,
 				"the connection name %q is reserved by the selected harness (claude)'s native project surface", c.Name)
 			continue
 		}
@@ -206,14 +207,15 @@ func acceptedConnections(p *agentproject.Project, diags *diagnostics.List) []age
 // the tenon-owned managed stdio server, launched from the resolved tenon
 // executable against the absolute agent source and workspace, every accepted
 // plugin server, every accepted remote connection as a native http entry
-// with no headers field, and every accepted installed connection that
-// resolved cleanly as a native stdio entry from its launch descriptor. An
-// installed connection absent from resolved already carries a
-// connection.package.* error on diags and contributes no entry. It is
-// model-facing configuration, so it carries no fingerprint, version, or
-// other setup metadata beyond the paths the servers themselves need. Keys
-// are ordered by encoding/json's sorted map marshalling, so identical input
-// always renders identical bytes.
+// carrying its declared headers verbatim (Claude expands ${VAR} references
+// itself), every accepted stdio connection as a native stdio entry (ADR 0026,
+// issue #50), and every accepted installed connection that resolved cleanly
+// as a native stdio entry from its launch descriptor. An installed connection
+// absent from resolved already carries a mcp.package.* error on diags and
+// contributes no entry. It is model-facing configuration, so it carries no
+// fingerprint, version, or other setup metadata beyond the paths the servers
+// themselves need. Keys are ordered by encoding/json's sorted map
+// marshalling, so identical input always renders identical bytes.
 func mcpConfig(executable, source, workspace string, servers []agentproject.ResolvedServer, connections []agentproject.Connection, resolved map[string]*integration.LaunchDescriptor) []byte {
 	entries := map[string]any{"managed": map[string]any{
 		"type":    "stdio",
@@ -228,16 +230,59 @@ func mcpConfig(executable, source, workspace string, servers []agentproject.Reso
 		case agentproject.ConnectionKindInstalled:
 			desc, ok := resolved[c.Name]
 			if !ok {
-				continue // already reported as connection.package.unresolved/mismatch
+				continue // already reported as mcp.package.unresolved/mismatch
 			}
 			entries[c.Name] = installedServerEntry(desc)
+		case agentproject.ConnectionKindStdio:
+			entries[c.Name] = stdioConnectionEntry(c, source)
 		default:
-			entries[c.Name] = map[string]any{"type": "http", "url": c.URL}
+			entry := map[string]any{"type": "http", "url": c.URL}
+			if len(c.Headers) > 0 {
+				entry["headers"] = c.Headers
+			}
+			entries[c.Name] = entry
 		}
 	}
 	// A fixed map of strings, string slices, and string maps always encodes.
 	content, _ := json.MarshalIndent(map[string]any{"mcpServers": entries}, "", "  ")
 	return append(content, '\n')
+}
+
+// stdioConnectionEntry renders one accepted authored stdio connection (ADR
+// 0026): the exact resolved command path under the agent root, absolutized
+// against source — the apply-time agent root during an ordinary apply, or a
+// staged copy of it during staging (Blocker 2, post-review) — since
+// Connection.Command and Connection.Cwd are stored agent-root-relative
+// specifically so this render-time join is the only place they ever become
+// absolute. Its args are copied verbatim after it (no expansion of any kind
+// ever applies to authored stdio args) and its env map with ${VAR}
+// references left verbatim for Claude's own expansion, exactly like a remote
+// connection's headers. Claude's project stdio format carries no
+// working-directory field, so — as serverEntry already does for a plugin
+// server's declared cwd — the working directory is preserved exactly by
+// wrapping the command in the system exec adapter, which changes directory
+// before replacing itself with the declared command. An undeclared cwd
+// defaults to source itself: the agent root is where the command itself is
+// proven to live, so it is the one directory guaranteed to exist for every
+// accepted stdio connection, the same default choice ADR 0010 documents for
+// a plugin server's undeclared working directory (there, the plugin root).
+// encoding/json sorts a map's keys when marshalling, so an env map always
+// renders deterministically.
+func stdioConnectionEntry(c agentproject.Connection, source string) map[string]any {
+	cwd := source
+	if c.Cwd != "" {
+		cwd = filepath.Join(source, filepath.FromSlash(c.Cwd))
+	}
+	command := filepath.Join(source, filepath.FromSlash(c.Command))
+	args := append([]string{"-C", cwd, "--", command}, c.Args...)
+	env := c.Env
+	if env == nil {
+		env = map[string]string{}
+	}
+	// "env" is always emitted, matching serverEntry and installedServerEntry
+	// exactly (a NIT, post-review): the three stdio entry renderers must not
+	// silently drift on whether an empty env map is present or omitted.
+	return map[string]any{"type": "stdio", "command": "/usr/bin/env", "args": args, "env": env}
 }
 
 // installedServerEntry renders one resolved installed connection in Claude's
