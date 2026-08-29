@@ -71,8 +71,8 @@ Frontmatter field names and values are the
 [Agent Plugins 1.0](https://agent-plugins.org/specification) `mcp.json`
 server-entry vocabulary, used verbatim: `type: streamable-http` with `url`
 and optional `headers`; `type: stdio` with `command` and optional `args`,
-`env`, and `cwd`. The *server-declaring* forms add no field to that
-vocabulary and rename none. The masking form below is tenon's own — a
+`env`, and `cwd`. The spec-vocabulary server-declaring forms add no field
+to that vocabulary and rename none. The masking form below is tenon's own — a
 distinct, closed third union arm whose fields are exactly `override` and
 `enabled` — because the specification deliberately defines no composition
 and so has no vocabulary to borrow; its exact format and acceptance are
@@ -97,6 +97,18 @@ MCP component is an optional part of a package the author did not write, so
 dropping one server keeps the rest of the package useful; an authored
 `mcp/<name>.md` is a first-class request, and silently skipping it would
 leave an agent short of a capability its own source says it has.
+
+One server-declaring arm is tenon's own and is recorded as such:
+`type: installed`, with exactly `package` and `capability`, retains
+ADR 0016's installed-target form under the new discriminator. It is not
+Agent Plugins vocabulary — the specification has no notion of an
+operator-installed, hash-verified executable — and it exists because this
+record defers rather than withdraws ADR 0015's curated journey and
+ADR 0014's store. Its fields, resolution, and diagnostics are ADR 0016's,
+unchanged; `headers` is rejected on it as an unknown field. If the deferred
+acquired-stdio journey is later re-entered through a client-extension
+namespace, this arm is the first candidate for retirement, by a record
+amending this one.
 
 **Authentication is discovered, never declared.** There is no `auth`
 field, no OAuth configuration, no token, and no credential reference in
