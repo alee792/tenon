@@ -258,26 +258,50 @@ func Stage(ctx context.Context, opts Options) (*Result, *diagnostics.List, error
 	// closed with the same diagnostic Load itself would raise, rather than
 	// copying stale, missing, or corrupted bytes. The copy reuses copyTree:
 	// regular files only, executable bits preserved, any symlink rejected
-	// (defensive; the cache's own Fetch already refuses to store one).
+	// (defensive; the cache's own Fetch already refuses to store one). Each
+	// materialized directory's final path is collected for the build-machine
+	// path scan below, which must treat these arbitrary third-party bytes as
+	// carried-in payload rather than tenon-rendered text.
+	//
+	// The re-verification and the copy do not run under one lock over the
+	// cache — tenon holds no such lock — so a cache entry mutated in the
+	// narrow window between them is not prevented. It cannot corrupt
+	// silently: every materialized byte is a fingerprint input of the staged
+	// tree (see agentproject's materialized-reference loading), so a tree
+	// carrying bytes other than the ones Load fingerprinted no longer
+	// reproduces the manifest's fingerprint, and `tenon stage verify` — which
+	// the generated entrypoint runs before handing off to the harness —
+	// fails the tree closed at open rather than serving unverified content.
+	//
+	// A reference that already arrived materialized (its content sits beside
+	// it in the authored tree, so Load resolved it from there rather than
+	// from the cache) needs nothing here: copySource already carried those
+	// bytes, and they stay ordinary authored source for the scan.
+	var materializedPlugins []string
 	for _, ref := range p.PluginReferences {
+		if ref.Materialized {
+			continue
+		}
 		root, err := agentproject.ResolvePluginReferenceRoot(ref)
 		if err != nil {
 			diags.Errorf("plugin.reference.unresolved", ref.SourcePath, "%s", diagnostics.Bound(err.Error(), 512))
 			continue
 		}
-		dest := physical(tmp, finalAgentSource+"/plugins/"+ref.Name)
-		if err := copyTree(root, dest); err != nil {
+		final := finalAgentSource + "/plugins/" + ref.Name
+		if err := copyTree(root, physical(tmp, final)); err != nil {
 			return nil, diags, fmt.Errorf("staging the resolved plugin reference %q: %w", ref.Name, err)
 		}
+		materializedPlugins = append(materializedPlugins, strings.TrimPrefix(final, "/"))
 	}
 	if diags.HasErrors() {
 		return nil, diags, nil
 	}
-	// Deliberately not joining the build-machine-path scan below: a plugin
-	// reference's cache tree path is keyed by its pinned rev, and that same
-	// rev legitimately appears as plain text in the authored
-	// plugins/<name>.md reference file (the "rev:" field) — a real value,
-	// not a leak. Every reference server was re-anchored as Vendored above,
+	// The plugin cache base is deliberately not added as a needle to the
+	// build-machine-path scan below: a plugin reference's cache tree path is
+	// keyed by its pinned rev, and that same rev legitimately appears as
+	// plain text in the authored plugins/<name>.md reference file (the
+	// "rev:" field) — a real value, not a leak. Every reference server was
+	// re-anchored as Vendored above,
 	// so PLUGIN_ROOT and any plugin-relative command already render under
 	// the staged path rather than the cache's; the negative property that no
 	// staged file embeds the cache *base* directory is proven directly by
@@ -362,7 +386,7 @@ func Stage(ctx context.Context, opts Options) (*Result, *diagnostics.List, error
 	// data is checked only for the fuller joined-path forms instead, since
 	// bare-component matching against it produces false positives no
 	// author-chosen path can dodge (see buildMachineJoinedNeedles).
-	if err := rejectBuildMachinePaths(tmp, closureRootFinal,
+	if err := rejectBuildMachinePaths(tmp, closureRootFinal, materializedPlugins,
 		buildMachineNeedles(p.Root, tmp, prepRoots),
 		buildMachineJoinedNeedles(p.Root, tmp, prepRoots),
 		diags); err != nil {
@@ -682,10 +706,22 @@ func looksBinary(content []byte) bool {
 // so a carried-in tree is joined-matched wholesale regardless of whether
 // any one file inside it is text or binary. closureRootFinal is the
 // closure's own final canonical root (finalRuntimes+"/tools"), or "" for a
-// tool-free agent.
-func carriedPayload(rel, closureRootFinal string) bool {
+// tool-free agent. materializedPlugins are the staged tree roots (relative,
+// slash-separated) this stage materialized a plugin reference's pinned
+// content into: third-party bytes copied in from the plugin cache, in the
+// same class as the interpreter tree — a plugin's own README naming a
+// directory the build machine happens to share is a coincidence, not a leak
+// (issue #58 review). Only the directories this stage copied are exempt; a
+// vendored plugin directory the author committed is authored source and
+// stays component-matched.
+func carriedPayload(rel, closureRootFinal string, materializedPlugins []string) bool {
 	if rel == strings.TrimPrefix(finalTenonBin, "/") {
 		return true
+	}
+	for _, root := range materializedPlugins {
+		if rel == root || strings.HasPrefix(rel, root+"/") {
+			return true
+		}
 	}
 	if closureRootFinal == "" {
 		return false
@@ -749,7 +785,7 @@ func carriedPayload(rel, closureRootFinal string) bool {
 // binary content after all. Every match is reported as a diagnostic naming
 // the offending staged path and the exact leaked text, so a caller sees
 // every leak in one run rather than stopping at the first.
-func rejectBuildMachinePaths(root, closureRootFinal string, componentNeedles, joinedNeedles [][]byte, diags *diagnostics.List) error {
+func rejectBuildMachinePaths(root, closureRootFinal string, materializedPlugins []string, componentNeedles, joinedNeedles [][]byte, diags *diagnostics.List) error {
 	if len(componentNeedles) == 0 && len(joinedNeedles) == 0 {
 		return nil
 	}
@@ -778,7 +814,7 @@ func rejectBuildMachinePaths(root, closureRootFinal string, componentNeedles, jo
 		}
 
 		needles := joinedNeedles
-		if !carriedPayload(relSlash, closureRootFinal) {
+		if !carriedPayload(relSlash, closureRootFinal, materializedPlugins) {
 			needles = componentNeedles
 			if looksBinary(content) {
 				needles = joinedNeedles

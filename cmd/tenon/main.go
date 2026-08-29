@@ -1450,16 +1450,17 @@ func sortedNames(seen map[string]bool) []string {
 	return out
 }
 
-// pluginCacheNote renders the `mcp status` / `plugin status` cache-dependency
-// wart legibly (issue #58, product-spec known limitation): a vendored
-// plugin's server is fully self-contained inside the agent tree, but a
-// server declared by a resolved plugins/<name>.md reference renders
+// pluginCacheNote renders the `mcp status` cache-dependency wart legibly
+// (issue #58, product-spec known limitation): a server whose plugin root is
+// inside the agent tree — a vendored plugin, or a reference whose pinned
+// content is materialized beside it — is fully self-contained, but a server
+// declared by a cache-resolved plugins/<name>.md reference renders
 // PLUGIN_ROOT (and any plugin-relative command) against the operator's local
-// plugin cache in a plain apply — pruning that cache entry silently breaks
-// the already-applied workspace until `tenon plugin fetch` repairs it.
-// Staging does not carry this note: staging materializes reference content
-// into the tree and re-anchors it as vendored, so the dependency this note
-// warns about does not apply there.
+// plugin cache in a plain apply, and pruning that cache entry silently
+// breaks the already-applied workspace until `tenon plugin fetch` repairs
+// it. A staged tree therefore never carries this marker: staging
+// materializes the reference content into the tree, where it loads as a
+// materialized reference with no cache in reach at all.
 func pluginCacheNote(vendored bool) string {
 	if vendored {
 		return ""

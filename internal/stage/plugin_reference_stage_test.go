@@ -11,8 +11,11 @@ import (
 	"testing"
 
 	"github.com/alee792/tenon/internal/agentproject"
+	"github.com/alee792/tenon/internal/apply"
 	"github.com/alee792/tenon/internal/claude"
+	"github.com/alee792/tenon/internal/diagnostics"
 	"github.com/alee792/tenon/internal/pluginref"
+	"github.com/alee792/tenon/internal/version"
 )
 
 // withStagePluginCache installs cache for the duration of one test and
@@ -214,8 +217,80 @@ func TestStagePluginReferenceMaterializesResolvedContent(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+
+			// The leg that proves the staged tree is actually usable: the
+			// container's entrypoint runs `tenon stage verify` before handing
+			// off to the harness, and Verify re-loads the staged agent source
+			// and fingerprint-matches it against the manifest. It must pass
+			// with no plugin cache configured at all — the container has
+			// none — which is what materialized-reference loading is for.
+			verifyStagedTreeOffline(t, out, cache)
+
+			// Byte-identity: regenerating the integration from a re-load of
+			// the staged tree reproduces exactly the configuration staging
+			// wrote from the build-time project, so drift detection compares
+			// like with like.
+			regenerated := regeneratedWorkspaceFiles(t, out, "ref-agent", pickDriver(harness), cache)
+			if len(regenerated) == 0 {
+				t.Fatal("regenerating from the staged tree produced no files to compare")
+			}
+			for path, want := range regenerated {
+				got, err := os.ReadFile(filepath.Join(out, "workspace", filepath.FromSlash(path)))
+				if err != nil {
+					t.Fatalf("staged workspace file %s: %v", path, err)
+				}
+				if string(got) != want {
+					t.Fatalf("regenerating %s from the staged tree does not reproduce the staged bytes:\nstaged=%s\nregenerated=%s", path, got, want)
+				}
+			}
 		})
 	}
+}
+
+// verifyStagedTreeOffline runs Verify against a staged tree with no plugin
+// cache configured, standing in for the container that carries no operator
+// plugin cache at all.
+func verifyStagedTreeOffline(t *testing.T, out string, restore agentproject.PluginCache) {
+	t.Helper()
+	agentproject.ConfigurePluginCache(nil)
+	defer agentproject.ConfigurePluginCache(restore)
+	if err := Verify(filepath.Join(out, filepath.FromSlash(strings.TrimPrefix(finalArtifact, "/"))), out); err != nil {
+		t.Fatalf("the staged tree must verify offline: %v", err)
+	}
+}
+
+// regeneratedWorkspaceFiles re-loads the staged agent source with no plugin
+// cache configured — the way the container itself loads it — and returns the
+// workspace files the harness driver renders from it, keyed by their
+// workspace-relative path.
+func regeneratedWorkspaceFiles(t *testing.T, out, agentName string, driver apply.Driver, restore agentproject.PluginCache) map[string]string {
+	t.Helper()
+	agentproject.ConfigurePluginCache(nil)
+	defer agentproject.ConfigurePluginCache(restore)
+
+	source := filepath.Join(out, filepath.FromSlash(strings.TrimPrefix(finalAgentsRoot, "/")), agentName)
+	p, diags, err := agentproject.Load(source)
+	if err != nil || p == nil || diags.HasErrors() {
+		t.Fatalf("re-loading the staged agent source failed: err=%v diags=%v", err, diags.All())
+	}
+	// The staged source's final home is the canonical path, not the physical
+	// test directory it currently sits under.
+	p.Root = finalAgentsRoot + "/" + agentName
+
+	genDiags := &diagnostics.List{}
+	files := driver.Generate(p, apply.Target{
+		Workspace:    finalWorkspace,
+		Executable:   finalTenonBin,
+		TenonVersion: version.Version,
+	}, genDiags)
+	if genDiags.HasErrors() {
+		t.Fatalf("regenerating from the staged tree: %v", genDiags.All())
+	}
+	out2 := make(map[string]string, len(files))
+	for _, f := range files {
+		out2[f.Path] = string(f.Content)
+	}
+	return out2
 }
 
 // sequencedPluginCache resolves successfully exactly once (satisfying Load,

@@ -293,11 +293,22 @@ func runPluginStatus(args []string, stdout, stderr io.Writer) int {
 
 	found := false
 	failed := false
+	cacheDependent := false
+	materialized := false
 	for _, ref := range refs {
 		if filterName != "" && ref.Name != filterName {
 			continue
 		}
 		found = true
+		// A reference whose pinned content is materialized beside it (issue
+		// #58) is resolved by the tree itself: Load reads plugins/<name>/ and
+		// never consults the cache, so neither a missing cache nor a pruned
+		// entry is a failure to report here.
+		if info, err := os.Stat(filepath.Join(agent, "plugins", ref.Name)); err == nil && info.IsDir() {
+			fmt.Fprintf(stdout, "%s: source %s rev %s: materialized cache-dependent=false\n", ref.Name, ref.Source, ref.Rev)
+			materialized = true
+			continue
+		}
 		if cache == nil {
 			fmt.Fprintf(stdout, "%s: source %s rev %s: no plugin cache configured\n", ref.Name, ref.Source, ref.Rev)
 			failed = true
@@ -319,8 +330,18 @@ func runPluginStatus(args []string, stdout, stderr io.Writer) int {
 			failed = true
 			continue
 		}
-		fmt.Fprintf(stdout, "%s: source %s rev %s digest %s: resolved (a plain apply's generated MCP config points at this cache entry; pruning it breaks the workspace until the next tenon plugin fetch; tenon stage materializes this content into the staged tree instead)\n",
+		fmt.Fprintf(stdout, "%s: source %s rev %s digest %s: resolved cache-dependent=true\n",
 			ref.Name, ref.Source, ref.Rev, digest)
+		cacheDependent = true
+	}
+	// The prose behind the compact tokens, once after the loop rather than
+	// once per row (issue #58 review finding 8); the tokens themselves match
+	// `tenon mcp status`'s cache-dependent marker exactly.
+	if cacheDependent {
+		fmt.Fprintln(stdout, "note: a cache-dependent reference's generated MCP config points at this local plugin cache entry in a plain apply; pruning it breaks the workspace until the next tenon plugin fetch. tenon stage materializes the content into the staged tree instead.")
+	}
+	if materialized {
+		fmt.Fprintln(stdout, "note: a materialized reference's pinned content is carried in the agent tree at plugins/<name>/ and loads from there, with no cache and no network; its bytes are agent source fingerprint inputs, so any change to them is caught by tenon stage verify and by drift detection rather than by re-checking the pin.")
 	}
 	if filterName != "" && !found {
 		fmt.Fprintf(stderr, "tenon plugin status: no plugin reference named %q was found\n", filterName)

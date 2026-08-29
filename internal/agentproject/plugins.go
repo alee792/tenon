@@ -31,7 +31,10 @@ import (
 
 // Plugin bounds (ADR 0013): safety ceilings, not ordinary-use quotas.
 const (
-	// MaxPluginEntries bounds the immediate directories under plugins/.
+	// MaxPluginEntries bounds the plugins under plugins/: each vendored
+	// directory, and each reference file — with or without the materialized
+	// directory beside it, which is that one reference's own content rather
+	// than a second plugin (issue #58).
 	MaxPluginEntries = 128
 	// MaxPluginSkillEntries bounds the entries in one plugin's skills/
 	// location.
@@ -114,19 +117,13 @@ func loadPlugins(root string, budget *skillSetBudget, diags *diagnostics.List) (
 
 	// Each entry is either a vendored plugin directory or a plugin reference
 	// file (plugins/<name>.md, ADR 0026); every other shape is invalid. Both
-	// forms share one name space and one bound, and a reference colliding
-	// with a directory of the same name fails closed before either is
-	// loaded, since the two forms could otherwise silently coexist under
-	// different vocabularies for what an author intends as one plugin.
-	type pluginEntry struct {
-		name     string
-		fileName string
-		isRef    bool
-	}
-	var found []pluginEntry
-	seenNames := map[string]bool{}
-	count := 0
-	truncated := false
+	// forms share one name space and one bound. A reference file and a
+	// directory of the same name are not two plugins and not a collision:
+	// the directory is that reference's pinned content, materialized beside
+	// it (issue #58), and the reference loads its components from there
+	// rather than from the plugin cache.
+	dirNames := map[string]bool{}
+	refFiles := map[string]string{} // plugin name -> reference file name
 	for _, entry := range entries {
 		entryPath := "plugins/" + entry.Name()
 		if entry.Type()&os.ModeSymlink != 0 {
@@ -165,25 +162,51 @@ func loadPlugins(root string, budget *skillSetBudget, diags *diagnostics.List) (
 				"a plugin storage name must be 1-64 characters of lowercase hyphenated words (letters, digits, and single internal hyphens): %q", name)
 			continue
 		}
-		count++
-		if count > MaxPluginEntries {
-			if !truncated {
-				diags.Warnf("plugin.bounds.exceeded", "plugins",
-					"plugins may contain at most %d entries (directories and reference files combined); later entries are ignored", MaxPluginEntries)
-				truncated = true
-			}
-			continue
+		if isRef {
+			refFiles[name] = entry.Name()
+		} else {
+			dirNames[name] = true
 		}
-		if seenNames[name] {
-			diags.Errorf("plugin.entry.collision", entryPath,
-				"the plugin name %q collides with another plugins/ entry of the same name; a plugin reference file and a vendored plugin directory may not share a name",
-				name)
-			continue
-		}
-		seenNames[name] = true
-		found = append(found, pluginEntry{name: name, fileName: entry.Name(), isRef: isRef})
 	}
-	sort.Slice(found, func(i, j int) bool { return found[i].name < found[j].name })
+
+	// One plugin per name: a reference file and its materialized directory
+	// are one plugin, so the bound counts names rather than raw entries.
+	names := make([]string, 0, len(refFiles)+len(dirNames))
+	for name := range refFiles {
+		names = append(names, name)
+	}
+	for name := range dirNames {
+		if _, isRef := refFiles[name]; !isRef {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	if len(names) > MaxPluginEntries {
+		diags.Warnf("plugin.bounds.exceeded", "plugins",
+			"plugins may contain at most %d plugins (vendored directories and reference files combined; a reference and its materialized directory count once); later entries are ignored", MaxPluginEntries)
+		names = names[:MaxPluginEntries]
+	}
+
+	type pluginEntry struct {
+		fileName string
+		isRef    bool
+		// materializedDir is the real directory holding a reference's pinned
+		// content when it was materialized beside the reference file, and is
+		// empty for a reference that must resolve against the plugin cache.
+		materializedDir string
+	}
+	found := make([]pluginEntry, 0, len(names))
+	for _, name := range names {
+		if fileName, isRef := refFiles[name]; isRef {
+			e := pluginEntry{fileName: fileName, isRef: true}
+			if dirNames[name] {
+				e.materializedDir = filepath.Join(dir, name)
+			}
+			found = append(found, e)
+			continue
+		}
+		found = append(found, pluginEntry{fileName: name})
+	}
 
 	var candidates []pluginSkill
 	var servers []PluginServer
@@ -195,7 +218,7 @@ func loadPlugins(root string, budget *skillSetBudget, diags *diagnostics.List) (
 		var pluginInputs []sourceInput
 		if f.isRef {
 			var ref *PluginReference
-			pluginCandidates, pluginServers, pluginInputs, _, ref = loadPluginReference(dir, f.fileName, budget, diags)
+			pluginCandidates, pluginServers, pluginInputs, _, ref = loadPluginReference(dir, f.fileName, f.materializedDir, budget, diags)
 			if ref != nil {
 				references = append(references, *ref)
 			}
@@ -218,13 +241,15 @@ func loadPlugins(root string, budget *skillSetBudget, diags *diagnostics.List) (
 // file's resolved cache tree — and authoredRoot is the stable path every
 // diagnostic and fingerprint entry reports, which for a resolved reference is
 // the synthetic "plugins/<name>.md -> <rev>" form rather than a real
-// filesystem path. vendored is true only for a real plugins/<dirName>/
-// directory under the agent root, never for a resolved reference's cache
-// tree; it is threaded down to every declared MCP server (PluginServer.
-// Vendored) so ResolveServers knows which servers must be re-anchored
-// against the agent root staging hands it at generation time, rather than
-// trusting the absolute path captured here at Load time (Blocker 2,
-// post-review).
+// filesystem path. vendored is true whenever pluginRoot is a plugins/<name>/
+// directory inside the agent root — an authored vendored plugin, or a
+// reference's materialized content (issue #58) — and false only for a
+// reference resolved against the plugin cache, whose tree lives outside the
+// agent root entirely. It is threaded down to every declared MCP server
+// (PluginServer.Vendored) so ResolveServers knows which servers must be
+// re-anchored against the agent root staging hands it at generation time,
+// rather than trusting the absolute path captured here at Load time
+// (Blocker 2, post-review).
 func loadPlugin(pluginRoot, authoredRoot, pluginName string, vendored bool, budget *skillSetBudget, diags *diagnostics.List) ([]pluginSkill, []PluginServer, []sourceInput) {
 	valid, manifestInput := loadPluginManifest(pluginRoot, authoredRoot, diags)
 	var inputs []sourceInput
@@ -507,17 +532,19 @@ func jsonTypeName(v any) string {
 }
 
 // loadPluginReference validates one plugins/<name>.md reference file and, on
-// success, resolves it against the injected plugin cache (ConfigurePluginCache)
-// and loads the cached tree through the exact same loadPlugin path a vendored
-// plugins/<name>/ directory uses (ADR 0026): the same manifest, skills, and
-// mcp.json validation, the same collision checks, and the same fingerprint
-// treatment for its component bytes. The reference file's own bytes always
-// join the fingerprint once read, independent of whether resolution
-// succeeds; a failed resolution contributes no candidates but is always a
-// project error, naming `tenon plugin fetch`, because an authored reference
-// is a first-class request exactly like mcp/<name>.md (ADR 0026), never a
+// success, resolves its pinned content and loads it through the exact same
+// loadPlugin path a vendored plugins/<name>/ directory uses (ADR 0026): the
+// same manifest, skills, and mcp.json validation, the same collision checks,
+// and the same fingerprint treatment for its component bytes. The content
+// comes from materializedDir when a directory of the same name sits beside
+// the reference file (issue #58), and otherwise from the injected plugin
+// cache (ConfigurePluginCache). The reference file's own bytes always join
+// the fingerprint once read, independent of whether resolution succeeds; a
+// failed cache resolution contributes no candidates but is always a project
+// error, naming `tenon plugin fetch`, because an authored reference is a
+// first-class request exactly like mcp/<name>.md (ADR 0026), never a
 // silently-skipped optional plugin component.
-func loadPluginReference(dir, filename string, budget *skillSetBudget, diags *diagnostics.List) ([]pluginSkill, []PluginServer, []sourceInput, string, *PluginReference) {
+func loadPluginReference(dir, filename, materializedDir string, budget *skillSetBudget, diags *diagnostics.List) ([]pluginSkill, []PluginServer, []sourceInput, string, *PluginReference) {
 	sourcePath := "plugins/" + filename
 	name := strings.TrimSuffix(filename, ".md")
 
@@ -554,6 +581,38 @@ func loadPluginReference(dir, filename string, budget *skillSetBudget, diags *di
 		return nil, nil, inputs, name, nil
 	}
 
+	// The authored root every diagnostic and fingerprint entry reports is
+	// synthetic and identical for both resolution paths below, so the bytes
+	// a reference contributes to the fingerprint do not depend on where the
+	// pinned content happens to sit.
+	authoredRoot := fmt.Sprintf("plugins/%s.md -> %s", name, rev)
+
+	if materializedDir != "" {
+		// The pinned content is materialized beside the reference: the
+		// adjacent plugins/<name>/ directory is this reference's resolved
+		// tree, copied into the agent tree by `tenon stage` (issue #58). It
+		// wins over the cache — deterministic and offline-first, since a
+		// staged tree is loaded inside a container that has no operator
+		// cache at all — and loads through the same loadPlugin path under
+		// the same synthetic authored root, so the fingerprint is
+		// byte-identical to the one the cache-resolved reference produced
+		// at build time. vendored is true because the plugin root now IS
+		// plugins/<name> inside the agent tree: ResolveServers must
+		// re-anchor PLUGIN_ROOT and any plugin-relative command against the
+		// root it renders for, exactly as for an authored vendored plugin.
+		//
+		// There is no git here, so the pin cannot be re-verified against
+		// the materialized bytes: the fingerprint is the integrity story.
+		// Every materialized byte is a fingerprint input, so any change to
+		// them is caught by `tenon stage verify` and by drift detection; a
+		// plain Load trusts these bytes exactly as it trusts all other
+		// authored source.
+		candidates, servers, pluginInputs := loadPlugin(materializedDir, authoredRoot, name, true, budget, diags)
+		inputs = append(inputs, pluginInputs...)
+		ref := &PluginReference{Name: name, Source: source, Rev: rev, SourcePath: sourcePath, Materialized: true}
+		return candidates, servers, inputs, name, ref
+	}
+
 	if pluginCache == nil {
 		diags.Errorf("plugin.reference.unresolved", sourcePath,
 			"plugin reference %q pins rev %s, which is not cached; run `tenon plugin fetch` before apply or validate",
@@ -568,7 +627,6 @@ func loadPluginReference(dir, filename string, budget *skillSetBudget, diags *di
 		return nil, nil, inputs, name, nil
 	}
 
-	authoredRoot := fmt.Sprintf("plugins/%s.md -> %s", name, rev)
 	candidates, servers, pluginInputs := loadPlugin(cachedRoot, authoredRoot, name, false, budget, diags)
 	inputs = append(inputs, pluginInputs...)
 	ref := &PluginReference{Name: name, Source: source, Rev: rev, SourcePath: sourcePath, CachedRoot: cachedRoot}
@@ -591,11 +649,19 @@ type PluginReference struct {
 	Rev    string
 	// SourcePath is "plugins/<name>.md", for diagnostics.
 	SourcePath string
+	// Materialized reports that this reference's pinned content was loaded
+	// from the plugins/<Name>/ directory beside the reference file rather
+	// than from the plugin cache (issue #58) — the shape a staged tree
+	// carries. A materialized reference needs no cache at all, and staging
+	// has nothing to copy for it: the ordinary agent-source copy already
+	// carries its bytes.
+	Materialized bool
 	// CachedRoot is the absolute cache tree path PluginCache.Resolve returned
-	// at Load time. It is not staged directly: a caller that must stage this
-	// content re-resolves through ResolvePluginReferenceRoot immediately
-	// before copying, so a cache mutated or pruned between Load and staging
-	// fails closed instead of copying stale or missing bytes.
+	// at Load time, and is empty for a materialized reference. It is not
+	// staged directly: a caller that must stage this content re-resolves
+	// through ResolvePluginReferenceRoot immediately before copying, so a
+	// cache mutated or pruned between Load and staging fails closed instead
+	// of copying stale or missing bytes.
 	CachedRoot string
 }
 

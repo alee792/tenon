@@ -190,20 +190,152 @@ func TestPluginReferenceSourceMismatchFailsClosed(t *testing.T) {
 	}
 }
 
-func TestPluginReferenceCollidesWithVendoredDirectory(t *testing.T) {
+// copyPluginTree copies a resolved plugin tree into plugins/<name>/ under an
+// agent root, exactly as `tenon stage` materializes one (issue #58).
+func copyPluginTree(t *testing.T, src, root, name string) {
+	t.Helper()
+	dest := filepath.Join(root, "plugins", name)
+	err := filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dest, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, raw, info.Mode().Perm())
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestMaterializedPluginReferenceLoadsFromAdjacentDirectory proves the
+// materialized-reference shape a staged tree carries (issue #58): a
+// plugins/<name>.md reference with its pinned content beside it at
+// plugins/<name>/ is one plugin, not a collision, and loads entirely
+// offline — no plugin cache is configured at all, which is exactly the
+// container's situation when `tenon stage verify` re-loads the staged tree.
+func TestMaterializedPluginReferenceLoadsFromAdjacentDirectory(t *testing.T) {
 	root := writeAgent(t, "agent", validInstructions)
-	writePluginManifest(t, root, "obs", validPluginJSON("obs"))
 	writePluginReference(t, root, "obs", "https://github.com/acme/observability-plugin", validRev, "")
-	withPluginCache(t, &fakePluginCache{roots: map[string]string{validRev: newCachedPluginTree(t, "obs", "x")}})
+	copyPluginTree(t, newCachedPluginTree(t, "observability", "telemetry"), root, "obs")
 
 	p, diags, err := Load(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p != nil {
-		t.Fatalf("expected a name collision between a reference and a vendored directory to fail the project")
+	if p == nil || diags.HasErrors() {
+		t.Fatalf("unexpected diagnostics: %v", diags.All())
 	}
-	requireErrorID(t, diags, "plugin.entry.collision")
+	if len(p.Skills) != 1 || p.Skills[0].Name != "telemetry" {
+		t.Fatalf("expected one skill named telemetry, got %+v", p.Skills)
+	}
+	// The authored root stays the reference's synthetic form, never the
+	// vendored plugins/obs/ path: that is what keeps the fingerprint
+	// identical to the cache-resolved load the same reference produced
+	// before staging materialized it.
+	wantSource := "plugins/obs.md -> " + validRev + "/skills/telemetry"
+	if p.Skills[0].SourcePath != wantSource {
+		t.Fatalf("skill source path = %q, want %q", p.Skills[0].SourcePath, wantSource)
+	}
+}
+
+// TestMaterializedPluginReferenceFingerprintMatchesCacheResolved proves the
+// property the staged tree's verification depends on (issue #58 blocker):
+// the same reference over the same content fingerprints identically whether
+// its content was resolved from the plugin cache (build time) or from the
+// materialized directory beside it (a re-load of the staged tree).
+func TestMaterializedPluginReferenceFingerprintMatchesCacheResolved(t *testing.T) {
+	content := newCachedPluginTree(t, "observability", "telemetry")
+
+	cached := writeAgent(t, "agent", validInstructions)
+	writePluginReference(t, cached, "obs", "https://github.com/acme/observability-plugin", validRev, "Notes.")
+	withPluginCache(t, &fakePluginCache{roots: map[string]string{validRev: content}})
+	fromCache, diags, err := Load(cached)
+	if err != nil || fromCache == nil || diags.HasErrors() {
+		t.Fatalf("cache-resolved load failed: err=%v diags=%v", err, diags.All())
+	}
+
+	materialized := writeAgent(t, "agent", validInstructions)
+	writePluginReference(t, materialized, "obs", "https://github.com/acme/observability-plugin", validRev, "Notes.")
+	copyPluginTree(t, content, materialized, "obs")
+	ConfigurePluginCache(nil)
+	fromTree, diags, err := Load(materialized)
+	if err != nil || fromTree == nil || diags.HasErrors() {
+		t.Fatalf("materialized load failed: err=%v diags=%v", err, diags.All())
+	}
+
+	if fromCache.Fingerprint != fromTree.Fingerprint {
+		t.Fatalf("fingerprint from cache %s must equal fingerprint from the materialized tree %s",
+			fromCache.Fingerprint, fromTree.Fingerprint)
+	}
+}
+
+// TestMaterializedPluginReferenceWinsOverCache proves the precedence rule:
+// with content materialized beside the reference, the cache is not consulted
+// at all — deterministic and offline-first, so a staged tree never depends on
+// whatever the operator's cache happens to hold for the same pin.
+func TestMaterializedPluginReferenceWinsOverCache(t *testing.T) {
+	root := writeAgent(t, "agent", validInstructions)
+	writePluginReference(t, root, "obs", "https://github.com/acme/observability-plugin", validRev, "")
+	copyPluginTree(t, newCachedPluginTree(t, "observability", "telemetry"), root, "obs")
+	withPluginCache(t, &fakePluginCache{roots: map[string]string{validRev: newCachedPluginTree(t, "observability", "other")}})
+
+	p, diags, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p == nil || diags.HasErrors() {
+		t.Fatalf("unexpected diagnostics: %v", diags.All())
+	}
+	if len(p.Skills) != 1 || p.Skills[0].Name != "telemetry" {
+		t.Fatalf("the materialized content must win over the cache, got %+v", p.Skills)
+	}
+}
+
+// TestMaterializedPluginReferenceServersAreVendored proves a materialized
+// reference's declared servers re-anchor like a vendored plugin's: the plugin
+// root IS plugins/<name>/ inside the agent tree, so ResolveServers must
+// recompute PLUGIN_ROOT against the root it renders for rather than trust a
+// Load-time absolute path.
+func TestMaterializedPluginReferenceServersAreVendored(t *testing.T) {
+	root := writeAgent(t, "agent", validInstructions)
+	writePluginReference(t, root, "obs", "https://github.com/acme/observability-plugin", validRev, "")
+	content := newCachedPluginTree(t, "observability", "telemetry")
+	if err := os.WriteFile(filepath.Join(content, "mcp.json"),
+		[]byte(`{"$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json", "mcpServers": {`+
+			`"telemetry": {"command": "server"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	copyPluginTree(t, content, root, "obs")
+
+	p, diags, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p == nil || diags.HasErrors() {
+		t.Fatalf("unexpected diagnostics: %v", diags.All())
+	}
+	if len(p.PluginServers) != 1 || !p.PluginServers[0].Vendored {
+		t.Fatalf("expected one vendored plugin server, got %+v", p.PluginServers)
+	}
+	resolved := ResolveServers(p.PluginServers, "/opt/tenon/agents/agent", "/workspace", p.Name)
+	if got := resolved[0].Env["PLUGIN_ROOT"]; got != "/opt/tenon/agents/agent/plugins/obs" {
+		t.Fatalf("PLUGIN_ROOT = %q, want the in-tree materialized root", got)
+	}
 }
 
 // TestPluginReferenceNameEscapeRejected proves a reference filename that
