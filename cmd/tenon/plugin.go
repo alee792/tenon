@@ -90,7 +90,8 @@ func runPluginFetch(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "tenon plugin fetch:", err)
 		return 1
 	}
-	if _, ok := proveAgentRoot(agent, "plugin fetch", expectedFingerprint(supplied), stderr); !ok {
+	root, ok := proveAgentRoot(agent, "plugin fetch", expectedFingerprint(supplied), stderr)
+	if !ok {
 		return 1
 	}
 
@@ -127,6 +128,9 @@ func runPluginFetch(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "%s: rev %s digest %s (%s)\n", ref.Name, ref.Rev, result.Digest, state)
 	}
 	if filterName != "" && !found {
+		if reported := reportPluginReferenceDiagnostics(root, filterName, diags, stderr); reported {
+			return 1
+		}
 		fmt.Fprintf(stderr, "tenon plugin fetch: no plugin reference named %q was found\n", filterName)
 		return 1
 	}
@@ -186,8 +190,8 @@ func runPluginUpdate(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	if target == nil {
-		if diags.HasErrors() {
-			_ = diags.WriteProse(stderr)
+		if reported := reportPluginReferenceDiagnostics(root, name, diags, stderr); reported {
+			return 1
 		}
 		fmt.Fprintf(stderr, "tenon plugin update: no plugin reference named %q was found; there is no update for a vendored plugins/%s/ directory\n", name, name)
 		return 1
@@ -209,23 +213,32 @@ func runPluginUpdate(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "fetched: %s rev %s digest %s\n", name, *rev, result.Digest)
 
 	if oldRev != *rev {
-		added, removed, changed, err := cache.Diff(oldRev, *rev)
-		if err != nil {
-			fmt.Fprintln(stderr, "tenon plugin update: the diff against the currently pinned rev could not be computed:", diagnostics.Bound(err.Error(), 512))
-			return 1
-		}
-		fmt.Fprintf(stdout, "diff %s -> %s (component paths only):\n", oldRev, *rev)
-		for _, p := range added {
-			fmt.Fprintf(stdout, "  + %s\n", p)
-		}
-		for _, p := range removed {
-			fmt.Fprintf(stdout, "  - %s\n", p)
-		}
-		for _, p := range changed {
-			fmt.Fprintf(stdout, "  ~ %s\n", p)
-		}
-		if len(added)+len(removed)+len(changed) == 0 {
-			fmt.Fprintln(stdout, "  (no component paths differ)")
+		if _, _, verifyErr := cache.Verify(oldRev); verifyErr != nil {
+			// The pinned old rev was never fetched (or no longer verifies) —
+			// most commonly because it was pinned by someone else's fetch,
+			// or the cache was pruned. The new rev above already fetched and
+			// verified cleanly, so there is no reason to dead-end here: skip
+			// the diff and proceed with the rewrite below.
+			fmt.Fprintf(stdout, "diff unavailable: currently pinned rev %s is not cached\n", oldRev)
+		} else {
+			added, removed, changed, err := cache.Diff(oldRev, *rev)
+			if err != nil {
+				fmt.Fprintln(stderr, "tenon plugin update: the diff against the currently pinned rev could not be computed:", diagnostics.Bound(err.Error(), 512))
+				return 1
+			}
+			fmt.Fprintf(stdout, "diff %s -> %s (component paths only):\n", oldRev, *rev)
+			for _, p := range added {
+				fmt.Fprintf(stdout, "  + %s\n", p)
+			}
+			for _, p := range removed {
+				fmt.Fprintf(stdout, "  - %s\n", p)
+			}
+			for _, p := range changed {
+				fmt.Fprintf(stdout, "  ~ %s\n", p)
+			}
+			if len(added)+len(removed)+len(changed) == 0 {
+				fmt.Fprintln(stdout, "  (no component paths differ)")
+			}
 		}
 	} else {
 		fmt.Fprintln(stdout, "the requested rev is already pinned; nothing to diff")
@@ -296,6 +309,17 @@ func runPluginStatus(args []string, stdout, stderr io.Writer) int {
 			failed = true
 			continue
 		}
+		// Verify checks the tree's digest, not its provenance: a cache
+		// entry's recorded source is compared here, explicitly, against the
+		// declared reference (the agentproject.PluginCache interface Load
+		// resolves through carries no source parameter to do this check at
+		// Load time itself — see the interface note in plugincache.go).
+		if state, stateErr := cache.State(ref.Rev); stateErr == nil && state != nil && state.Source != ref.Source {
+			fmt.Fprintf(stdout, "%s: source %s rev %s: unresolved: the cached tree for this rev was fetched from a different source (%s); re-run tenon plugin fetch\n",
+				ref.Name, ref.Source, ref.Rev, diagnostics.Bound(state.Source, 256))
+			failed = true
+			continue
+		}
 		fmt.Fprintf(stdout, "%s: source %s rev %s digest %s: resolved\n", ref.Name, ref.Source, ref.Rev, digest)
 	}
 	if filterName != "" && !found {
@@ -317,6 +341,37 @@ func runPluginStatus(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// reportPluginReferenceDiagnostics checks whether plugins/<name>.md exists
+// on disk before any "no plugin reference ... was found" headline is
+// printed. A malformed-but-present reference file must lead with its own
+// parse diagnostic (LoadPluginReferencesForStatus records one whenever
+// parsing fails, keyed by that exact source path) rather than be reported
+// as though no reference by that name exists at all — those are different
+// failures an operator needs to tell apart. It returns whether it printed
+// anything, so the caller skips its own not-found line in that case.
+func reportPluginReferenceDiagnostics(root, name string, diags *diagnostics.List, stderr io.Writer) bool {
+	if root == "" {
+		return false
+	}
+	full := filepath.Join(root, "plugins", name+".md")
+	info, err := os.Lstat(full)
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	sourcePath := "plugins/" + name + ".md"
+	printed := false
+	for _, d := range diags.All() {
+		if d.Path == sourcePath {
+			fmt.Fprintln(stderr, d.String())
+			printed = true
+		}
+	}
+	if !printed {
+		fmt.Fprintf(stderr, "tenon plugin: %s exists but could not be parsed as a plugin reference\n", sourcePath)
+	}
+	return true
+}
+
 // rewritePluginReferenceRev rewrites only the "rev" field of an already-
 // validated plugin reference file, atomically, preserving every other byte
 // (the source line, the body) exactly. It is called only after a successful
@@ -335,8 +390,13 @@ func rewritePluginReferenceRev(root, sourcePath, newRev string) error {
 }
 
 // revLinePattern matches the first top-level "rev:" frontmatter line, so
-// replaceFrontmatterRev can rewrite exactly its value and nothing else.
-var revLinePattern = regexp.MustCompile(`(?m)^rev:[ \t]*.*$`)
+// replaceFrontmatterRev can rewrite exactly its value and nothing else. The
+// value class is [^\r\n]*, not the "."-based ".*$" this used to read: "."
+// excludes \n but not \r, so on a CRLF-authored file ".*$" would consume the
+// line's trailing \r along with the value, and the rewrite would silently
+// drop it (turning CRLF into a bare LF on every rewritten line-ending
+// style). Excluding \r explicitly from the value class preserves it.
+var revLinePattern = regexp.MustCompile(`(?m)^rev:[ \t]*[^\r\n]*`)
 
 // replaceFrontmatterRev rewrites raw's "rev" frontmatter field to newRev,
 // preserving every other byte — the source field, key order, comments the

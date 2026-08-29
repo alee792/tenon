@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -72,6 +73,34 @@ func newLocalGitFixture(t *testing.T, files map[string]string) (repo, rev string
 		t.Fatal(err)
 	}
 	return repo, strings.TrimSpace(string(out))
+}
+
+// rewriteCachedSource patches a cache entry's already-written state.json to
+// record source, in place, leaving its digest and every other field exactly
+// as the real Fetch that produced them left them. Test-only file surgery:
+// it exists so a test can seed the cache from a local fixture path (the
+// only source no test may reach a real network to avoid) while still
+// exercising the CLI's real declared-https-source cache lookup, now that a
+// cached hit is keyed on (rev, source) together (finding 8).
+func rewriteCachedSource(t *testing.T, base, rev, source string) {
+	t.Helper()
+	statePath := filepath.Join(base, rev, "state.json")
+	raw, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state pluginref.State
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatal(err)
+	}
+	state.Source = source
+	rewritten, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statePath, append(rewritten, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func validPluginTreeFiles(name string) map[string]string {
@@ -148,6 +177,7 @@ func TestPluginFetchStatusUpdateHappyPath(t *testing.T) {
 	}
 	newRev := strings.TrimSpace(string(out))
 
+	declaredSource := "https://github.com/acme/observability-plugin"
 	cache := pluginref.NewCache(base)
 	if _, err := cache.Fetch(repo, oldRev); err != nil {
 		t.Fatalf("seeding old rev: %v", err)
@@ -155,9 +185,20 @@ func TestPluginFetchStatusUpdateHappyPath(t *testing.T) {
 	if _, err := cache.Fetch(repo, newRev); err != nil {
 		t.Fatalf("seeding new rev: %v", err)
 	}
+	// Seeding above fetches from the local fixture path directly (no test
+	// may reach a real network), so the cache records that path as each
+	// entry's source. The reference file below must declare an https URL
+	// (ADR 0026's closed authored grammar), which the CLI then passes back
+	// to Cache.Fetch as the requested source on every subsequent command.
+	// Patch the recorded source to match it, so a cached hit is recognized
+	// as one (finding 8: a cache hit is keyed on (rev, source) together,
+	// not rev alone) without requiring an actual re-fetch from a URL no
+	// test can reach.
+	rewriteCachedSource(t, base, oldRev, declaredSource)
+	rewriteCachedSource(t, base, newRev, declaredSource)
 
 	agent := writeAgent(t, "agent", validInstructions)
-	writePluginReferenceFile(t, agent, "obs", "https://github.com/acme/observability-plugin", oldRev)
+	writePluginReferenceFile(t, agent, "obs", declaredSource, oldRev)
 
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"plugin", "fetch", agent}, nil, &stdout, &stderr); code != 0 {
@@ -198,5 +239,126 @@ func TestPluginFetchStatusUpdateHappyPath(t *testing.T) {
 	// The rewritten reference now resolves, and apply succeeds offline.
 	if code := run([]string{"apply", agent, "--harness", "claude"}, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("apply failed after a successful plugin update: %d\nstderr=%s", code, stderr.String())
+	}
+}
+
+// TestReplaceFrontmatterRevPreservesCRLF proves the rev-line rewrite
+// preserves a CRLF line ending rather than collapsing it to a bare LF
+// (finding 11): "." in Go's regexp excludes \n but not \r, so a naive
+// ".*$" value class would consume the trailing \r along with the rev.
+func TestReplaceFrontmatterRevPreservesCRLF(t *testing.T) {
+	raw := []byte("---\r\nsource: https://github.com/acme/observability-plugin\r\nrev: " +
+		strings.Repeat("a", 40) + "\r\n---\r\nbody\r\n")
+	newRev := strings.Repeat("b", 40)
+	out, err := replaceFrontmatterRev(raw, newRev)
+	if err != nil {
+		t.Fatalf("replaceFrontmatterRev: %v", err)
+	}
+	want := "---\r\nsource: https://github.com/acme/observability-plugin\r\nrev: " +
+		newRev + "\r\n---\r\nbody\r\n"
+	if string(out) != want {
+		t.Fatalf("replaceFrontmatterRev(CRLF) = %q, want %q", out, want)
+	}
+}
+
+// TestPluginFetchMalformedNamedRefLeadsWithParseDiagnostic proves a
+// plugins/<name>.md that exists but fails to parse is reported by its own
+// parse diagnostic, not the generic "no plugin reference named ... was
+// found" headline a typo'd or genuinely absent name gets (finding 9: those
+// are different failures an operator needs to tell apart).
+func TestPluginFetchMalformedNamedRefLeadsWithParseDiagnostic(t *testing.T) {
+	isolatedPluginCache(t)
+	agent := writeAgent(t, "agent", validInstructions)
+	dir := filepath.Join(agent, "plugins")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Missing the required "rev" field entirely.
+	if err := os.WriteFile(filepath.Join(dir, "obs.md"), []byte("---\nsource: https://github.com/acme/observability-plugin\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"plugin", "fetch", agent, "obs"}, nil, &stdout, &stderr); code == 0 {
+		t.Fatalf("expected a nonzero exit for a malformed named reference")
+	}
+	if strings.Contains(stderr.String(), "no plugin reference named") {
+		t.Fatalf("expected the parse diagnostic to lead, not the not-found headline: %s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "plugin.reference.rev.invalid") {
+		t.Fatalf("expected the rev.invalid parse diagnostic, got: %s", stderr.String())
+	}
+
+	// A genuinely absent name still gets the not-found headline.
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"plugin", "fetch", agent, "nonexistent"}, nil, &stdout, &stderr); code == 0 {
+		t.Fatalf("expected a nonzero exit for an absent reference name")
+	}
+	if !strings.Contains(stderr.String(), `no plugin reference named "nonexistent" was found`) {
+		t.Fatalf("expected the not-found headline for a genuinely absent name, got: %s", stderr.String())
+	}
+}
+
+// TestPluginUpdateMalformedNamedRefLeadsWithParseDiagnostic is the update
+// counterpart of the fetch test above.
+func TestPluginUpdateMalformedNamedRefLeadsWithParseDiagnostic(t *testing.T) {
+	isolatedPluginCache(t)
+	agent := writeAgent(t, "agent", validInstructions)
+	dir := filepath.Join(agent, "plugins")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "obs.md"), []byte("---\nsource: not-a-url\nrev: "+strings.Repeat("a", 40)+"\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	rev := strings.Repeat("b", 40)
+	if code := run([]string{"plugin", "update", agent, "obs", "--rev", rev}, nil, &stdout, &stderr); code == 0 {
+		t.Fatalf("expected a nonzero exit for a malformed named reference")
+	}
+	if strings.Contains(stderr.String(), "no plugin reference named") {
+		t.Fatalf("expected the parse diagnostic to lead, not the not-found headline: %s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "plugin.reference.source.invalid") {
+		t.Fatalf("expected the source.invalid parse diagnostic, got: %s", stderr.String())
+	}
+}
+
+// TestPluginUpdateWithUncachedOldRevProceeds proves `plugin update` no
+// longer dead-ends when the currently pinned rev was never fetched (or is
+// no longer cached): it prints that the diff is unavailable and still
+// rewrites the reference to the new, successfully fetched rev (finding 4).
+func TestPluginUpdateWithUncachedOldRevProceeds(t *testing.T) {
+	base := isolatedPluginCache(t)
+	repo, newRev := newLocalGitFixture(t, validPluginTreeFiles("observability"))
+	declaredSource := "https://github.com/acme/observability-plugin"
+
+	cache := pluginref.NewCache(base)
+	if _, err := cache.Fetch(repo, newRev); err != nil {
+		t.Fatalf("seeding new rev: %v", err)
+	}
+	rewriteCachedSource(t, base, newRev, declaredSource)
+
+	agent := writeAgent(t, "agent", validInstructions)
+	// The pinned old rev is well-formed but was never fetched into any
+	// cache; only newRev above is cached.
+	oldRev := strings.Repeat("c", 40)
+	writePluginReferenceFile(t, agent, "obs", declaredSource, oldRev)
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"plugin", "update", agent, "obs", "--rev", newRev}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("plugin update failed: %d\nstdout=%s\nstderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "diff unavailable: currently pinned rev "+oldRev+" is not cached") {
+		t.Fatalf("expected a diff-unavailable message naming the uncached old rev, got: %s", stdout.String())
+	}
+	rewritten, err := os.ReadFile(filepath.Join(agent, "plugins", "obs.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(rewritten), "rev: "+newRev) {
+		t.Fatalf("expected the reference file to be rewritten to the new rev despite the uncached old rev, got: %s", rewritten)
 	}
 }

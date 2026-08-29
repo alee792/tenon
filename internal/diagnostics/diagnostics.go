@@ -115,10 +115,33 @@ func (l *List) WriteJSONL(w io.Writer) error {
 
 // Bound trims a rule detail to a bounded, single-line form so diagnostics
 // stay bounded prose. It never truncates identifiers or paths.
+//
+// Every control character (anything below 0x20, plus DEL 0x7f — not just
+// \n) is mapped to a single space before bounding, since a detail can carry
+// remote-controlled bytes (a subprocess's stderr, a server message) and an
+// unmapped \r could overwrite a terminal line the way \n alone would not.
+// The length cut then lands on a rune boundary, never splitting a
+// multi-byte UTF-8 rune into an invalid tail.
 func Bound(detail string, max int) string {
-	detail = strings.ReplaceAll(detail, "\n", " ")
-	if len(detail) > max {
-		return detail[:max] + "..."
+	var b strings.Builder
+	b.Grow(len(detail))
+	for _, r := range detail {
+		if r < 0x20 || r == 0x7f {
+			b.WriteByte(' ')
+		} else {
+			b.WriteRune(r)
+		}
 	}
-	return detail
+	detail = b.String()
+	if len(detail) <= max {
+		return detail
+	}
+	cut := 0
+	for i := range detail {
+		if i > max {
+			break
+		}
+		cut = i
+	}
+	return detail[:cut] + "..."
 }
