@@ -758,21 +758,264 @@ func TestLoadConnectionsContextOverBoundary(t *testing.T) {
 
 // --- Collisions --------------------------------------------------------------
 
-// TestLoadConnectionsCollideWithPluginServer proves a connection whose name
-// matches an accepted plugin MCP server fails before mutation (ADR 0016);
-// two connection files cannot literally share a filename, so this is the
-// collision path exercised at Load.
-func TestLoadConnectionsCollideWithPluginServer(t *testing.T) {
+// TestLoadConnectionsShadowsPluginServer proves an authored connection whose
+// name matches an accepted plugin MCP server now wins (ADR 0026, issue #53):
+// the project loads with a warning naming both sources, the authored server
+// renders, and the plugin's server of that name is removed from
+// Project.PluginServers.
+func TestLoadConnectionsShadowsPluginServer(t *testing.T) {
 	root := writeAgent(t, "agent", validInstructions)
 	writePluginManifest(t, root, "vendor-x", validPluginJSON("vendor-x"))
-	writePluginMCP(t, root, "vendor-x", mcpDoc(`"catalog": {"command": "server"}`))
+	writePluginMCP(t, root, "vendor-x", mcpDoc(`"catalog": {"command": "server"}, "other": {"command": "server2"}`))
 	writeConnectionFile(t, root, "catalog.md", remoteConnection("https://example.com/mcp", ""))
+
+	p, diags, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p == nil {
+		t.Fatalf("expected the project to load; diags: %v", diags.All())
+	}
+	requireWarningID(t, diags, "mcp.name.shadowed")
+
+	if len(p.Connections) != 1 || p.Connections[0].Name != "catalog" || p.Connections[0].Kind != ConnectionKindRemote {
+		t.Fatalf("expected the authored catalog connection to render: %+v", p.Connections)
+	}
+	for _, s := range p.PluginServers {
+		if s.Name == "catalog" {
+			t.Fatalf("expected the shadowed plugin server catalog to be removed from PluginServers: %+v", p.PluginServers)
+		}
+	}
+	foundOther := false
+	for _, s := range p.PluginServers {
+		if s.Name == "other" {
+			foundOther = true
+		}
+	}
+	if !foundOther {
+		t.Fatalf("expected the plugin's other, unrelated server to survive: %+v", p.PluginServers)
+	}
+}
+
+// --- Masking form (ADR 0026, issue #53) -------------------------------------
+
+func maskConnection(override string, enabled bool) string {
+	return fmt.Sprintf("---\noverride: %s\nenabled: %v\n---\n", override, enabled)
+}
+
+// TestLoadMaskSuppressesPluginServer proves a valid masking declaration
+// removes the named plugin server from PluginServers with no warning (the
+// mask file is the deliberate record) and never itself renders as a
+// connection.
+func TestLoadMaskSuppressesPluginServer(t *testing.T) {
+	root := writeAgent(t, "agent", validInstructions)
+	writePluginManifest(t, root, "vendor-x", validPluginJSON("vendor-x"))
+	writePluginMCP(t, root, "vendor-x", mcpDoc(`"catalog": {"command": "server"}, "other": {"command": "server2"}`))
+	writeConnectionFile(t, root, "catalog.md", maskConnection("plugins/vendor-x", false))
+
+	p, diags, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p == nil {
+		t.Fatalf("expected the project to load; diags: %v", diags.All())
+	}
+	for _, d := range diags.All() {
+		if d.Severity == diagnostics.Warning {
+			t.Fatalf("a mask must never produce a warning: %v", diags.All())
+		}
+	}
+	if len(p.Connections) != 0 {
+		t.Fatalf("a mask must never render as a connection: %+v", p.Connections)
+	}
+	for _, s := range p.PluginServers {
+		if s.Name == "catalog" {
+			t.Fatalf("expected the masked plugin server catalog to be removed: %+v", p.PluginServers)
+		}
+	}
+	foundOther := false
+	for _, s := range p.PluginServers {
+		if s.Name == "other" {
+			foundOther = true
+		}
+	}
+	if !foundOther {
+		t.Fatalf("expected the plugin's other, unrelated server to survive: %+v", p.PluginServers)
+	}
+}
+
+// TestLoadMaskDanglingOverridePluginAbsent proves a mask naming a plugin
+// that is not present fails validation before workspace mutation.
+func TestLoadMaskDanglingOverridePluginAbsent(t *testing.T) {
+	root := writeAgent(t, "agent", validInstructions)
+	writeConnectionFile(t, root, "catalog.md", maskConnection("plugins/vendor-x", false))
 
 	_, diags, err := Load(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireErrorID(t, diags, "mcp.name.collision")
+	requireErrorID(t, diags, "mcp.override.dangling")
+}
+
+// TestLoadMaskDanglingOverrideNoMatchingServer proves a mask naming a
+// present plugin that does not contribute a server of that name fails
+// validation before workspace mutation.
+func TestLoadMaskDanglingOverrideNoMatchingServer(t *testing.T) {
+	root := writeAgent(t, "agent", validInstructions)
+	writePluginManifest(t, root, "vendor-x", validPluginJSON("vendor-x"))
+	writePluginMCP(t, root, "vendor-x", mcpDoc(`"other": {"command": "server2"}`))
+	writeConnectionFile(t, root, "catalog.md", maskConnection("plugins/vendor-x", false))
+
+	_, diags, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireErrorID(t, diags, "mcp.override.dangling")
+}
+
+// TestLoadMaskRejectsEnabledTrue proves enabled: true is rejected as
+// meaningless, since a true mask would be a no-op: the plugin server it
+// names is already emitted.
+func TestLoadMaskRejectsEnabledTrue(t *testing.T) {
+	root := writeAgent(t, "agent", validInstructions)
+	writePluginManifest(t, root, "vendor-x", validPluginJSON("vendor-x"))
+	writePluginMCP(t, root, "vendor-x", mcpDoc(`"catalog": {"command": "server"}`))
+	writeConnectionFile(t, root, "catalog.md", maskConnection("plugins/vendor-x", true))
+
+	_, diags, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireErrorID(t, diags, "mcp.override.enabled")
+}
+
+// TestLoadMaskRejectsNonEmptyBody proves a mask carrying a Markdown body
+// fails validation: a mask declares absence and carries no guidance prose.
+func TestLoadMaskRejectsNonEmptyBody(t *testing.T) {
+	root := writeAgent(t, "agent", validInstructions)
+	writePluginManifest(t, root, "vendor-x", validPluginJSON("vendor-x"))
+	writePluginMCP(t, root, "vendor-x", mcpDoc(`"catalog": {"command": "server"}`))
+	writeConnectionFile(t, root, "catalog.md",
+		"---\noverride: plugins/vendor-x\nenabled: false\n---\n\nSome guidance.\n")
+
+	_, diags, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireErrorID(t, diags, "mcp.override.body")
+}
+
+// TestLoadMaskManagedUnmaskable proves the reserved "managed" name cannot be
+// masked either: the existing filename reservation check applies to every
+// connection kind, including the masking arm.
+func TestLoadMaskManagedUnmaskable(t *testing.T) {
+	root := writeAgent(t, "agent", validInstructions)
+	writeConnectionFile(t, root, "managed.md", maskConnection("plugins/vendor-x", false))
+
+	_, diags, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireErrorID(t, diags, "mcp.name.reserved")
+}
+
+// TestLoadMaskMixedFieldsRejected proves a file mixing "override" with a
+// server-declaring field (here "url", with no "type") is rejected as a
+// union violation of the masking arm rather than silently accepted.
+func TestLoadMaskMixedFieldsRejected(t *testing.T) {
+	root := writeAgent(t, "agent", validInstructions)
+	writeConnectionFile(t, root, "catalog.md",
+		"---\noverride: plugins/vendor-x\nenabled: false\nurl: https://example.com/mcp\n---\n")
+
+	_, diags, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireErrorID(t, diags, "mcp.frontmatter.unknown-field")
+}
+
+// TestLoadMaskMixedWithTypeRejected proves a file that does carry "type"
+// alongside "override" is rejected as an unknown field of that
+// server-declaring form, the other shape a union violation can take.
+func TestLoadMaskMixedWithTypeRejected(t *testing.T) {
+	root := writeAgent(t, "agent", validInstructions)
+	writeConnectionFile(t, root, "catalog.md",
+		"---\ntype: streamable-http\nurl: https://example.com/mcp\noverride: plugins/vendor-x\n---\n")
+
+	_, diags, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireErrorID(t, diags, "mcp.frontmatter.unknown-field")
+}
+
+// TestLoadMaskMissingEnabledRejected proves "override" alone, without the
+// required "enabled" field, is rejected rather than defaulted.
+func TestLoadMaskMissingEnabledRejected(t *testing.T) {
+	root := writeAgent(t, "agent", validInstructions)
+	writeConnectionFile(t, root, "catalog.md", "---\noverride: plugins/vendor-x\n---\n")
+
+	_, diags, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireErrorID(t, diags, "mcp.frontmatter.missing")
+}
+
+// TestLoadMaskBadOverrideGrammarRejected proves an override value that is
+// not exactly "plugins/<name>" is rejected.
+func TestLoadMaskBadOverrideGrammarRejected(t *testing.T) {
+	for _, override := range []string{"vendor-x", "plugins/", "plugins/vendor-x/extra", "plugin/vendor-x"} {
+		root := writeAgent(t, "agent", validInstructions)
+		writeConnectionFile(t, root, "catalog.md", maskConnection(override, false))
+
+		_, diags, err := Load(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		requireErrorID(t, diags, "mcp.override.invalid")
+	}
+}
+
+// TestMaskJoinsFingerprint proves a mask file's exact source bytes join the
+// project fingerprint like every other mcp/ file (ADR 0026), even though a
+// mask never renders a connection: adding one changes the fingerprint, and
+// reloading identical bytes reproduces it exactly.
+func TestMaskJoinsFingerprint(t *testing.T) {
+	root := writeAgent(t, "agent", validInstructions)
+	writePluginManifest(t, root, "vendor-x", validPluginJSON("vendor-x"))
+	writePluginMCP(t, root, "vendor-x", mcpDoc(`"catalog": {"command": "server"}`))
+
+	p1, diags, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p1 == nil {
+		t.Fatalf("expected the project to load; diags: %v", diags.All())
+	}
+
+	writeConnectionFile(t, root, "catalog.md", maskConnection("plugins/vendor-x", false))
+	p2, diags, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p2 == nil {
+		t.Fatalf("expected the project to load; diags: %v", diags.All())
+	}
+	if p1.Fingerprint == p2.Fingerprint {
+		t.Fatal("adding a mask file must change the fingerprint even though it renders nothing")
+	}
+
+	p3, diags, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p3 == nil {
+		t.Fatalf("expected the project to load; diags: %v", diags.All())
+	}
+	if p2.Fingerprint != p3.Fingerprint {
+		t.Fatal("reloading an unchanged mask file must reproduce the same fingerprint")
+	}
 }
 
 // --- Fingerprint sensitivity --------------------------------------------------

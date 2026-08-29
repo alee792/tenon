@@ -126,7 +126,10 @@ schema; `stdio` and `streamable-http` supported, SSE warned and skipped).
 Accepted servers are emitted as native project MCP configuration — the
 harness owns startup, approval, transport, authentication, and runtime
 behavior; tenon does not proxy, supervise, or audit plugin MCP calls. `managed`
-is reserved; exact name collisions are skipped with a warning. Plugin-relative
+is reserved; exact name collisions between two plugins are skipped with a
+warning (first-wins, never renamed). A collision with an authored `mcp/`
+connection is different — the authored server wins instead (see
+Connections). Plugin-relative
 commands stay inside the real plugin tree; tenon expands exactly
 `${PLUGIN_ROOT}` and `${PLUGIN_DATA}` once and provides an owner-only
 persistent data directory per agent and plugin. Remote URLs are absolute
@@ -192,8 +195,20 @@ deprecated, unsupported transport. Optional trimmed Markdown after the
 frontmatter (at most 1,024 characters) is
 model-facing usage context rendered once into generated instructions, with
 one boundary statement that the native harness owns MCP startup, trust,
-approval, authentication, discovery, calls, and effects. Name collisions with
-`managed`, another connection, or a plugin server fail before mutation. A
+approval, authentication, discovery, calls, and effects. Composition policy
+splits by relationship (ADR 0026): `managed` and another connection still
+fail closed on a name collision, and so do two plugins declaring the same
+server name (first-wins-with-warning, unchanged). An authored server
+colliding with an accepted plugin server of the same name now wins instead
+of failing: the authored server is emitted, the plugin's is not, and a
+warning names both sources. A third, closed frontmatter form masks a
+plugin's server outright with no authored replacement — exactly `override:
+plugins/<name>` (the plugin's storage directory) and `enabled: false`, no
+`type`, no other field, and no body. A dangling override (the named plugin
+absent, or present but not actually contributing a server named for this
+file) fails before mutation, as does `enabled: true` (a true mask does
+nothing, since the plugin server is already emitted) and a non-empty body (a
+mask declares absence, not guidance). `managed` cannot be masked either. A
 leftover `connections/` directory (the prior name) fails closed with a
 migration diagnostic naming `mcp/` rather than being silently ignored.
 

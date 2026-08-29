@@ -41,6 +41,27 @@ The first release, v0.1.0, ships the core described in
   `plugin.reference.frontmatter.unknown-field`,
   `plugin.reference.source.invalid`, `plugin.reference.rev.invalid`,
   `plugin.reference.body.too-long`, and `plugin.reference.unresolved`.
+- Composition policy split by relationship (issue #53, ADR 0026 §
+  composition policy): an authored `mcp/<name>.md` server declaration
+  colliding with an accepted plugin server of the same name now wins
+  instead of failing the project — the authored server is emitted, the
+  plugin's is not, and a warning (`mcp.name.shadowed`) names both sources.
+  Plugin-to-plugin collisions are unchanged (still fail-closed peers,
+  first-wins-with-warning). A new closed frontmatter form masks a plugin's
+  server outright, with no authored replacement: exactly `override:
+  plugins/<storage-name>` and `enabled: false`, no `type` and no other
+  field, and no body — masking is deliberate, so it produces no warning; the
+  mask file is the record. A dangling override (the named plugin absent, or
+  present but not actually contributing a server named for that file) fails
+  before workspace mutation (`mcp.override.dangling`), as does `enabled:
+  true` (`mcp.override.enabled` — a true mask would be a no-op) and a
+  non-empty body (`mcp.override.body` — a mask declares absence, not
+  guidance); a malformed `override` value fails as `mcp.override.invalid`.
+  `managed` remains reserved and unmaskable. Suppression is computed once in
+  `internal/agentproject`, so both native drivers render the identical
+  composed server set with no per-driver collision logic. New diagnostic
+  identifiers: `mcp.name.shadowed`, `mcp.override.invalid`,
+  `mcp.override.dangling`, `mcp.override.enabled`, and `mcp.override.body`.
 
 - Standalone MCP connections move from `connections/` to `mcp/`, re-shaped to
   the Agent Plugins 1.0 `mcp.json` server-entry vocabulary (issue #49): a

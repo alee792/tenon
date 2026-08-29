@@ -282,6 +282,61 @@ func TestConnectionHeadersRenderVerbatim(t *testing.T) {
 	}
 }
 
+// TestComposedProjectOmitsShadowedAndMaskedPluginServers proves the driver
+// renders exactly the composition internal/agentproject already decided
+// (ADR 0026, issue #53): a Project as Load would hand back after shadowing
+// or masking a plugin server carries no trace of the suppressed server in
+// PluginServers, so the driver needs no shadow- or mask-aware logic of its
+// own — it only ever sees the composed set.
+func TestComposedProjectOmitsShadowedAndMaskedPluginServers(t *testing.T) {
+	p := &agentproject.Project{
+		Root:         "/src/my-agent",
+		Name:         "my-agent",
+		Instructions: &agentproject.Instructions{Body: "Body text.\n"},
+		// "catalog" was shadowed by the authored connection below and
+		// "legacy" was masked outright; a real Load already removed both
+		// from PluginServers, leaving only "other" from the accepted plugin.
+		PluginServers: []agentproject.PluginServer{{
+			Name:       "other",
+			Plugin:     "vendor-x",
+			PluginRoot: "/src/my-agent/plugins/vendor-x",
+			SourcePath: "plugins/vendor-x/mcp.json",
+			Transport:  agentproject.TransportStdio,
+			Command:    "other-server",
+		}},
+		Connections: []agentproject.Connection{
+			{Kind: agentproject.ConnectionKindRemote, Name: "catalog", URL: "https://example.com/mcp", SourcePath: "mcp/catalog.md"},
+		},
+	}
+	diags := &diagnostics.List{}
+	files := Driver{}.Generate(p, apply.Target{Workspace: "/ws", Executable: "/bin/tenon"}, diags)
+	if diags.HasErrors() {
+		t.Fatalf("unexpected diagnostics: %v", diags.All())
+	}
+
+	var mcpJSON []byte
+	for _, f := range files {
+		if f.Path == ".mcp.json" {
+			mcpJSON = f.Content
+		}
+	}
+	var doc struct {
+		MCPServers map[string]json.RawMessage `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(mcpJSON, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := doc.MCPServers["catalog"]; !ok {
+		t.Fatalf("expected the authored catalog server to render: %v", doc.MCPServers)
+	}
+	if _, ok := doc.MCPServers["other"]; !ok {
+		t.Fatalf("expected the surviving plugin server other to render: %v", doc.MCPServers)
+	}
+	if _, ok := doc.MCPServers["legacy"]; ok {
+		t.Fatalf("expected the masked plugin server legacy to never render: %v", doc.MCPServers)
+	}
+}
+
 // TestClaudeReservedConnectionNameFailsForClaude proves the Claude-only
 // native project surface names are rejected at generation for claude, with
 // an error that stops apply before it mutates the workspace.

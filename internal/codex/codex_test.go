@@ -234,6 +234,52 @@ func TestConnectionRendersAsCodexHTTPServer(t *testing.T) {
 	}
 }
 
+// TestComposedProjectOmitsShadowedAndMaskedPluginServers proves the codex
+// driver, like the claude driver, renders exactly the composition
+// internal/agentproject already decided (ADR 0026, issue #53): a Project as
+// Load would hand back after shadowing or masking a plugin server carries no
+// trace of the suppressed server in PluginServers, so neither driver needs
+// any shadow- or mask-aware logic of its own.
+func TestComposedProjectOmitsShadowedAndMaskedPluginServers(t *testing.T) {
+	p := &agentproject.Project{
+		Root:         "/src/my-agent",
+		Name:         "my-agent",
+		Instructions: &agentproject.Instructions{Body: "Body text.\n"},
+		PluginServers: []agentproject.PluginServer{{
+			Name:       "other",
+			Plugin:     "vendor-x",
+			PluginRoot: "/src/my-agent/plugins/vendor-x",
+			SourcePath: "plugins/vendor-x/mcp.json",
+			Transport:  agentproject.TransportHTTP,
+			URL:        "https://example.com/other",
+		}},
+		Connections: []agentproject.Connection{
+			{Kind: agentproject.ConnectionKindRemote, Name: "catalog", URL: "https://example.com/mcp", SourcePath: "mcp/catalog.md"},
+		},
+	}
+	diags := &diagnostics.List{}
+	files := Driver{}.Generate(p, apply.Target{Workspace: "/ws", Executable: "/bin/tenon"}, diags)
+	if diags.HasErrors() {
+		t.Fatalf("unexpected diagnostics: %v", diags.All())
+	}
+
+	var config string
+	for _, f := range files {
+		if f.Path == ".codex/config.toml" {
+			config = string(f.Content)
+		}
+	}
+	if !strings.Contains(config, "[mcp_servers.catalog]") {
+		t.Fatalf("expected the authored catalog server to render: %s", config)
+	}
+	if !strings.Contains(config, "[mcp_servers.other]") {
+		t.Fatalf("expected the surviving plugin server other to render: %s", config)
+	}
+	if strings.Contains(config, "[mcp_servers.legacy]") {
+		t.Fatalf("expected the masked plugin server legacy to never render: %s", config)
+	}
+}
+
 // TestClaudeReservedConnectionNamePassesForCodex proves the Claude-only
 // native surface reservation (workspace, claude-in-chrome, computer-use) is
 // a per-harness rule: those names are ordinary, accepted connection names

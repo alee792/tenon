@@ -173,7 +173,6 @@ func loadWithProof(dir, expectedFingerprint string, allowUnproven bool) (*Projec
 	pluginSkills, pluginServers, pluginInputs := loadPlugins(root, skillBudget, diags)
 	mergedSkills, pluginSkillInputs := mergeSkills(skills, pluginSkills, diags)
 	p.Skills = mergedSkills
-	p.PluginServers = pluginServers
 
 	subagents, subagentInputs := loadSubagents(root, diags)
 	p.Subagents = subagents
@@ -184,8 +183,13 @@ func loadWithProof(dir, expectedFingerprint string, allowUnproven bool) (*Projec
 	harnessFiles, harnessInputs := loadHarnessFiles(root, diags)
 	p.HarnessFiles = harnessFiles
 
-	connections, connectionInputs := loadConnections(root, pluginServers, diags)
+	// loadConnections is the central composition seam (ADR 0026, issue #53):
+	// it returns pluginServers with every author-shadowed or masked name
+	// already removed, so both native drivers see one already-composed
+	// server set and carry no composition logic of their own.
+	connections, composedPluginServers, connectionInputs := loadConnections(root, pluginServers, diags)
 	p.Connections = connections
+	p.PluginServers = composedPluginServers
 
 	schedules, scheduleInputs := loadSchedules(root, diags)
 	p.Schedules = schedules
