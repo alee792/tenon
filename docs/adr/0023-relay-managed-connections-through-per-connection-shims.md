@@ -9,6 +9,11 @@
   [ADR 0016](0016-author-generic-native-mcp-connections.md) for stdio
   connections; the product specification's managed-boundary claims as
   scoped below
+- Re-pointed by:
+  [ADR 0026](0026-author-remote-first-spec-aligned-mcp.md), which moves the
+  authored source of truth from `connections/<name>.md` to `mcp/<name>.md`
+  and scopes the apply-time refusal of OAuth-authorized remote transports
+  to the relayed stdio form, not to unrelayed remote entries
 - Context: the design exploration recorded in
   [docs/workbench/managed-middleware.md](../workbench/managed-middleware.md)
   (issue #37)
