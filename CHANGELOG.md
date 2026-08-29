@@ -176,7 +176,15 @@ The first release, v0.1.0, ships the core described in
   reference as `resolved cache-dependent=true` or `materialized
   cache-dependent=false`, with the prose caveat printed once after the
   listing rather than on every row. A plain `tenon apply` still points a
-  cache-resolved reference at the operator's cache by design.
+  cache-resolved reference at the operator's cache by design. Staging now
+  re-loads the staged agent source and proves it reproduces the fingerprint
+  the artifact manifest is about to record, before writing that manifest and
+  before publishing: a tree whose bytes are not the bytes that were loaded —
+  a plugin cache entry mutated in the unlocked window between staging's
+  re-verification of a reference and its copy, say — fails the stage closed
+  with the new `stage.tree.fingerprint-mismatch` diagnostic and no output
+  directory, rather than publishing a tree that only fails later at
+  container open.
 
 - `tenon stage` never emits a Go tool tree that verifies but cannot serve
   (issue #14): the staged apply record now names the closure root relative

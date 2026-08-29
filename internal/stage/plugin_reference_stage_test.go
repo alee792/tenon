@@ -370,6 +370,68 @@ func TestStagePluginReferenceTamperedCacheFailsClosed(t *testing.T) {
 	}
 }
 
+// swappingPluginCache resolves to one root on the first call and a different
+// one on every later call, standing in for a cache entry whose content is
+// mutated in the unlocked window between staging's re-verification of a
+// reference and its copy of that reference's bytes.
+type swappingPluginCache struct {
+	calls  int
+	first  string
+	second string
+}
+
+func (c *swappingPluginCache) Resolve(source, rev string) (string, error) {
+	c.calls++
+	if c.calls == 1 {
+		return c.first, nil
+	}
+	return c.second, nil
+}
+
+// TestStagePluginReferenceContentSwapFailsBeforePublishing proves staging's
+// post-materialization fingerprint proof (issue #58 review): when the bytes
+// actually copied are not the bytes Load fingerprinted — here a cache entry
+// whose content changed between Load and the copy — the staged tree fails
+// its own re-load check with stage.tree.fingerprint-mismatch and no output
+// directory is ever published.
+func TestStagePluginReferenceContentSwapFailsBeforePublishing(t *testing.T) {
+	loaded := newMinimalCachedPluginTree(t)
+	swapped := newMinimalCachedPluginTree(t)
+	if err := os.WriteFile(filepath.Join(swapped, "skills", "telemetry", "SKILL.md"),
+		[]byte("---\nname: telemetry\ndescription: Reports on telemetry pipelines.\n---\n\nDifferent guidance entirely.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	withStagePluginCache(t, &swappingPluginCache{first: loaded, second: swapped})
+
+	agent := writeAgent(t, "swapped-ref-agent")
+	writeStagePluginReference(t, agent, "obs", "https://example.com/fixture-observability-plugin.git",
+		"0123456789abcdef0123456789abcdef01234567")
+	exe := fakeExecutable(t)
+
+	out := filepath.Join(t.TempDir(), "staged")
+	res, diags, err := Stage(context.Background(), Options{
+		AgentDir: agent, Harness: "claude", Output: out, Executable: exe, Driver: claude.Driver{},
+	})
+	if err != nil {
+		t.Fatalf("unexpected environment error: %v", err)
+	}
+	if res != nil {
+		t.Fatal("staging must fail closed when the materialized bytes are not the bytes that were loaded")
+	}
+	found := false
+	for _, d := range diags.All() {
+		if d.ID == "stage.tree.fingerprint-mismatch" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected a stage.tree.fingerprint-mismatch diagnostic, got %v", diags.All())
+	}
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Fatalf("no output directory should be published on stage failure: err=%v", err)
+	}
+}
+
 // TestPlainApplyStillPointsAtCache proves the deliberate asymmetry (issue
 // #58's design decision): an ordinary, non-staging Load-and-resolve keeps
 // pointing a reference's stdio server at the operator's cache path, since

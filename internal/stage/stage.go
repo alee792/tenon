@@ -265,13 +265,11 @@ func Stage(ctx context.Context, opts Options) (*Result, *diagnostics.List, error
 	//
 	// The re-verification and the copy do not run under one lock over the
 	// cache — tenon holds no such lock — so a cache entry mutated in the
-	// narrow window between them is not prevented. It cannot corrupt
-	// silently: every materialized byte is a fingerprint input of the staged
-	// tree (see agentproject's materialized-reference loading), so a tree
-	// carrying bytes other than the ones Load fingerprinted no longer
-	// reproduces the manifest's fingerprint, and `tenon stage verify` — which
-	// the generated entrypoint runs before handing off to the harness —
-	// fails the tree closed at open rather than serving unverified content.
+	// narrow window between them is not prevented. It is caught instead: the
+	// staged agent source is re-loaded and fingerprint-checked below, before
+	// anything is published, so a tree carrying bytes other than the ones
+	// Load fingerprinted fails the stage closed rather than reaching an
+	// output directory.
 	//
 	// A reference that already arrived materialized (its content sits beside
 	// it in the authored tree, so Load resolved it from there rather than
@@ -294,6 +292,47 @@ func Stage(ctx context.Context, opts Options) (*Result, *diagnostics.List, error
 		materializedPlugins = append(materializedPlugins, strings.TrimPrefix(final, "/"))
 	}
 	if diags.HasErrors() {
+		return nil, diags, nil
+	}
+
+	// Step: prove the staged agent source reproduces the fingerprint the
+	// artifact manifest is about to record, by re-loading it exactly as the
+	// container will (issue #58 review). This is the production-side proof of
+	// the whole materialization: the staged tree is the first place a
+	// materialized reference is ever loaded as one, and its components must
+	// fingerprint identically to the cache-resolved load this stage was
+	// planned from. It also closes the unlocked window above — a cache entry
+	// mutated between its re-verification and the copy lands here as a
+	// mismatch, before publication, rather than as a tree that verifies only
+	// at container open.
+	//
+	// The re-load is deterministic whatever the process-global plugin cache
+	// holds: every reference in the staged tree now has its content beside
+	// it, and materialized content wins over the cache without consulting it
+	// (agentproject's materialized-reference precedence), so a real CLI stage
+	// with a configured cache and this same stage run offline read the same
+	// bytes. The cost is one extra project load per stage, over a tree that
+	// is already hot in the page cache.
+	stagedSource := physical(tmp, finalAgentSource)
+	restaged, restagedDiags, err := agentproject.Load(stagedSource)
+	switch {
+	case err != nil:
+		diags.Errorf("stage.tree.fingerprint-mismatch", strings.TrimPrefix(finalAgentSource, "/"),
+			"the staged agent source could not be re-loaded to prove it reproduces the recorded fingerprint: %s",
+			diagnostics.Bound(err.Error(), 256))
+		return nil, diags, nil
+	case restaged == nil || restagedDiags.HasErrors():
+		detail := "no diagnostics were reported"
+		if all := restagedDiags.All(); len(all) > 0 {
+			detail = diagnostics.Bound(all[0].String(), 256)
+		}
+		diags.Errorf("stage.tree.fingerprint-mismatch", strings.TrimPrefix(finalAgentSource, "/"),
+			"the staged agent source no longer validates on its own: %s", detail)
+		return nil, diags, nil
+	case restaged.Fingerprint != p.Fingerprint:
+		diags.Errorf("stage.tree.fingerprint-mismatch", strings.TrimPrefix(finalAgentSource, "/"),
+			"the staged agent source fingerprints to %s, not the %s this stage was planned from; staging fails closed rather than publish a tree whose content is not the content that was loaded",
+			restaged.Fingerprint, p.Fingerprint)
 		return nil, diags, nil
 	}
 	// The plugin cache base is deliberately not added as a needle to the
