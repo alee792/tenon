@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/alee792/tenon/internal/agentproject"
 	"github.com/alee792/tenon/internal/generated"
 
 	"github.com/alee792/tenon/internal/version"
@@ -1810,7 +1812,7 @@ func TestConnectionAddWithHeaders(t *testing.T) {
 	}
 	got := string(mustRead(t, filepath.Join(agent, "mcp", "catalog.md")))
 	want := "---\ntype: streamable-http\nurl: https://example.com/mcp\nheaders:\n" +
-		"  Authorization: \"Bearer ${ACME_TOKEN}\"\n  X-Trace: \"on\"\n---\n"
+		"  \"Authorization\": \"Bearer ${ACME_TOKEN}\"\n  \"X-Trace\": \"on\"\n---\n"
 	if got != want {
 		t.Fatalf("mcp/catalog.md =\n%q\nwant\n%q", got, want)
 	}
@@ -1824,6 +1826,48 @@ func TestConnectionAddWithHeaders(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(agent, "mcp", "other.md")); !os.IsNotExist(err) {
 		t.Fatal("a refused add must not create a file")
+	}
+}
+
+// TestConnectionAddHeaderNamesRoundTripThroughYAML proves header names that
+// are legal HTTP tokens but would otherwise be misparsed as YAML syntax (a
+// leading "#" reads as a comment, a leading "*" reads as an alias) are
+// quoted on write and, loaded back through the real parser, produce exactly
+// the headers that were authored (issue #49).
+func TestConnectionAddHeaderNamesRoundTripThroughYAML(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"mcp", "add", agent, "catalog", "--url", "https://example.com/mcp",
+		"--header", "X_a: one",
+		"--header", "X.a: two",
+		"--header", "#leading: three",
+	}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("add exit %d: %s", code, stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"mcp", "status", agent, "catalog"}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("status exit %d: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "headers=3") {
+		t.Fatalf("expected all three headers to survive the round trip: %s", stdout.String())
+	}
+
+	connections, diags, err := agentproject.LoadConnectionsForStatus(agent)
+	if err != nil {
+		t.Fatalf("LoadConnectionsForStatus: %v", err)
+	}
+	if diags.HasErrors() {
+		t.Fatalf("unexpected diagnostics: %v", diags.All())
+	}
+	if len(connections) != 1 {
+		t.Fatalf("expected 1 connection, got %d", len(connections))
+	}
+	want := map[string]string{"X_a": "one", "X.a": "two", "#leading": "three"}
+	if !reflect.DeepEqual(connections[0].Headers, want) {
+		t.Fatalf("headers = %#v, want %#v", connections[0].Headers, want)
 	}
 }
 
@@ -1918,6 +1962,26 @@ func TestConnectionStatusByName(t *testing.T) {
 	stderr.Reset()
 	if code := run([]string{"mcp", "status", agent, "missing"}, nil, &stdout, &stderr); code == 0 {
 		t.Fatal("a nonexistent name must fail")
+	}
+}
+
+// TestConnectionStatusBareOnAgentWithNoConnections proves a bare "mcp
+// status AGENT" (no NAME filter) succeeds with empty output when the agent
+// has no mcp/ directory at all: zero connections is legal, and only an
+// explicit NAME filter that matches nothing is a failure (issue #49).
+func TestConnectionStatusBareOnAgentWithNoConnections(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"mcp", "status", agent}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("status on an agent with no connections must succeed, got exit %d: %s", code, stderr.String())
+	}
+	if stdout.String() != "" {
+		t.Fatalf("expected empty stdout, got %q", stdout.String())
+	}
+	if stderr.String() != "" {
+		t.Fatalf("expected empty stderr, got %q", stderr.String())
 	}
 }
 

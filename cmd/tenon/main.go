@@ -1228,7 +1228,7 @@ func (h *headerFlags) Set(raw string) error {
 		return fmt.Errorf("a --header value must be \"Name: Value\"; found %q", raw)
 	}
 	name = strings.TrimSpace(name)
-	value = strings.TrimPrefix(value, " ")
+	value = strings.TrimLeft(value, " ")
 	if name == "" {
 		return fmt.Errorf("a --header name must not be empty: %q", raw)
 	}
@@ -1367,7 +1367,7 @@ func runMCPAdd(args []string, stdout, stderr io.Writer) int {
 	if len(headers.names) > 0 {
 		b.WriteString("headers:\n")
 		for i, hname := range headers.names {
-			b.WriteString("  " + hname + ": " + generated.YAMLString(headers.values[i]) + "\n")
+			b.WriteString("  " + generated.YAMLString(hname) + ": " + generated.YAMLString(headers.values[i]) + "\n")
 		}
 	}
 	b.WriteString("---\n")
@@ -1384,7 +1384,7 @@ func runMCPAdd(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// runConnectionStatus reports the declared target and context presence of
+// runMCPStatus reports the declared target and context presence of
 // every connection, or one named connection, without contacting anything.
 // Any malformed connection is reported with its authored path and makes the
 // result nonzero.
@@ -1465,7 +1465,7 @@ func runMCPStatus(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	if !found {
+	if !found && filterName != "" {
 		fmt.Fprintf(stderr, "tenon mcp status: no connection named %q\n", filterName)
 		return 1
 	}
