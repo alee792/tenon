@@ -7,6 +7,13 @@
   [ADR 0014](0014-use-process-isolated-integration-packages.md)
 - Reuses:
   [ADR 0010](0010-map-plugin-mcp-through-native-harness-configuration.md)
+- Amended by:
+  [ADR 0023](0023-relay-managed-connections-through-per-connection-shims.md)
+  (proposed), for the reference rendering of stdio connections;
+  [ADR 0026](0026-author-remote-first-spec-aligned-mcp.md), which replaces
+  the authored format below with spec-aligned `mcp/<name>.md` files, drops
+  the credential-free restriction on remote targets, and narrows the
+  no-command rule rather than keeping it
 
 ## Plain-English summary
 

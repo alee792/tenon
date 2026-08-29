@@ -8,6 +8,10 @@
   [ADR 0010](0010-map-plugin-mcp-through-native-harness-configuration.md)
 - Authored selection defined by:
   [ADR 0016](0016-author-generic-native-mcp-connections.md)
+- Amended by: [ADR 0026](0026-author-remote-first-spec-aligned-mcp.md),
+  which makes the hosted remote GitHub server with harness-discovered OAuth
+  the reference journey and defers this curated PAT/stdio path; every
+  credential and effect boundary recorded here still holds of that path
 
 ## Plain-English summary
 

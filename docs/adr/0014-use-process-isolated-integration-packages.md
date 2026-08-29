@@ -10,6 +10,9 @@
   [ADR 0015](0015-use-the-official-github-server-as-native-unmanaged-mcp.md)
 - Extended by:
   [ADR 0016](0016-author-generic-native-mcp-connections.md)
+- Amended by: [ADR 0026](0026-author-remote-first-spec-aligned-mcp.md),
+  which defers this store's role as the authoring path for third-party MCP
+  servers and re-targets the store primitive at plugin acquisition
 
 ## Plain-English summary
 
