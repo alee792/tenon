@@ -9,6 +9,39 @@ The first release, v0.1.0, ships the core described in
 
 ### Added
 
+- Plugin acquisition by pointer and pin (issue #52, ADR 0026 § plugin
+  acquisition): `plugins/<name>.md` may now declare a plugin by reference
+  instead of vendoring it, with closed frontmatter naming an absolute HTTPS
+  `source` and a full 40-character commit `rev`, plus an optional bounded
+  provenance body never rendered into instructions. A new `tenon plugin`
+  verb adds three commands: `tenon plugin fetch AGENT [NAME]`, the one
+  explicitly online step, resolves each reference into a new owner-only,
+  content-addressed plugin cache (`internal/pluginref`) by shelling out to
+  the system `git` executable; `tenon plugin update AGENT NAME --rev REV`
+  fetches the new revision, prints a bounded added/removed/changed
+  component-path diff against the currently pinned revision, and only then
+  rewrites the reference file's `rev`; `tenon plugin status AGENT [NAME]`
+  reports each reference's declared pin and offline resolution health.
+  `tenon apply`, `tenon validate`, and every other project load stay fully
+  offline: a reference file resolves against the cache with an offline
+  digest re-verification and fails, naming `tenon plugin fetch`, when the
+  pin is not cached or no longer matches its recorded digest. A resolved
+  reference's plugin tree loads through the identical manifest, `skills/`,
+  and `mcp.json` validation a vendored `plugins/<name>/` directory uses, and
+  its resolved bytes join the project fingerprint on the same terms as
+  vendored bytes; the reference file's own bytes always join the
+  fingerprint too. A reference and a vendored directory sharing a name fail
+  the project before any workspace mutation
+  (`plugin.entry.collision`). Vendoring a complete directory beneath
+  `plugins/<name>/` remains fully supported and requires none of this. New
+  diagnostic identifiers: `plugin.entry.invalid` (extended to cover
+  malformed reference filenames), `plugin.entry.collision`,
+  `plugin.reference.invalid`, `plugin.reference.frontmatter.missing`,
+  `plugin.reference.frontmatter.invalid`,
+  `plugin.reference.frontmatter.unknown-field`,
+  `plugin.reference.source.invalid`, `plugin.reference.rev.invalid`,
+  `plugin.reference.body.too-long`, and `plugin.reference.unresolved`.
+
 - Standalone MCP connections move from `connections/` to `mcp/`, re-shaped to
   the Agent Plugins 1.0 `mcp.json` server-entry vocabulary (issue #49): a
   remote connection now declares `type: streamable-http` (replacing

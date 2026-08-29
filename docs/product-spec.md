@@ -76,7 +76,7 @@ lowercase hyphenated words. The full component set:
 my-agent/
   instructions.md          # optional; see the root rule below
   skills/                  # Agent Skills directories
-  plugins/                 # complete publisher-authored Agent Plugin packages
+  plugins/                 # vendored Agent Plugin packages, or <name>.md pointer+pin references
   tools/                   # one typed function per TS/Python file or Go dir
   subagents/               # one instructions.md per immediate subagent
   mcp/                     # one <name>.md per standalone MCP connection
@@ -133,6 +133,24 @@ persistent data directory per agent and plugin. Remote URLs are absolute
 HTTPS (loopback excepted), without user info or fragments; headers are
 literal package-visible values and must not contain secrets.
 
+A plugin may also be declared by pointer and pin: `plugins/<name>.md`
+carries closed frontmatter naming a `source` (an absolute HTTPS URL) and a
+full 40-character commit `rev`, plus an optional bounded body of
+informational provenance prose that is never rendered into instructions
+(ADR 0026). `tenon plugin fetch` is the one explicitly online command that
+resolves a reference into the owner-only, content-addressed plugin cache;
+`tenon apply` and every other load stay fully offline and fail, naming
+`tenon plugin fetch`, when a pin's cached tree is absent or no longer
+matches its recorded digest. A resolved reference loads through the exact
+same manifest, `skills/`, and `mcp.json` validation a vendored directory
+uses, and its resolved bytes join the project fingerprint exactly as
+vendored bytes do. A reference and a vendored directory sharing a name fail
+the project before any workspace mutation. `tenon plugin update AGENT NAME
+--rev REV` fetches the new revision, prints a bounded added/removed/changed
+component-path diff against the currently pinned revision, and only then
+rewrites the reference file's `rev`; `tenon plugin status` reports each
+reference's declared pin and offline resolution health.
+
 **Tools.** Visible `tools/*.ts` and `tools/*.py` files and `tools/NAME/tool.go`
 directories each declare one tool; filenames supply tool names, with
 underscores exposed as hyphens. TypeScript exports a default object with
@@ -154,17 +172,24 @@ tool names may not collide.
 **Connections.** Each `mcp/<name>.md` authors one standalone native MCP
 connection; the filename supplies the connection and native server name
 (`managed` reserved). Closed YAML frontmatter's `type` field selects exactly
-one target form (issue #49): `type: streamable-http` with absolute HTTPS
-`url` (no query, validated without contact) and optional `headers` (a
-string-to-string map; a header value may end with exactly one `${VAR}`
-environment-variable reference, never resolved by tenon and never
-`${PLUGIN_ROOT}`/`${PLUGIN_DATA}`), or `type: installed` with `package` +
-`capability`, resolved offline through the integration store, whose stable
-server name must equal the filename. Declaring a remote endpoint that
-requires OAuth is fine — the harness discovers and performs auth; tenon only
-ever renders the URL and headers. `type: sse` fails as a deprecated,
-unsupported transport; `type: stdio` is not yet supported in authored files.
-Optional trimmed Markdown after the frontmatter (at most 1,024 characters) is
+one target form (issue #49, widened by ADR 0026/issue #50): `type:
+streamable-http` with absolute HTTPS `url` (no query, validated without
+contact) and optional `headers` (a string-to-string map; a header value may
+end with exactly one `${VAR}` environment-variable reference, never resolved
+by tenon and never `${PLUGIN_ROOT}`/`${PLUGIN_DATA}`); `type: stdio` with an
+agent-root-relative `command` (`./…`, containment-validated the way a
+plugin-relative command is, anchored at the agent root) naming an existing
+regular file whose bytes and executable bit join the fingerprint, plus
+optional `args` (plain strings; `${PLUGIN_ROOT}`/`${PLUGIN_DATA}` rejected by
+name, any other `$` left literal), `env` (the same `${VAR}` value grammar as
+`headers`), and `cwd` (the same agent-root containment rule as `command`,
+defaulting to the agent root when absent); or `type: installed` with
+`package` + `capability`, resolved offline through the integration store,
+whose stable server name must equal the filename. Declaring a remote
+endpoint that requires OAuth is fine — the harness discovers and performs
+auth; tenon only ever renders the URL and headers. `type: sse` fails as a
+deprecated, unsupported transport. Optional trimmed Markdown after the
+frontmatter (at most 1,024 characters) is
 model-facing usage context rendered once into generated instructions, with
 one boundary statement that the native harness owns MCP startup, trust,
 approval, authentication, discovery, calls, and effects. Name collisions with
@@ -229,10 +254,12 @@ workspace mutation:
 | Authored tools | 128 | 1,024 source and dependency files; 1 MiB each and 64 MiB aggregate |
 | Immediate subagents | 128 | 128 KiB each and 16 MiB aggregate |
 | Schedules | 256 | 128 KiB per source, including a 32 KiB prompt; 16 MiB aggregate |
-| Vendored plugins | 128 directory entries | `plugin.json` and `mcp.json` 128 KiB each; 1,024 entries per plugin `skills/` location |
+| Plugins (`plugins/`: vendored directories and reference files) | 128 entries, combined | `plugin.json` and `mcp.json` 128 KiB each; 1,024 entries per plugin `skills/` location; a reference file 8 KiB, body at most 1,024 characters |
+| Fetched plugin reference tree (`tenon plugin fetch`'s cache) | Not aggregate-bounded across references | 64 MiB and 8,192 files per fetched tree |
 | Accepted plugin MCP servers | 128 aggregate | Generated native MCP configuration at most 8 MiB |
 | Selected harness-specific files | 1,024 | 1 MiB each and 8 MiB aggregate |
 | Standalone MCP connections (`mcp/`) | 128 | 8 KiB per source; context at most 1,024 characters |
+| Declared `type: stdio` command executables | 16 declared stdio servers | 64 MiB aggregate across every distinct resolved command file |
 | Agent manifest | One optional file, supplied at application | 32 KiB |
 
 Everywhere: authored entries are bounded regular files and real directories
@@ -612,9 +639,22 @@ above:
   [the native GitHub MCP journey](github-native-mcp.md) — and `mcp
   status`, `validate`, and `apply` treat the result exactly as they treat a
   generated one.
-- **Repo-relative stdio connections are not yet supported.** `type: stdio` in
-  an authored `mcp/<name>.md` is refused with a diagnostic; that target form
-  is a later slice.
+- **`tenon plugin fetch` and `tenon plugin update` shell out to the system
+  `git` executable.** Resolving a `plugins/<name>.md` reference's pinned
+  revision is the one online operation in tenon's plugin story (ADR 0026),
+  and it is an operator-owned tool dependency rather than a vendored git
+  implementation: a machine without `git` on `PATH` cannot fetch a plugin
+  reference, though it can still `apply` a project whose references are
+  already cached from an earlier fetch. `tenon plugin status` and `tenon
+  apply` never invoke `git`.
+- **Staging does not yet materialize a fetched plugin reference's resolved
+  bytes into the tree it publishes.** `tenon stage` copies the authored
+  source directory byte-for-byte, so a `plugins/<name>.md` reference's own
+  bytes stage, but the plugin content it resolves to (in the operator's
+  plugin cache) does not travel into the staged tree the way vendored
+  `plugins/<name>/` bytes do. A staged agent that needs its plugins present
+  at container runtime should vendor them until a later slice threads the
+  plugin cache through staging.
 - **Staging.** Per [ADR 0021](adr/0021-execute-authored-tools-from-a-self-contained-closure.md),
   the native harness runtime is not yet bundled into the staged tree
   (expected on the base image), and the authored-tool execution closure is

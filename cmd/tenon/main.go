@@ -60,6 +60,9 @@ const usage = `usage:
   tenon integration install SOURCE --trust operator
   tenon integration inspect|verify|list|enable|disable|remove [ID]
   tenon integration update ID SOURCE --trust operator
+  tenon plugin fetch AGENT [NAME] [--manifest PATH]
+  tenon plugin update AGENT NAME --rev REV [--manifest PATH]
+  tenon plugin status AGENT [NAME] [--manifest PATH]
   tenon version
 `
 
@@ -68,6 +71,12 @@ func main() {
 }
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	// Every entry point — the real binary and every in-process test calling
+	// run directly — configures the same plugin-reference cache a
+	// plugins/<name>.md reference resolves against, exactly once per
+	// invocation, mirroring how resolveIntegrationStoreBase is recomputed
+	// fresh per command rather than cached at process start.
+	configurePluginCache()
 	if len(args) == 0 {
 		fmt.Fprint(stderr, usage)
 		return 2
@@ -97,6 +106,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runStage(args[1:], stdout, stderr)
 	case "integration":
 		return runIntegration(args[1:], stdout, stderr)
+	case "plugin":
+		return runPlugin(args[1:], stdout, stderr)
 	case "version":
 		return runVersion(args[1:], stdout, stderr)
 	default:
