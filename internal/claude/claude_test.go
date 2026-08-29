@@ -568,7 +568,7 @@ func stdioConnectionProject() *agentproject.Project {
 			{
 				Kind:       agentproject.ConnectionKindStdio,
 				Name:       "deployctl",
-				Command:    "/src/my-agent/servers/deployctl/bin/deployctl",
+				Command:    "servers/deployctl/bin/deployctl",
 				Args:       []string{"--flag"},
 				Env:        map[string]string{"TOKEN": "Bearer ${ACME_TOKEN}", "MODE": "prod"},
 				SourcePath: "mcp/deployctl.md",
@@ -632,7 +632,7 @@ func TestStdioConnectionRendersNativeStdioEntry(t *testing.T) {
 // used verbatim instead of the agent-root default.
 func TestStdioConnectionDeclaredCwdOverridesDefault(t *testing.T) {
 	p := stdioConnectionProject()
-	p.Connections[0].Cwd = "/src/my-agent/servers/deployctl"
+	p.Connections[0].Cwd = "servers/deployctl"
 	diags := &diagnostics.List{}
 	files := Driver{}.Generate(p, apply.Target{Workspace: "/ws", Executable: "/bin/tenon"}, diags)
 	if diags.HasErrors() {

@@ -163,6 +163,22 @@ func TestPluginReferenceCollidesWithVendoredDirectory(t *testing.T) {
 	requireErrorID(t, diags, "plugin.entry.collision")
 }
 
+// TestPluginReferenceNameEscapeRejected proves a reference filename that
+// derives a name outside the plugin storage grammar — in particular "..",
+// which filepath.Join's cleaning would walk PluginDataDir's per-plugin data
+// directory straight out of its intended tree — is rejected with
+// plugin.entry.invalid before ever reaching the plugin cache (#52 review
+// finding 2).
+func TestPluginReferenceNameEscapeRejected(t *testing.T) {
+	root := writeAgent(t, "agent", validInstructions)
+	writePluginReference(t, root, "..", "https://github.com/acme/x", validRev, "")
+	_, diags, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireErrorID(t, diags, "plugin.entry.invalid")
+}
+
 func TestPluginReferenceFingerprintSensitiveToOwnBytes(t *testing.T) {
 	root := writeAgent(t, "agent", validInstructions)
 	writePluginReference(t, root, "obs", "https://github.com/acme/observability-plugin", validRev, "Notes A.")
@@ -209,6 +225,40 @@ func TestPluginReferenceFingerprintSensitiveToCachedTreeBytes(t *testing.T) {
 	}
 	if p1.Fingerprint == p2.Fingerprint {
 		t.Fatalf("fingerprint did not change when the resolved cached tree's bytes changed")
+	}
+}
+
+// TestPluginReferenceFingerprintIndependentOfCacheBase proves the same
+// plugin-reference cached tree, materialized under two different cache base
+// paths, produces byte-identical fingerprints (ADR 0025's cache-base
+// independence, the deferred test named by the #52 review): the fingerprint
+// depends only on declared source and resolved content, never on where the
+// cache happens to live on disk.
+func TestPluginReferenceFingerprintIndependentOfCacheBase(t *testing.T) {
+	root := writeAgent(t, "agent", validInstructions)
+	writePluginReference(t, root, "obs", "https://github.com/acme/observability-plugin", validRev, "")
+
+	base1 := newCachedPluginTree(t, "observability", "telemetry")
+	withPluginCache(t, &fakePluginCache{roots: map[string]string{validRev: base1}})
+	p1, diags, err := Load(root)
+	if err != nil || p1 == nil || diags.HasErrors() {
+		t.Fatalf("first load failed: err=%v diags=%v", err, diags.All())
+	}
+
+	// A second, distinct cache base directory materializing byte-identical
+	// content: only the absolute path differs.
+	base2 := newCachedPluginTree(t, "observability", "telemetry")
+	if base1 == base2 {
+		t.Fatal("test setup: expected two distinct cache base directories")
+	}
+	ConfigurePluginCache(&fakePluginCache{roots: map[string]string{validRev: base2}})
+	p2, diags, err := Load(root)
+	if err != nil || p2 == nil || diags.HasErrors() {
+		t.Fatalf("second load failed: err=%v diags=%v", err, diags.All())
+	}
+
+	if p1.Fingerprint != p2.Fingerprint {
+		t.Fatalf("fingerprint must be independent of the cache base path: %s vs %s", p1.Fingerprint, p2.Fingerprint)
 	}
 }
 

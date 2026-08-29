@@ -341,6 +341,23 @@ func TestPluginMCPRelativeCommandStaysInsideThePluginTree(t *testing.T) {
 			t.Fatalf("command = %+v, want the absolute real path %q", p.PluginServers, want)
 		}
 	})
+	t.Run("captures the plugin-relative path and vendored flag for staging", func(t *testing.T) {
+		root := writeAgent(t, "agent", validInstructions)
+		writePluginManifest(t, root, "vendor-x", validPluginJSON("vendor-x"))
+		writeSkillFile(t, root, "plugins/vendor-x/bin/serve", []byte("#!/bin/sh\nexec cat\n"), 0o755)
+		writePluginMCP(t, root, "vendor-x", mcpDoc(`"alpha": {"command": "./bin/serve"}`))
+
+		p, diags, err := Load(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p == nil || diags.HasErrors() {
+			t.Fatalf("unexpected diagnostics: %v", diags.All())
+		}
+		if len(p.PluginServers) != 1 || !p.PluginServers[0].Vendored || p.PluginServers[0].RelCommand != "bin/serve" {
+			t.Fatalf("server = %+v, want Vendored true and RelCommand %q", p.PluginServers, "bin/serve")
+		}
+	})
 	t.Run("escape attempt", func(t *testing.T) {
 		root := writeAgent(t, "agent", validInstructions)
 		writePluginManifest(t, root, "vendor-x", validPluginJSON("vendor-x"))
@@ -471,7 +488,7 @@ func TestResolveServersExpandsBothVariablesExactlyOnce(t *testing.T) {
 		Env:        map[string]string{"CACHE": "${PLUGIN_DATA}/cache", "HOME_LIKE": "${HOME}"},
 		Cwd:        "${PLUGIN_ROOT}/work",
 	}
-	resolved := ResolveServers([]PluginServer{server}, "/ws", "my-agent")
+	resolved := ResolveServers([]PluginServer{server}, "/src", "/ws", "my-agent")
 	if len(resolved) != 1 {
 		t.Fatalf("resolved = %+v", resolved)
 	}
@@ -509,13 +526,72 @@ func TestResolveServersExpandsBothVariablesExactlyOnce(t *testing.T) {
 	}
 }
 
+// TestResolveServersReanchorsVendoredPluginRootForStaging proves a vendored
+// plugin server's PluginRoot and plugin-relative Command are recomputed
+// against whatever agent root ResolveServers is handed, rather than trusting
+// the absolute path captured once at Load time — exactly the fix a staged
+// render needs (Blocker 2, post-review): the same project renders correct
+// paths whether generation runs against the apply-time root or a staged copy
+// of it at a different absolute location.
+func TestResolveServersReanchorsVendoredPluginRootForStaging(t *testing.T) {
+	server := PluginServer{
+		Name:       "alpha",
+		Plugin:     "vendor-x",
+		PluginRoot: "/build/tmp123/agent/plugins/vendor-x",
+		Vendored:   true,
+		RelCommand: "bin/serve",
+		Command:    "/build/tmp123/agent/plugins/vendor-x/bin/serve",
+		Transport:  TransportStdio,
+		Cwd:        "${PLUGIN_ROOT}/work",
+	}
+	resolved := ResolveServers([]PluginServer{server}, "/staged/agent", "/ws", "my-agent")
+	if len(resolved) != 1 {
+		t.Fatalf("resolved = %+v", resolved)
+	}
+	got := resolved[0]
+	wantRoot := filepath.Join("/staged/agent", "plugins", "vendor-x")
+	if got.Command != filepath.Join(wantRoot, "bin", "serve") {
+		t.Fatalf("command = %q, want re-anchored under %q", got.Command, wantRoot)
+	}
+	if got.Cwd != wantRoot+"/work" {
+		t.Fatalf("cwd = %q, want re-anchored under %q", got.Cwd, wantRoot)
+	}
+	if got.Env["PLUGIN_ROOT"] != wantRoot {
+		t.Fatalf("env PLUGIN_ROOT = %q, want %q", got.Env["PLUGIN_ROOT"], wantRoot)
+	}
+}
+
+// TestResolveServersKeepsNonVendoredPluginRootUnchanged proves a plugin
+// reference's resolved cache tree is never re-anchored: its shape differs
+// from a vendored plugin's (the cache lives at a fixed location independent
+// of where the agent source is staged), so only Vendored servers are
+// recomputed against the root ResolveServers is handed.
+func TestResolveServersKeepsNonVendoredPluginRootUnchanged(t *testing.T) {
+	server := PluginServer{
+		Name:       "alpha",
+		Plugin:     "vendor-x",
+		PluginRoot: "/home/user/.cache/tenon/plugins/deadbeef",
+		Command:    "/home/user/.cache/tenon/plugins/deadbeef/bin/serve",
+		Transport:  TransportStdio,
+		Cwd:        "${PLUGIN_ROOT}/work",
+	}
+	resolved := ResolveServers([]PluginServer{server}, "/staged/agent", "/ws", "my-agent")
+	got := resolved[0]
+	if got.Command != server.Command {
+		t.Fatalf("command = %q, want the unchanged cache path %q", got.Command, server.Command)
+	}
+	if got.Cwd != server.PluginRoot+"/work" {
+		t.Fatalf("cwd = %q, want the unchanged cache root", got.Cwd)
+	}
+}
+
 // TestResolveServersReportsNoPlaceholderForPortableValues proves the
 // per-harness skip is not triggered by ordinary expanded values.
 func TestResolveServersReportsNoPlaceholderForPortableValues(t *testing.T) {
 	resolved := ResolveServers([]PluginServer{{
 		Name: "alpha", Plugin: "vendor-x", PluginRoot: "/src", Transport: TransportStdio,
 		Command: "alpha-server", Args: []string{"--data=${PLUGIN_DATA}"},
-	}}, "/ws", "my-agent")
+	}}, "/src/agent-root", "/ws", "my-agent")
 	if resolved[0].Placeholder != "" {
 		t.Fatalf("placeholder = %q, want none", resolved[0].Placeholder)
 	}

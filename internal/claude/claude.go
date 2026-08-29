@@ -5,6 +5,7 @@ package claude
 import (
 	"bytes"
 	"encoding/json"
+	"path/filepath"
 
 	"github.com/alee792/tenon/internal/agentproject"
 	"github.com/alee792/tenon/internal/apply"
@@ -163,7 +164,7 @@ func claudeSettingsFile(p *agentproject.Project, target apply.Target, diags *dia
 // tenon skips such a server for this harness alone rather than risk it.
 func acceptedServers(p *agentproject.Project, target apply.Target, diags *diagnostics.List) []agentproject.ResolvedServer {
 	var out []agentproject.ResolvedServer
-	for _, s := range agentproject.ResolveServers(p.PluginServers, target.Workspace, p.Name) {
+	for _, s := range agentproject.ResolveServers(p.PluginServers, p.Root, target.Workspace, p.Name) {
 		if s.Placeholder != "" {
 			diags.Warnf("plugin.mcp.claude-expansion", s.SourcePath,
 				"MCP server %q is skipped for the selected harness (claude): its %s %q still contains placeholder-like ${...} text after portable expansion, and claude expands project MCP values itself",
@@ -248,31 +249,40 @@ func mcpConfig(executable, source, workspace string, servers []agentproject.Reso
 }
 
 // stdioConnectionEntry renders one accepted authored stdio connection (ADR
-// 0026): the exact absolute resolved command path under the agent root, with
-// its args copied verbatim after it (no expansion of any kind ever applies to
-// authored stdio args) and its env map with ${VAR} references left verbatim
-// for Claude's own expansion, exactly like a remote connection's headers.
-// Claude's project stdio format carries no working-directory field, so — as
-// serverEntry already does for a plugin server's declared cwd — the working
-// directory is preserved exactly by wrapping the command in the system exec
-// adapter, which changes directory before replacing itself with the declared
-// command. An undeclared cwd defaults to the agent root: root is where the
-// command itself is proven to live, so it is the one directory guaranteed to
-// exist for every accepted stdio connection, the same default choice ADR
-// 0010 documents for a plugin server's undeclared working directory (there,
-// the plugin root). encoding/json sorts a map's keys when marshalling, so an
-// env map always renders deterministically.
+// 0026): the exact resolved command path under the agent root, absolutized
+// against source — the apply-time agent root during an ordinary apply, or a
+// staged copy of it during staging (Blocker 2, post-review) — since
+// Connection.Command and Connection.Cwd are stored agent-root-relative
+// specifically so this render-time join is the only place they ever become
+// absolute. Its args are copied verbatim after it (no expansion of any kind
+// ever applies to authored stdio args) and its env map with ${VAR}
+// references left verbatim for Claude's own expansion, exactly like a remote
+// connection's headers. Claude's project stdio format carries no
+// working-directory field, so — as serverEntry already does for a plugin
+// server's declared cwd — the working directory is preserved exactly by
+// wrapping the command in the system exec adapter, which changes directory
+// before replacing itself with the declared command. An undeclared cwd
+// defaults to source itself: the agent root is where the command itself is
+// proven to live, so it is the one directory guaranteed to exist for every
+// accepted stdio connection, the same default choice ADR 0010 documents for
+// a plugin server's undeclared working directory (there, the plugin root).
+// encoding/json sorts a map's keys when marshalling, so an env map always
+// renders deterministically.
 func stdioConnectionEntry(c agentproject.Connection, source string) map[string]any {
-	cwd := c.Cwd
-	if cwd == "" {
-		cwd = source
+	cwd := source
+	if c.Cwd != "" {
+		cwd = filepath.Join(source, filepath.FromSlash(c.Cwd))
 	}
-	args := append([]string{"-C", cwd, "--", c.Command}, c.Args...)
-	entry := map[string]any{"type": "stdio", "command": "/usr/bin/env", "args": args}
-	if len(c.Env) > 0 {
-		entry["env"] = c.Env
+	command := filepath.Join(source, filepath.FromSlash(c.Command))
+	args := append([]string{"-C", cwd, "--", command}, c.Args...)
+	env := c.Env
+	if env == nil {
+		env = map[string]string{}
 	}
-	return entry
+	// "env" is always emitted, matching serverEntry and installedServerEntry
+	// exactly (a NIT, post-review): the three stdio entry renderers must not
+	// silently drift on whether an empty env map is present or omitted.
+	return map[string]any{"type": "stdio", "command": "/usr/bin/env", "args": args, "env": env}
 }
 
 // installedServerEntry renders one resolved installed connection in Claude's

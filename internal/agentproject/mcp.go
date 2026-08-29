@@ -71,6 +71,11 @@ const (
 	// fingerprint only once). This is the recorded byte half of ADR 0026's
 	// open item assigned to issue #50.
 	MaxStdioCommandAggregateBytes = 64 << 20 // 64 MiB
+	// MaxStdioCommandBytes bounds one declared stdio command file, mirroring
+	// MaxPluginCommandBytes exactly: checked against the file's stat size
+	// before it is ever read, so one oversized command file cannot force an
+	// unbounded read.
+	MaxStdioCommandBytes = 16 << 20 // 16 MiB
 )
 
 // connectionNamePattern is the connection filename grammar: 1-64 characters,
@@ -108,9 +113,13 @@ type Connection struct {
 	// reference; tenon never resolves it. Set only when Kind == "remote";
 	// nil when the remote form declares no headers.
 	Headers map[string]string
-	// Command is the stdio executable's absolute resolved path, already
-	// proven to stay inside the agent root (ADR 0026). Set only when
-	// Kind == "stdio".
+	// Command is the stdio executable's agent-root-relative slash path
+	// (already proven at Load time to stay inside the agent root, ADR 0026),
+	// never absolute: the same declared source must render correctly whether
+	// the harness runs against the apply-time agent root or a staged copy of
+	// it at a different absolute location, so absolutizing happens only at
+	// render time, against whichever root the renderer is handed (see
+	// internal/claude and internal/codex). Set only when Kind == "stdio".
 	Command string
 	// Args are the declared stdio arguments, unexpanded and copied
 	// literally: authored args carry no placeholder expansion of any kind.
@@ -120,10 +129,11 @@ type Connection struct {
 	// Values follow the same ${VAR} value grammar as Headers. Set only when
 	// Kind == "stdio"; nil when the declaration carries no env.
 	Env map[string]string
-	// Cwd is the stdio working directory's absolute resolved path, already
-	// proven to stay inside the agent root. Set only when Kind == "stdio";
-	// empty when the declaration carries no cwd, in which case rendering
-	// defaults to the agent root (see internal/claude and internal/codex).
+	// Cwd is the stdio working directory's agent-root-relative slash path,
+	// following the exact same relative-and-render-time-absolutized
+	// treatment as Command. Set only when Kind == "stdio"; empty when the
+	// declaration carries no cwd, in which case rendering defaults to the
+	// agent root (see internal/claude and internal/codex).
 	Cwd string
 	// commandBytes is the stdio command file's exact byte count, captured at
 	// Load time so the aggregate stdio budget (MaxStdioCommandAggregateBytes)
@@ -209,6 +219,7 @@ func loadConnections(root string, pluginServers []PluginServer, diags *diagnosti
 	shadowed := make(map[string]bool, len(entries))
 	masked := make(map[string]bool, len(entries))
 	count := 0
+	budget := &stdioReadBudget{}
 	for _, entry := range entries {
 		entryPath := mcpAuthoredDir + "/" + entry.Name()
 		if entry.Type()&os.ModeSymlink != 0 {
@@ -238,7 +249,7 @@ func loadConnections(root string, pluginServers []PluginServer, diags *diagnosti
 				"mcp may contain at most %d files", MaxConnections)
 		}
 
-		conn, fileInputs, ok := loadConnectionFile(root, entry.Name(), diags)
+		conn, fileInputs, ok := loadConnectionFile(root, entry.Name(), budget, diags)
 		inputs = append(inputs, fileInputs...)
 		if !ok {
 			continue
@@ -300,8 +311,9 @@ func maskTargetsAcceptedServer(pluginServers []PluginServer, storage, name strin
 // most MaxStdioServers declared type: stdio connections, and at most
 // MaxStdioCommandAggregateBytes combined bytes across every distinct
 // resolved stdio command file (deduplicated by resolved path, so one
-// executable shared by name collision is impossible but a byte count is
-// never double-charged). It is a pure function over already-validated
+// executable file shared by two or more connections joins the aggregate only
+// once, never double-charged, matching how the same bytes join the source
+// fingerprint only once). It is a pure function over already-validated
 // connections so it can be unit tested directly, without writing any large
 // fixture file.
 func checkStdioBudget(connections []Connection, diags *diagnostics.List) {
@@ -347,7 +359,7 @@ func checkLegacyConnectionsDir(root string, diags *diagnostics.List) {
 // read, regardless of validity; a valid type: stdio declaration returns a
 // second fingerprint input carrying the resolved command file's exact bytes
 // and executable bit.
-func loadConnectionFile(root, filename string, diags *diagnostics.List) (Connection, []sourceInput, bool) {
+func loadConnectionFile(root, filename string, budget *stdioReadBudget, diags *diagnostics.List) (Connection, []sourceInput, bool) {
 	sourcePath := mcpAuthoredDir + "/" + filename
 	name := strings.TrimSuffix(filename, ".md")
 	valid := true
@@ -386,7 +398,16 @@ func loadConnectionFile(root, filename string, diags *diagnostics.List) (Connect
 		return Connection{Name: name, SourcePath: sourcePath}, inputs, false
 	}
 
-	parsed, cmdInput, ok := parseConnection(string(raw), root, sourcePath, diags)
+	// A connection already rejected on its filename (bad grammar or the
+	// reserved "managed" name) never has its declaration parsed: in
+	// particular, a type: stdio command file is never resolved or read for
+	// a connection whose name already dooms it, so an attacker-sized command
+	// file behind a deliberately invalid filename costs nothing to reject.
+	if !valid {
+		return Connection{Name: name, SourcePath: sourcePath}, inputs, false
+	}
+
+	parsed, cmdInput, ok := parseConnection(string(raw), root, sourcePath, budget, diags)
 	if cmdInput != nil {
 		inputs = append(inputs, *cmdInput)
 	}
@@ -395,7 +416,35 @@ func loadConnectionFile(root, filename string, diags *diagnostics.List) (Connect
 	}
 	parsed.Name = name
 	parsed.SourcePath = sourcePath
-	return *parsed, inputs, ok && valid
+	return *parsed, inputs, ok
+}
+
+// stdioReadBudget tracks the running aggregate size of every distinct
+// resolved stdio command file read so far by one loadConnections call
+// (deduplicated by agent-root-relative path, matching checkStdioBudget's own
+// dedup exactly), so a project already over MaxStdioCommandAggregateBytes
+// stops reading further command file bytes into memory rather than
+// continuing to load doomed data one MaxStdioCommandBytes chunk at a time.
+// The eventual mcp.stdio.bounds.exceeded diagnostic is still emitted exactly
+// once, by checkStdioBudget, over the fully assembled connections.
+type stdioReadBudget struct {
+	seen  map[string]bool
+	total int64
+}
+
+// exceeded charges size against the running total the first time relPath is
+// seen (a path repeated across connections is charged once, exactly like the
+// fingerprint and checkStdioBudget), and reports whether the total is
+// already over MaxStdioCommandAggregateBytes.
+func (b *stdioReadBudget) exceeded(relPath string, size int64) bool {
+	if b.seen == nil {
+		b.seen = map[string]bool{}
+	}
+	if !b.seen[relPath] {
+		b.seen[relPath] = true
+		b.total += size
+	}
+	return b.total > MaxStdioCommandAggregateBytes
 }
 
 // connectionRemoteFields, connectionStdioFields, and connectionInstalledFields
@@ -422,7 +471,7 @@ var (
 // root, because that resolution is target-independent (ADR 0026). On success
 // for a stdio declaration it also returns the resolved command's fingerprint
 // sourceInput; every other path returns a nil second value.
-func parseConnection(content, root, path string, diags *diagnostics.List) (*Connection, *sourceInput, bool) {
+func parseConnection(content, root, path string, budget *stdioReadBudget, diags *diagnostics.List) (*Connection, *sourceInput, bool) {
 	raw, bodyStart, err := frontmatter.Split([]byte(content))
 	if err != nil {
 		diags.Errorf("mcp.frontmatter.missing", path,
@@ -506,7 +555,7 @@ func parseConnection(content, root, path string, diags *diagnostics.List) (*Conn
 		}
 		conn = Connection{Kind: ConnectionKindInstalled, Package: pkg, Capability: capability}
 	case "stdio":
-		stdioConn, sIn, ok := parseStdioConnection(doc, root, path, diags)
+		stdioConn, sIn, ok := parseStdioConnection(doc, root, path, budget, diags)
 		if !ok {
 			return nil, sIn, false
 		}
@@ -642,16 +691,21 @@ func parseOverrideTarget(raw string) (string, bool) {
 // (ADR 0026, issue #50): command is required, agent-root-relative
 // ("./..."), and containment-proven the way plugin-relative stdio commands
 // are (internal/agentproject/pluginmcp.go's resolveInPlugin), but anchored at
-// the agent root; cwd carries the identical rule when present. args are
-// copied literally with no placeholder expansion of any kind — a value
-// naming ${PLUGIN_ROOT} or ${PLUGIN_DATA} is rejected, because those expand
-// only inside a plugin's own mcp.json. env values follow the exact same
-// ${VAR} grammar as headers, reusing validPlaceholderValue so the two
-// authored value shapes can never silently drift apart. On success it
-// returns the resolved command file's fingerprint sourceInput; every
-// rejection path returns whatever sourceInput was already captured (nil
-// unless the command file itself was successfully read).
-func parseStdioConnection(doc *frontmatter.Doc, root, path string, diags *diagnostics.List) (*Connection, *sourceInput, bool) {
+// the agent root; cwd carries the identical rule when present. Neither
+// command nor cwd may resolve inside mcp/ itself, which the ADR reserves for
+// declaration files only. args are copied literally with no placeholder
+// expansion of any kind — a value naming ${PLUGIN_ROOT} or ${PLUGIN_DATA} is
+// rejected, because those expand only inside a plugin's own mcp.json. env
+// values follow the exact same ${VAR} grammar as headers, reusing
+// validPlaceholderValue so the two authored value shapes can never silently
+// drift apart. The resolved Command and Cwd stored on the returned
+// Connection are agent-root-relative, never absolute (Blocker 2): rendering
+// alone absolutizes them, against whichever root — the apply-time agent root
+// or a staged copy of it — it is handed. On success it returns the resolved
+// command file's fingerprint sourceInput; every rejection path returns
+// whatever sourceInput was already captured (nil unless the command file's
+// bytes were actually read).
+func parseStdioConnection(doc *frontmatter.Doc, root, path string, budget *stdioReadBudget, diags *diagnostics.List) (*Connection, *sourceInput, bool) {
 	commandRaw, err := doc.String("command")
 	if err != nil || commandRaw == "" {
 		diags.Errorf("mcp.command.invalid", path, "frontmatter field \"command\" must be a non-empty string")
@@ -667,24 +721,47 @@ func parseStdioConnection(doc *frontmatter.Doc, root, path string, diags *diagno
 		diags.Errorf("mcp.command.invalid", path, "the command %q %s", commandRaw, err)
 		return nil, nil, false
 	}
+	if relCommand == mcpAuthoredDir || strings.HasPrefix(relCommand, mcpAuthoredDir+"/") {
+		diags.Errorf("mcp.command.invalid", path,
+			"the command %q must not resolve inside %s/, which holds only declaration files (ADR 0026)", commandRaw, mcpAuthoredDir)
+		return nil, nil, false
+	}
 	info, err := os.Lstat(resolvedCommand)
 	if err != nil || !info.Mode().IsRegular() {
 		diags.Errorf("mcp.command.invalid", path,
 			"the command %q must name an existing regular file inside the agent root", commandRaw)
 		return nil, nil, false
 	}
-	commandBytes, err := os.ReadFile(resolvedCommand)
-	if err != nil {
-		diags.Errorf("mcp.command.invalid", path, "the command %q could not be read: %v", commandRaw, err)
+	if info.Size() > MaxStdioCommandBytes {
+		diags.Errorf("mcp.command.invalid", path,
+			"the command %q may contain at most %d bytes; found %d", commandRaw, MaxStdioCommandBytes, info.Size())
 		return nil, nil, false
 	}
-	// The fingerprint input path is the agent-root-relative slash path, not
-	// the absolute resolved one: the fingerprint must depend only on
-	// declared source, never on where a checkout happens to live on disk.
-	cmdInput := &sourceInput{
-		Path:       relCommand,
-		Content:    commandBytes,
-		Executable: info.Mode().Perm()&0o111 != 0,
+	if info.Mode().Perm()&0o111 == 0 {
+		diags.Warnf("mcp.command.not-executable", path,
+			"the command %q carries no executable bit; the harness will still be asked to run it, and will fail at startup if it truly cannot execute", commandRaw)
+	}
+
+	var cmdInput *sourceInput
+	if budget.exceeded(relCommand, info.Size()) {
+		// The aggregate stdio command budget is already spent: this and every
+		// later command file's bytes are never read into memory. The final
+		// mcp.stdio.bounds.exceeded diagnostic is still emitted exactly once,
+		// by checkStdioBudget, once every connection has been loaded.
+	} else {
+		commandBytes, err := os.ReadFile(resolvedCommand)
+		if err != nil {
+			diags.Errorf("mcp.command.invalid", path, "the command %q could not be read: %v", commandRaw, err)
+			return nil, nil, false
+		}
+		// The fingerprint input path is the agent-root-relative slash path,
+		// not the absolute resolved one: the fingerprint must depend only on
+		// declared source, never on where a checkout happens to live on disk.
+		cmdInput = &sourceInput{
+			Path:       relCommand,
+			Content:    commandBytes,
+			Executable: info.Mode().Perm()&0o111 != 0,
+		}
 	}
 
 	var args []string
@@ -728,9 +805,14 @@ func parseStdioConnection(doc *frontmatter.Doc, root, path string, diags *diagno
 				"the working directory %q must be an agent-root-relative path beginning with \"./\"; absolute paths are rejected", cwdRaw)
 			return nil, cmdInput, false
 		}
-		resolvedCwd, _, err := resolveInRoot(root, cwdRaw)
+		resolvedCwd, relCwd, err := resolveInRoot(root, cwdRaw)
 		if err != nil {
 			diags.Errorf("mcp.cwd.invalid", path, "the working directory %q %s", cwdRaw, err)
+			return nil, cmdInput, false
+		}
+		if relCwd == mcpAuthoredDir || strings.HasPrefix(relCwd, mcpAuthoredDir+"/") {
+			diags.Errorf("mcp.cwd.invalid", path,
+				"the working directory %q must not resolve inside %s/, which holds only declaration files (ADR 0026)", cwdRaw, mcpAuthoredDir)
 			return nil, cmdInput, false
 		}
 		if info, err := os.Lstat(resolvedCwd); err != nil || !info.IsDir() {
@@ -738,16 +820,16 @@ func parseStdioConnection(doc *frontmatter.Doc, root, path string, diags *diagno
 				"the working directory %q must name an existing directory inside the agent root", cwdRaw)
 			return nil, cmdInput, false
 		}
-		cwd = resolvedCwd
+		cwd = relCwd
 	}
 
 	conn := &Connection{
 		Kind:         ConnectionKindStdio,
-		Command:      resolvedCommand,
+		Command:      relCommand,
 		Args:         args,
 		Env:          env,
 		Cwd:          cwd,
-		commandBytes: int64(len(commandBytes)),
+		commandBytes: info.Size(),
 	}
 	return conn, cmdInput, true
 }
@@ -897,6 +979,29 @@ func validPlaceholderValue(value string) error {
 		return fmt.Errorf("may not reference ${%s}, which is reserved for plugin-scoped expansion", m[1])
 	}
 	return nil
+}
+
+// PlaceholderVar classifies one already-authored header or stdio env value
+// against the exact grammar validPlaceholderValue enforces at Load time, so
+// a harness driver that must decide how to forward such a value (for
+// example codex's name-only env_vars mechanism) never carries its own
+// regular expression that could silently drift from the one Load already
+// validated against. ok is false when value carries no ${VAR} reference at
+// all (including a plain literal with no "$"); when ok is true, v is the
+// referenced variable name and bare reports whether value is exactly
+// "${v}" with no literal prefix — the only shape a mechanism that forwards
+// by name alone, rather than by rendering the value itself, can represent.
+func PlaceholderVar(value string) (v string, bare bool, ok bool) {
+	if !strings.Contains(value, "$") {
+		return "", false, false
+	}
+	m := placeholderValuePattern.FindStringSubmatch(value)
+	if m == nil {
+		return "", false, false
+	}
+	v = m[1]
+	bare = value == "${"+v+"}"
+	return v, bare, true
 }
 
 // validAuthoredHeaders enforces valid HTTP header names and values with no

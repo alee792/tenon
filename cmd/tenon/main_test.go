@@ -1941,6 +1941,32 @@ func TestConnectionStatusReportsConfiguredAndMalformed(t *testing.T) {
 	}
 }
 
+// TestConnectionStatusReportsStdioNotRemote proves a type: stdio connection
+// is labeled target=stdio with its command, arg count, and cwd, never
+// mislabeled target=remote (SF4, post-review).
+func TestConnectionStatusReportsStdioNotRemote(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	writeFile(t, agent, "servers/bin/serve", []byte("#!/bin/sh\n"), 0o755)
+	writeFile(t, agent, "mcp/deployctl.md",
+		[]byte("---\ntype: stdio\ncommand: ./servers/bin/serve\nargs: [\"--flag\"]\n---\n"), 0o644)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"mcp", "status", agent}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("status exit %d: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "target=stdio") {
+		t.Fatalf("expected target=stdio, got: %s", out)
+	}
+	if strings.Contains(out, "target=remote") {
+		t.Fatalf("a stdio connection must never be labeled target=remote: %s", out)
+	}
+	if !strings.Contains(out, "command=servers/bin/serve") || !strings.Contains(out, "args=1") {
+		t.Fatalf("expected the command and arg count: %s", out)
+	}
+}
+
 // TestConnectionStatusByName proves the optional NAME argument filters to
 // one connection and fails when it does not exist.
 func TestConnectionStatusByName(t *testing.T) {

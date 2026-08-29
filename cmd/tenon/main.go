@@ -1449,6 +1449,15 @@ func runMCPStatus(args []string, stdout, stderr io.Writer) int {
 			}
 			continue
 		}
+		if c.Kind == agentproject.ConnectionKindStdio {
+			cwd := c.Cwd
+			if cwd == "" {
+				cwd = "."
+			}
+			fmt.Fprintf(stdout, "%s: target=stdio command=%s args=%d cwd=%s %s configured runtime=unchecked (%s)\n",
+				c.Name, c.Command, len(c.Args), cwd, contextState, c.SourcePath)
+			continue
+		}
 		fmt.Fprintf(stdout, "%s: target=remote transport=streamable-http url=%s headers=%d %s configured runtime=unchecked (%s)\n",
 			c.Name, c.URL, len(c.Headers), contextState, c.SourcePath)
 	}

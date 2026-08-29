@@ -292,9 +292,10 @@ func TestLoadConnectionsRejectsSSE(t *testing.T) {
 }
 
 // TestLoadValidStdioConnection proves the exact accepted stdio shape: the
-// command resolves to an absolute real path inside the agent root, args and
-// env are preserved literally, and cwd defaults to empty (rendering fills in
-// the agent root; see internal/claude and internal/codex).
+// command resolves to an agent-root-relative slash path proven to stay
+// inside the agent root, args and env are preserved literally, and cwd
+// defaults to empty (rendering fills in the agent root; see internal/claude
+// and internal/codex).
 func TestLoadValidStdioConnection(t *testing.T) {
 	root := writeAgent(t, "agent", validInstructions)
 	writeSkillFile(t, root, "servers/deployctl/bin/deployctl", []byte("#!/bin/sh\nexec cat\n"), 0o755)
@@ -312,9 +313,9 @@ func TestLoadValidStdioConnection(t *testing.T) {
 		t.Fatalf("connections = %+v", p.Connections)
 	}
 	c := p.Connections[0]
-	wantCommand := filepath.Join(root, "servers", "deployctl", "bin", "deployctl")
+	wantCommand := "servers/deployctl/bin/deployctl"
 	if c.Kind != ConnectionKindStdio || c.Command != wantCommand {
-		t.Fatalf("connection = %+v, want command %q", c, wantCommand)
+		t.Fatalf("connection = %+v, want the agent-root-relative command %q", c, wantCommand)
 	}
 	if len(c.Args) != 2 || c.Args[0] != "--flag" || c.Args[1] != "value $HOME" {
 		t.Fatalf("args = %+v", c.Args)
@@ -346,7 +347,7 @@ func TestLoadStdioConnectionWithCwd(t *testing.T) {
 	if p == nil || diags.HasErrors() {
 		t.Fatalf("unexpected diagnostics: %v", diags.All())
 	}
-	wantCwd := filepath.Join(root, "servers", "deployctl")
+	wantCwd := "servers/deployctl"
 	if p.Connections[0].Cwd != wantCwd {
 		t.Fatalf("cwd = %q, want %q", p.Connections[0].Cwd, wantCwd)
 	}
@@ -418,6 +419,63 @@ func TestLoadStdioCommandMatrix(t *testing.T) {
 		}
 		requireErrorID(t, diags, "mcp.command.invalid")
 	})
+
+	// A command resolving inside mcp/ is rejected even when it sits in a
+	// nested directory the plain mcp/ entry scan (which lists only immediate
+	// entries) never itself inspects: mcp/ is reserved for declaration files
+	// by the ADR, and the containment check enforces that independently of
+	// the entry scan (SF5, post-review).
+	t.Run("inside mcp/ (nested)", func(t *testing.T) {
+		root := setup(t)
+		writeSkillFile(t, root, "mcp/sub/evil.sh", []byte("#!/bin/sh\n"), 0o755)
+		writeConnectionFile(t, root, "srv.md", "---\ntype: stdio\ncommand: ./mcp/sub/evil.sh\n---\n")
+		_, diags, err := Load(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		requireErrorID(t, diags, "mcp.command.invalid")
+	})
+
+	// An intermediate path segment being a symlink is rejected exactly like a
+	// symlinked final segment: resolveInRoot walks every component, not only
+	// the last one.
+	t.Run("intermediate symlink", func(t *testing.T) {
+		root := setup(t)
+		if err := os.Symlink(filepath.Join(root, "servers", "bin"), filepath.Join(root, "link")); err != nil {
+			t.Fatal(err)
+		}
+		writeConnectionFile(t, root, "srv.md", "---\ntype: stdio\ncommand: ./link/serve\n---\n")
+		_, diags, err := Load(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		requireErrorID(t, diags, "mcp.command.invalid")
+	})
+
+	// A command file with no executable bit warns rather than being rejected
+	// (SF6, post-review): the ADR does not require the bit at validation
+	// time, only that the harness can be asked to run it.
+	t.Run("not executable warns but is accepted", func(t *testing.T) {
+		root := writeAgent(t, "agent", validInstructions)
+		writeSkillFile(t, root, "servers/bin/serve", []byte("#!/bin/sh\n"), 0o644)
+		writeConnectionFile(t, root, "srv.md", "---\ntype: stdio\ncommand: ./servers/bin/serve\n---\n")
+		p, diags, err := Load(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p == nil || diags.HasErrors() {
+			t.Fatalf("a non-executable command file must warn, not fail: %v", diags.All())
+		}
+		found := false
+		for _, d := range diags.All() {
+			if d.ID == "mcp.command.not-executable" && d.Severity == diagnostics.Warning {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("expected mcp.command.not-executable warning, got %v", diags.All())
+		}
+	})
 }
 
 // --- Stdio cwd matrix -------------------------------------------------------
@@ -441,6 +499,7 @@ func TestLoadStdioCwdMatrix(t *testing.T) {
 		"not-a-dir":    {"./servers/bin/serve", false},
 		"missing":      {"./servers/does-not-exist", false},
 		"bare (no ./)": {"servers/work", false},
+		"inside mcp/":  {"./mcp", false},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -460,6 +519,22 @@ func TestLoadStdioCwdMatrix(t *testing.T) {
 			}
 		})
 	}
+
+	// An intermediate path segment being a symlink is rejected exactly like
+	// it is for a command (resolveInRoot walks every component).
+	t.Run("symlinked cwd", func(t *testing.T) {
+		root := setup(t)
+		if err := os.Symlink(filepath.Join(root, "servers", "work"), filepath.Join(root, "link")); err != nil {
+			t.Fatal(err)
+		}
+		writeConnectionFile(t, root, "srv.md",
+			"---\ntype: stdio\ncommand: ./servers/bin/serve\ncwd: ./link\n---\n")
+		_, diags, err := Load(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		requireErrorID(t, diags, "mcp.cwd.invalid")
+	})
 }
 
 // --- Stdio env grammar spot-check (full matrix already covered for headers)

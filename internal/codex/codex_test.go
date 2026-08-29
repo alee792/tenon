@@ -469,10 +469,19 @@ func stdioConnectionProject() *agentproject.Project {
 			{
 				Kind:    agentproject.ConnectionKindStdio,
 				Name:    "deployctl",
-				Command: "/src/my-agent/servers/deployctl/bin/deployctl",
+				Command: "servers/deployctl/bin/deployctl",
 				Args:    []string{"--flag"},
 				Env: map[string]string{
-					"MODE":   "prod",
+					"MODE": "prod",
+					// A bare ${VAR} reference whose env key matches the
+					// referenced variable's name is forwarded by name only
+					// (Blocker 1, post-review): codex forwards the ambient
+					// ACME_TOKEN, never the value tenon read.
+					"ACME_TOKEN": "${ACME_TOKEN}",
+					// A bare ${VAR} reference whose env key does NOT match
+					// the referenced variable cannot be forwarded: codex's
+					// env_vars mechanism forwards only the ambient value
+					// under its own name, and cannot rename it to TOKEN.
 					"TOKEN":  "${ACME_TOKEN}",
 					"PREFIX": "Bearer ${ACME_TOKEN}",
 				},
@@ -482,10 +491,15 @@ func stdioConnectionProject() *agentproject.Project {
 	}
 }
 
-// TestStdioConnectionRendersForCodex proves command/args/cwd render directly,
-// a literal env value renders verbatim, a bare ${VAR} reference is forwarded
-// by name only through env_vars, and a prefixed reference is reported
-// unforwardable and omitted rather than rendered as a literal nobody expands.
+// TestStdioConnectionRendersForCodex proves command/args/cwd render directly
+// under the agent root, a literal env value renders verbatim, a bare ${VAR}
+// reference whose env key matches the referenced variable is forwarded by
+// name only through env_vars (Blocker 1, post-review), a bare ${VAR}
+// reference whose env key does NOT match the referenced variable cannot be
+// forwarded (codex cannot rename a forwarded variable) and is reported and
+// omitted rather than silently forwarding the wrong ambient value, and a
+// prefixed reference is likewise reported unforwardable and omitted rather
+// than rendered as a literal nobody expands.
 func TestStdioConnectionRendersForCodex(t *testing.T) {
 	p := stdioConnectionProject()
 	diags := &diagnostics.List{}
@@ -512,23 +526,23 @@ func TestStdioConnectionRendersForCodex(t *testing.T) {
 	if !strings.Contains(config, `"MODE" = "prod"`) {
 		t.Fatalf("a literal env value must render verbatim: %s", config)
 	}
-	if strings.Contains(config, "ACME_TOKEN\" = ") || strings.Contains(config, `"TOKEN" = "${ACME_TOKEN}"`) {
-		t.Fatalf("a bare ${VAR} reference must never render its literal text into env: %s", config)
+	if strings.Contains(config, `"TOKEN"`) {
+		t.Fatalf("a bare ${VAR} reference whose key does not match the referenced variable must never render, forwarded or literal: %s", config)
 	}
-	if !strings.Contains(config, `env_vars = ["TOKEN"]`) {
-		t.Fatalf("a bare ${VAR} reference must be forwarded by name only through env_vars: %s", config)
+	if !strings.Contains(config, `env_vars = ["ACME_TOKEN"]`) {
+		t.Fatalf("a bare ${VAR} reference whose key matches the referenced variable must be forwarded by name only through env_vars: %s", config)
 	}
 	if strings.Contains(config, "PREFIX") {
 		t.Fatalf("a prefixed ${VAR} reference must be omitted entirely, not rendered: %s", config)
 	}
-	found := false
+	warnings := 0
 	for _, d := range diags.All() {
 		if d.ID == "mcp.env.not-honored" && d.Severity == diagnostics.Warning {
-			found = true
+			warnings++
 		}
 	}
-	if !found {
-		t.Fatalf("expected mcp.env.not-honored warning, got %v", diags.All())
+	if warnings != 2 {
+		t.Fatalf("expected 2 mcp.env.not-honored warnings (TOKEN and PREFIX), got %d: %v", warnings, diags.All())
 	}
 }
 

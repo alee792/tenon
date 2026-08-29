@@ -100,6 +100,24 @@ type PluginServer struct {
 	// URL and Headers are the remote values, copied literally.
 	URL     string
 	Headers map[string]string
+	// Vendored reports whether this server was loaded from a real vendored
+	// plugins/<Plugin>/ directory under the agent root, as opposed to a
+	// plugin reference's resolved cache tree (ADR 0026 "plugin acquisition
+	// by pointer and pin"). Only a vendored plugin's root and any
+	// plugin-relative stdio command move when the agent source is staged to
+	// a different absolute location (Blocker 2, post-review): a cache tree
+	// lives at a fixed, non-staged location regardless of where the agent
+	// source itself is staged, so ResolveServers only re-anchors PluginRoot
+	// and RelCommand when Vendored is true.
+	Vendored bool
+	// RelCommand is the plugin-root-relative slash path of a plugin-relative
+	// ("./...") stdio command, set only when Vendored is true and Command
+	// was declared that way; empty for a bare PATH-resolved command name and
+	// for every non-vendored server. ResolveServers joins it against the
+	// staging-time plugin root instead of trusting Command's Load-time
+	// absolute value, exactly like Connection.Command for authored stdio
+	// connections.
+	RelCommand string
 }
 
 // ResolvedServer is one accepted server with ${PLUGIN_ROOT} and
@@ -130,33 +148,52 @@ func PluginDataDir(workspace, agent, plugin string) string {
 	return filepath.Join(workspace, ".tenon", "plugin-data", agent, plugin)
 }
 
-// ResolveServers expands every accepted server for one workspace and agent,
-// supplying both variables to each stdio server's environment as well.
-func ResolveServers(servers []PluginServer, workspace, agent string) []ResolvedServer {
+// ResolveServers expands every accepted server for one agent root, workspace,
+// and agent, supplying both variables to each stdio server's environment as
+// well. root is the agent source directory generation is rendering
+// against — the apply-time agent root during an ordinary apply, or a staged
+// copy of it during staging (Blocker 2, post-review) — and is used only for
+// a Vendored server: its PluginRoot and any plugin-relative stdio Command
+// were captured once at Load time against whatever root Load happened to
+// run against, so a vendored plugin's identity is recomputed here against
+// root instead, exactly mirroring how an authored stdio Connection's Command
+// and Cwd are absolutized at render time rather than trusted from Load. A
+// non-vendored server (a plugin reference's resolved cache tree) keeps its
+// Load-time PluginRoot and Command unchanged: the cache lives at a fixed
+// location independent of where the agent source itself is staged.
+func ResolveServers(servers []PluginServer, root, workspace, agent string) []ResolvedServer {
 	out := make([]ResolvedServer, 0, len(servers))
 	for _, s := range servers {
+		pluginRoot := s.PluginRoot
+		command := s.Command
+		if s.Vendored {
+			pluginRoot = filepath.Join(root, "plugins", s.Plugin)
+			if s.RelCommand != "" {
+				command = filepath.Join(pluginRoot, filepath.FromSlash(s.RelCommand))
+			}
+		}
 		data := PluginDataDir(workspace, agent, s.Plugin)
 		r := ResolvedServer{
 			Name:       s.Name,
 			SourcePath: s.SourcePath,
 			Transport:  s.Transport,
-			Command:    s.Command,
-			Cwd:        expandPluginVars(s.Cwd, s.PluginRoot, data),
+			Command:    command,
+			Cwd:        expandPluginVars(s.Cwd, pluginRoot, data),
 			URL:        s.URL,
 			Headers:    s.Headers,
 		}
 		for _, arg := range s.Args {
-			r.Args = append(r.Args, expandPluginVars(arg, s.PluginRoot, data))
+			r.Args = append(r.Args, expandPluginVars(arg, pluginRoot, data))
 		}
 		if s.Transport == TransportStdio {
 			r.Env = map[string]string{}
 			for _, key := range sortedStringKeys(s.Env) {
-				r.Env[key] = expandPluginVars(s.Env[key], s.PluginRoot, data)
+				r.Env[key] = expandPluginVars(s.Env[key], pluginRoot, data)
 			}
 			// Tenon's own two variables are always supplied, and always with
 			// tenon's values: they are the contract the package is written
 			// against, not author-overridable environment.
-			r.Env["PLUGIN_ROOT"] = s.PluginRoot
+			r.Env["PLUGIN_ROOT"] = pluginRoot
 			r.Env["PLUGIN_DATA"] = data
 		}
 		r.PlaceholderField, r.Placeholder = firstPlaceholder(r)
@@ -253,7 +290,7 @@ func mergePluginServers(candidates []PluginServer, diags *diagnostics.List) []Pl
 // missing document is normal. Read bytes join the fingerprint even when the
 // document turns out malformed, together with the content and executable
 // intent of every accepted plugin-relative command.
-func loadPluginMCP(pluginRoot, authoredRoot, pluginName string, diags *diagnostics.List) ([]PluginServer, []sourceInput) {
+func loadPluginMCP(pluginRoot, authoredRoot, pluginName string, vendored bool, diags *diagnostics.List) ([]PluginServer, []sourceInput) {
 	path := authoredRoot + "/mcp.json"
 	full := filepath.Join(pluginRoot, "mcp.json")
 
@@ -318,7 +355,7 @@ func loadPluginMCP(pluginRoot, authoredRoot, pluginName string, diags *diagnosti
 	var servers []PluginServer
 	commands := map[string]bool{}
 	for _, name := range sortedKeys(declared) {
-		server, commandInput, ok := loadPluginServer(name, declared[name], path, pluginName, realRoot, diags)
+		server, commandInput, ok := loadPluginServer(name, declared[name], path, pluginName, realRoot, vendored, diags)
 		if !ok {
 			continue
 		}
@@ -333,7 +370,7 @@ func loadPluginMCP(pluginRoot, authoredRoot, pluginName string, diags *diagnosti
 
 // loadPluginServer validates one declared server. Every violation warns at
 // the declaring document's authored path and skips exactly this server.
-func loadPluginServer(name string, raw any, path, pluginName, realRoot string, diags *diagnostics.List) (PluginServer, *sourceInput, bool) {
+func loadPluginServer(name string, raw any, path, pluginName, realRoot string, vendored bool, diags *diagnostics.List) (PluginServer, *sourceInput, bool) {
 	invalid := func(format string, args ...any) (PluginServer, *sourceInput, bool) {
 		diags.Warnf("plugin.mcp.server.invalid", path,
 			"MCP server %q is skipped: "+format, append([]any{name}, args...)...)
@@ -385,6 +422,7 @@ func loadPluginServer(name string, raw any, path, pluginName, realRoot string, d
 		PluginRoot: realRoot,
 		SourcePath: path,
 		Transport:  transport,
+		Vendored:   vendored,
 	}
 	if transport == TransportHTTP {
 		remote, ok := declaration["url"].(string)
@@ -435,6 +473,7 @@ func loadPluginServer(name string, raw any, path, pluginName, realRoot string, d
 			Executable: info.Mode().Perm()&0o111 != 0,
 		}
 		server.Command = resolved
+		server.RelCommand = rel
 	case strings.ContainsAny(command, `/\`) || command == "." || command == "..":
 		return invalid("a command is either a bare executable name or a plugin-relative \"./\" path; found %q", command)
 	case containsPlaceholder(command):

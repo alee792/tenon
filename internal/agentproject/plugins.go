@@ -148,6 +148,19 @@ func loadPlugins(root string, budget *skillSetBudget, diags *diagnostics.List) (
 				"each plugins entry must be a real plugin directory or a plugin reference file (<name>.md)")
 			continue
 		}
+		// The derived name becomes the plugin storage name (docs/product-spec.md
+		// "plugins/<storage-name>/"), which in turn becomes one path segment
+		// under PluginDataDir. Validating it against the component grammar here
+		// — the same lowercase-hyphenated-words shape skills.go enforces for a
+		// skill directory name — closes a real escape: an unvalidated
+		// "plugins/....md" reference derives the name "..", which
+		// filepath.Join's cleaning would walk PluginDataDir's per-plugin data
+		// directory straight out of its intended tree (#52 review finding 2).
+		if len(name) > 64 || !skillNamePattern.MatchString(name) {
+			diags.Errorf("plugin.entry.invalid", entryPath,
+				"a plugin storage name must be 1-64 characters of lowercase hyphenated words (letters, digits, and single internal hyphens): %q", name)
+			continue
+		}
 		count++
 		if count > MaxPluginEntries {
 			if !truncated {
@@ -178,7 +191,7 @@ func loadPlugins(root string, budget *skillSetBudget, diags *diagnostics.List) (
 		if f.isRef {
 			pluginCandidates, pluginServers, pluginInputs, _ = loadPluginReference(dir, f.fileName, budget, diags)
 		} else {
-			pluginCandidates, pluginServers, pluginInputs = loadPlugin(filepath.Join(dir, f.fileName), "plugins/"+f.fileName, f.fileName, budget, diags)
+			pluginCandidates, pluginServers, pluginInputs = loadPlugin(filepath.Join(dir, f.fileName), "plugins/"+f.fileName, f.fileName, true, budget, diags)
 		}
 		candidates = append(candidates, pluginCandidates...)
 		servers = append(servers, pluginServers...)
@@ -195,8 +208,14 @@ func loadPlugins(root string, budget *skillSetBudget, diags *diagnostics.List) (
 // file's resolved cache tree — and authoredRoot is the stable path every
 // diagnostic and fingerprint entry reports, which for a resolved reference is
 // the synthetic "plugins/<name>.md -> <rev>" form rather than a real
-// filesystem path.
-func loadPlugin(pluginRoot, authoredRoot, pluginName string, budget *skillSetBudget, diags *diagnostics.List) ([]pluginSkill, []PluginServer, []sourceInput) {
+// filesystem path. vendored is true only for a real plugins/<dirName>/
+// directory under the agent root, never for a resolved reference's cache
+// tree; it is threaded down to every declared MCP server (PluginServer.
+// Vendored) so ResolveServers knows which servers must be re-anchored
+// against the agent root staging hands it at generation time, rather than
+// trusting the absolute path captured here at Load time (Blocker 2,
+// post-review).
+func loadPlugin(pluginRoot, authoredRoot, pluginName string, vendored bool, budget *skillSetBudget, diags *diagnostics.List) ([]pluginSkill, []PluginServer, []sourceInput) {
 	valid, manifestInput := loadPluginManifest(pluginRoot, authoredRoot, diags)
 	var inputs []sourceInput
 	if manifestInput != nil {
@@ -210,7 +229,7 @@ func loadPlugin(pluginRoot, authoredRoot, pluginName string, budget *skillSetBud
 
 	skillsDir := filepath.Join(pluginRoot, "skills")
 	candidates := loadPluginSkills(skillsDir, authoredRoot+"/skills", budget, diags)
-	servers, mcpInputs := loadPluginMCP(pluginRoot, authoredRoot, pluginName, diags)
+	servers, mcpInputs := loadPluginMCP(pluginRoot, authoredRoot, pluginName, vendored, diags)
 	inputs = append(inputs, mcpInputs...)
 	return candidates, servers, inputs
 }
@@ -541,7 +560,7 @@ func loadPluginReference(dir, filename string, budget *skillSetBudget, diags *di
 	}
 
 	authoredRoot := fmt.Sprintf("plugins/%s.md -> %s", name, rev)
-	candidates, servers, pluginInputs := loadPlugin(cachedRoot, authoredRoot, name, budget, diags)
+	candidates, servers, pluginInputs := loadPlugin(cachedRoot, authoredRoot, name, false, budget, diags)
 	inputs = append(inputs, pluginInputs...)
 	return candidates, servers, inputs, name
 }

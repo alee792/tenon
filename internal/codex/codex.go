@@ -3,7 +3,8 @@
 package codex
 
 import (
-	"regexp"
+	"fmt"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -26,7 +27,7 @@ func (Driver) Harness() string { return "codex" }
 // inserted ownership marker line. A recognized vendor field Codex does not
 // document honoring is copied unchanged and warned.
 func (Driver) Generate(p *agentproject.Project, target apply.Target, diags *diagnostics.List) []apply.GeneratedFile {
-	resolved := agentproject.ResolveServers(p.PluginServers, target.Workspace, p.Name)
+	resolved := agentproject.ResolveServers(p.PluginServers, p.Root, target.Workspace, p.Name)
 	for _, s := range resolved {
 		if s.Transport == agentproject.TransportHTTP && len(s.Headers) > 0 {
 			diags.Warnf("plugin.mcp.header.not-honored", s.SourcePath,
@@ -40,9 +41,9 @@ func (Driver) Generate(p *agentproject.Project, target apply.Target, diags *diag
 		}
 		if c.Kind == agentproject.ConnectionKindStdio {
 			_, _, unforwardable := splitStdioEnv(c.Env)
-			for _, name := range unforwardable {
+			for _, u := range unforwardable {
 				diags.Warnf("mcp.env.not-honored", c.SourcePath,
-					"the env %q for connection %q is not emitted into Codex project configuration: its value carries a literal prefix before the ${VAR} reference, which codex's name-only env_vars forwarding cannot represent; the server may fail without it", name, c.Name)
+					"the env %q for connection %q is not emitted into Codex project configuration: %s", u.Name, c.Name, u.Reason)
 			}
 		}
 	}
@@ -172,12 +173,12 @@ func mcpConfig(executable, source, workspace, model string, servers []agentproje
 	for _, c := range sortedConnections {
 		switch c.Kind {
 		case agentproject.ConnectionKindStdio:
-			cwd := c.Cwd
-			if cwd == "" {
-				cwd = source
+			cwd := source
+			if c.Cwd != "" {
+				cwd = filepath.Join(source, filepath.FromSlash(c.Cwd))
 			}
 			b.WriteString("\n[mcp_servers." + c.Name + "]\n")
-			b.WriteString("command = " + generated.TOMLString(c.Command) + "\n")
+			b.WriteString("command = " + generated.TOMLString(filepath.Join(source, filepath.FromSlash(c.Command))) + "\n")
 			if len(c.Args) > 0 {
 				b.WriteString("args = " + tomlArray(c.Args) + "\n")
 			}
@@ -222,27 +223,38 @@ func mcpConfig(executable, source, workspace, model string, servers []agentproje
 	return []byte(b.String())
 }
 
-// bareVarRefPattern matches a stdio env value that is exactly one ${VAR}
-// reference with no literal prefix or suffix — the only shape codex's
-// name-only env_vars forwarding can represent.
-var bareVarRefPattern = regexp.MustCompile(`^\$\{[A-Z_][A-Z0-9_]*\}$`)
+// unforwardableEnv names one stdio env entry codex's configuration cannot
+// carry, together with the exact reason (Blocker 1, post-review): reported
+// verbatim in the mcp.env.not-honored warning so an author sees precisely
+// why the ambient value never reaches the server.
+type unforwardableEnv struct {
+	Name, Reason string
+}
 
 // splitStdioEnv partitions one accepted stdio connection's declared env
-// values for Codex rendering (ADR 0026, issue #50). Codex's configuration
-// format documents no ${VAR} expansion of its own (the same gap ADR 0026's
-// acceptance sketch records for headers), so a value is handled one of three
-// ways: a literal with no "$" renders directly into the env inline table; a
-// value that is exactly one ${VAR} reference with no literal prefix is
-// forwarded by NAME ONLY through codex's env_vars mechanism — the same
-// mechanism an installed connection's required ambient name already uses
-// (see mcpConfig's desc.RequiredEnv handling) — so the ambient value itself
-// is still never read, copied, or rendered; a value carrying a literal
-// prefix before its ${VAR} reference (for example "Bearer ${TOKEN}") cannot
-// be represented that way, since env_vars can forward only the bare ambient
-// value under its own name, never a value with a prefix spliced onto it, so
-// it is reported unforwardable rather than silently rendering a literal
-// "${TOKEN}" no shell will ever expand.
-func splitStdioEnv(env map[string]string) (literal map[string]string, envVars, unforwardable []string) {
+// values for Codex rendering (ADR 0026, issue #50), reusing
+// agentproject.PlaceholderVar rather than its own pattern so the shape it
+// checks can never silently drift from the one Load already validated
+// against. Codex's configuration format documents no ${VAR} expansion of its
+// own (the same gap ADR 0026's acceptance sketch records for headers), so a
+// value is handled one of three ways: a literal with no "$" renders directly
+// into the env inline table; a value that is exactly one ${VAR} reference
+// with no literal prefix, where the referenced variable's name is identical
+// to the env key itself, is forwarded by NAME ONLY through codex's env_vars
+// mechanism — the same mechanism an installed connection's required ambient
+// name already uses (see mcpConfig's desc.RequiredEnv handling) — so the
+// ambient value itself is still never read, copied, or rendered under a
+// different name (Blocker 1: codex has no way to rename a forwarded
+// variable, so env_vars=["KEY"] always forwards the ambient KEY, never the
+// value of a same-named variable referenced by a differently named key). A
+// value carrying a literal prefix before its ${VAR} reference (for example
+// "Bearer ${TOKEN}") cannot be represented that way at all, since env_vars
+// can forward only the bare ambient value under its own name, never a value
+// with a prefix spliced onto it; either shape is reported unforwardable
+// rather than silently rendering a literal "${TOKEN}" no shell will ever
+// expand, or silently forwarding the wrong ambient variable under the env
+// key's name.
+func splitStdioEnv(env map[string]string) (literal map[string]string, envVars []string, unforwardable []unforwardableEnv) {
 	keys := make([]string, 0, len(env))
 	for k := range env {
 		keys = append(keys, k)
@@ -250,16 +262,21 @@ func splitStdioEnv(env map[string]string) (literal map[string]string, envVars, u
 	slices.Sort(keys)
 	for _, name := range keys {
 		value := env[name]
+		v, bare, ok := agentproject.PlaceholderVar(value)
 		switch {
-		case !strings.Contains(value, "$"):
+		case !ok:
 			if literal == nil {
 				literal = map[string]string{}
 			}
 			literal[name] = value
-		case bareVarRefPattern.MatchString(value):
+		case !bare:
+			unforwardable = append(unforwardable, unforwardableEnv{Name: name,
+				Reason: "its value carries a literal prefix before the ${VAR} reference, which codex's name-only env_vars forwarding cannot represent; the server may fail without it"})
+		case v == name:
 			envVars = append(envVars, name)
 		default:
-			unforwardable = append(unforwardable, name)
+			unforwardable = append(unforwardable, unforwardableEnv{Name: name,
+				Reason: fmt.Sprintf("its value references ${%s}, but codex's name-only env_vars forwarding can only forward the ambient variable under its own name; codex cannot rename a forwarded variable, so the env key would need to be %q for this to forward; the server may fail without it", v, v)})
 		}
 	}
 	return literal, envVars, unforwardable

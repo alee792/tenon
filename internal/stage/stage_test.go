@@ -210,6 +210,63 @@ func TestStageFinalPathCorrectness(t *testing.T) {
 	}
 }
 
+// TestStageStdioConnectionEmbedsFinalAgentSourcePath proves an authored
+// type: stdio connection's command renders under the staged final agent
+// source path in both harnesses' generated configuration — never the
+// physical build-machine staging directory (Blocker 2, post-review) — and
+// that the copied command file keeps its executable bit in the staged tree.
+func TestStageStdioConnectionEmbedsFinalAgentSourcePath(t *testing.T) {
+	agent := writeAgent(t, "stdio-agent")
+	if err := os.MkdirAll(filepath.Join(agent, "servers", "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agent, "servers", "bin", "serve"), []byte("#!/bin/sh\nexec cat\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(agent, "mcp"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agent, "mcp", "deployctl.md"),
+		[]byte("---\ntype: stdio\ncommand: ./servers/bin/serve\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	exe := fakeExecutable(t)
+
+	wantCommand := finalAgentsRoot + "/stdio-agent/servers/bin/serve"
+
+	outClaude := stageWith(t, agent, "claude", exe)
+	mcpJSON, err := os.ReadFile(filepath.Join(outClaude, "workspace", ".mcp.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(mcpJSON), wantCommand) {
+		t.Fatalf(".mcp.json must embed the staged final agent-source command path %s: %s", wantCommand, mcpJSON)
+	}
+	if strings.Contains(string(mcpJSON), outClaude) {
+		t.Fatalf(".mcp.json must never embed the physical staging directory %s: %s", outClaude, mcpJSON)
+	}
+	stagedCommand := filepath.Join(outClaude, filepath.FromSlash(strings.TrimPrefix(wantCommand, "/")))
+	info, err := os.Stat(stagedCommand)
+	if err != nil {
+		t.Fatalf("staged command file must exist at the final agent-source path: %v", err)
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		t.Fatalf("staged command file must keep its executable bit: mode %v", info.Mode())
+	}
+
+	outCodex := stageWith(t, agent, "codex", exe)
+	configTOML, err := os.ReadFile(filepath.Join(outCodex, "workspace", ".codex", "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(configTOML), wantCommand) {
+		t.Fatalf("config.toml must embed the staged final agent-source command path %s: %s", wantCommand, configTOML)
+	}
+	if strings.Contains(string(configTOML), outCodex) {
+		t.Fatalf("config.toml must never embed the physical staging directory %s: %s", outCodex, configTOML)
+	}
+}
+
 func TestStageCredentialAbsent(t *testing.T) {
 	t.Setenv("FAKE_SECRET", "CONSPICUOUS")
 	agent := writeAgent(t, "clean-agent")

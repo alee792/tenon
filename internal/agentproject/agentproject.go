@@ -381,8 +381,23 @@ type sourceInput struct {
 // itself is unchanged by having a caller for the per-file detail.
 func computeFingerprint(inputs []sourceInput) ([]FingerprintEntry, string) {
 	inputs = slices.Clone(inputs)
+	// The sort key is total — Path, then Executable — as a belt-and-braces
+	// guard: two inputs sharing one Path but disagreeing on Executable
+	// (which should never arise once every producer enforces the ADR 0026
+	// mcp/ containment rule) would otherwise leave slices.SortFunc's order
+	// between them unspecified, which would make the fingerprint hash
+	// nondeterministic across otherwise-identical runs.
 	slices.SortFunc(inputs, func(a, b sourceInput) int {
-		return strings.Compare(a.Path, b.Path)
+		if c := strings.Compare(a.Path, b.Path); c != 0 {
+			return c
+		}
+		if a.Executable == b.Executable {
+			return 0
+		}
+		if !a.Executable {
+			return -1
+		}
+		return 1
 	})
 	h := sha256.New()
 	entries := make([]FingerprintEntry, 0, len(inputs))
