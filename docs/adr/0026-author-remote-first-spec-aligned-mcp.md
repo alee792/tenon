@@ -1,9 +1,10 @@
 # ADR 0026: Author remote-first, spec-aligned MCP servers
 
-- Status: accepted for the MCP authoring decision. The plugin-acquisition
-  and composition-policy sections are marked below as direction — binding
-  appetite, not architecture (tenet 4) — each with its own acceptance
-  trigger and falsifier
+- Status: accepted. The MCP authoring decision was accepted with this
+  record; the two sections it opened as direction — binding appetite, not
+  architecture (tenet 4) — have since met their own acceptance triggers:
+  plugin acquisition is accepted (issue #58) and composition policy is
+  accepted (issue #53's slice landed)
 - Amends: [ADR 0016](0016-author-generic-native-mcp-connections.md) — its
   authored format is replaced: the directory, the field vocabulary, the
   target discriminators, and the credential-free restriction go, while its
@@ -16,9 +17,10 @@
   [ADR 0010](0010-map-plugin-mcp-through-native-harness-configuration.md)
   — its "exact name collisions are skipped with a warning" outcome changes
   for the author↔plugin case, where the authored server wins with a
-  warning, and a masking form suppresses a plugin-declared server outright
-- Proposes amending:
-  [ADR 0017](0017-vendor-components-manually.md) (§ plugin acquisition)
+  warning, and a masking form suppresses a plugin-declared server outright;
+  [ADR 0017](0017-vendor-components-manually.md) (§ plugin acquisition) —
+  its manual-vendoring-only acquisition journey gains pointer-and-pin
+  plugin references, in effect as of issue #58
 - Reuses:
   [ADR 0013](0013-bound-authored-projects-with-aggregate-budgets.md)
 - Re-points:
@@ -203,8 +205,10 @@ but pointer-and-pin is no longer binding appetite alone.
 
 `plugins/<name>.md` carrying `source` plus a full commit `rev` declares a
 plugin by pointer; a directory under `plugins/` continues to mean a
-vendored plugin, and the two forms colliding on a name fails closed. An
-explicitly online `tenon plugin fetch` resolves pointers into the
+vendored plugin, and a directory beside a reference of the same name is
+that reference's pinned content materialized in place — one plugin, loaded
+from the tree rather than from the cache (issue #58). An explicitly online
+`tenon plugin fetch` resolves pointers into the
 content-addressed cache; `tenon apply` stays fully offline and fails,
 naming the fetch command, when pinned content is absent. Vendoring intact
 remains the fallback. The pinned digest joins the project fingerprint, so
@@ -217,7 +221,7 @@ Terminology: "pointer" here means a *plugin reference file* — the
 to ADR 0023's relay pointer, which is a generated harness command line;
 where the two records sit near each other, prefer "plugin reference file".
 
-This direction proposes amending ADR 0017, which decided that manual
+This record amends ADR 0017, which decided that manual
 vendoring is the only acquisition journey — no acquisition commands, no
 dependency lock file, no network acquisition — and required a new ADR with
 evidence before any of it returns. The evidence this record offers is that
@@ -235,14 +239,14 @@ file and per-load drift checks — is not what this proposes: there is no
 resolution, no transitive graph, and no lock file, only a file the author
 wrote and a digest the fingerprint already covers.
 
-**Composition policy splits by relationship (direction).** *Direction —
-binding appetite, not architecture (tenet 4).* Acceptance trigger: issue
-#53's implementation slice, whose own acceptance completes this section.
-Falsifier: if author-wins masking proves incompatible with the harnesses'
-native precedence — if tenon cannot make the authored server the one the
-harness actually starts, without claiming enforcement it does not have —
-the direction is rejected with reasons and author↔plugin returns to
-failing closed.
+**Composition policy splits by relationship — accepted.** *Was a
+direction — binding appetite, not architecture (tenet 4) — pending its
+acceptance trigger.* Issue #53's implementation slice landed author-wins
+shadowing, the masking form, and the dangling-`override` refusal, and its
+acceptance completes the trigger this section named. The falsifier it
+carried — author-wins masking proving incompatible with the harnesses'
+native precedence — did not fire: tenon renders the authored server as the
+one the harness starts, and claims no enforcement beyond that.
 
 Plugin↔plugin server-name collisions remain ADR 0010's
 first-wins-with-warning, unchanged. Author↔plugin becomes a hierarchy: the

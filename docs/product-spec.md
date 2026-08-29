@@ -149,8 +149,14 @@ resolves a reference into the owner-only, content-addressed plugin cache;
 matches its recorded digest. A resolved reference loads through the exact
 same manifest, `skills/`, and `mcp.json` validation a vendored directory
 uses, and its resolved bytes join the project fingerprint exactly as
-vendored bytes do. A reference and a vendored directory sharing a name fail
-the project before any workspace mutation. `tenon plugin update AGENT NAME
+vendored bytes do. A directory sharing a reference's name is not a
+collision but that reference's pinned content materialized in place — the
+shape `tenon stage` publishes — and it takes precedence over the cache, so
+the same reference loads identically with no cache and no network; because
+there is no `git` there to re-check the pin, the materialized bytes are
+trusted exactly as all other authored source is, with the project
+fingerprint (and so `tenon stage verify` and drift detection) as their
+integrity check. `tenon plugin update AGENT NAME
 --rev REV` fetches the new revision, prints a bounded added/removed/changed
 component-path diff against the currently pinned revision, and only then
 rewrites the reference file's `rev`; `tenon plugin status` reports each
