@@ -170,11 +170,10 @@ only the 8 KiB declaration files: the declaration points at the bytes, it
 does not carry them. Those bytes are ordinary agent source — they join the
 project fingerprint and stage byte-for-byte with executable intent
 preserved, the same contract skill resources already have — so the git
-repository is the pin and no package store participates. What no record
-yet bounds is the aggregate byte budget for tree-resident server
-executables. That is an open item, assigned explicitly to the #50 slice:
-#50's acceptance must include a recorded bound, and the slice is not
-accepted without one.
+repository is the pin and no package store participates. Issue #50 records
+the aggregate byte budget this left open: at most 16 declared `type: stdio`
+servers per agent, and at most 64 MiB combined across every distinct
+resolved command file.
 
 **Acquired third-party stdio is deferred, not rejected.** ADR 0014's store
 as the *authoring* path for a third-party server, and ADR 0015's curated

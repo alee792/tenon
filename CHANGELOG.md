@@ -49,15 +49,14 @@ The first release, v0.1.0, ships the core described in
   whose values may end with exactly one `${VAR}` environment-variable
   reference (never resolved by tenon, and never `${PLUGIN_ROOT}`/
   `${PLUGIN_DATA}`); an installed connection now declares `type: installed`.
-  `type: sse` fails as a deprecated transport, and `type: stdio` fails as not
-  yet supported in authored files (repo-relative stdio is issue #50). The
-  credential-free-only restriction on remote targets is dropped — an
-  OAuth-requiring endpoint is fine to declare, since the harness alone
-  discovers and performs authentication. A leftover `connections/` directory
-  fails closed with a migration diagnostic (`mcp.migration.connections-dir`)
-  naming `mcp/`, rather than being silently ignored. Declared headers render
-  verbatim into Claude's `.mcp.json`; Codex, whose generated configuration
-  has no header support, warns and omits them
+  `type: sse` fails as a deprecated transport (repo-relative `type: stdio`
+  landed separately, below, issue #50). The credential-free-only restriction
+  on remote targets is dropped — an OAuth-requiring endpoint is fine to
+  declare, since the harness alone discovers and performs authentication. A
+  leftover `connections/` directory fails closed with a migration diagnostic
+  (`mcp.migration.connections-dir`) naming `mcp/`, rather than being silently
+  ignored. Declared headers render verbatim into Claude's `.mcp.json`; Codex,
+  whose generated configuration has no header support, warns and omits them
   (`mcp.header.not-honored`). The CLI verb renames from `connection` to
   `mcp`: `tenon mcp add|status|remove` replace `tenon connection
   add|status|remove`, and `add` gained a repeatable `--header 'Name: Value'`
@@ -65,6 +64,33 @@ The first release, v0.1.0, ships the core described in
   (`connection.entry.invalid` → `mcp.entry.invalid`, and so on), plus new
   identifiers `mcp.transport.invalid`, `mcp.header.invalid`, and
   `mcp.migration.connections-dir`.
+
+- Repo-relative `type: stdio` authored MCP servers (ADR 0026, issue #50): an
+  `mcp/<name>.md` may now declare `command` (agent-root-relative, `./…`,
+  containment-validated the way a plugin-relative command is but anchored at
+  the agent root — a bare PATH-resolved name or an absolute or escaping path
+  is refused before workspace mutation), plus optional `args` (plain
+  strings; a value naming `${PLUGIN_ROOT}` or `${PLUGIN_DATA}` is refused by
+  name, since authored stdio args carry no placeholder expansion of any
+  kind), `env` (the identical `${VAR}` value grammar `headers` already
+  enforces), and `cwd` (the same containment rule as `command`, defaulting
+  to the agent root when absent). The resolved command file's exact bytes
+  and executable bit join the project fingerprint, exactly like a
+  plugin-relative stdio command. A project may declare at most 16 `type:
+  stdio` servers, with at most 64 MiB combined across every distinct
+  resolved command file (ADR 0026's previously open executable-budget item,
+  now recorded). Claude's `.mcp.json` renders the resolved command wrapped
+  in the same `/usr/bin/env -C` working-directory adapter a plugin stdio
+  server with a declared `cwd` already uses, with `env` verbatim. Codex's
+  `.codex/config.toml` renders `command`/`args`/`cwd` directly; an `env`
+  value that is a literal is emitted verbatim, a bare `${VAR}` reference is
+  forwarded by name only through `env_vars` (the same mechanism an installed
+  connection's required ambient name already uses, so the ambient value
+  itself is still never read or copied), and a value carrying a literal
+  prefix before its `${VAR}` reference cannot be represented that way and is
+  reported and omitted (`mcp.env.not-honored`). New diagnostic identifiers:
+  `mcp.command.invalid`, `mcp.cwd.invalid`, `mcp.args.invalid`,
+  `mcp.env.invalid`, `mcp.env.not-honored`, and `mcp.stdio.bounds.exceeded`.
 
 - `tenon stage` never emits a Go tool tree that verifies but cannot serve
   (issue #14): the staged apply record now names the closure root relative

@@ -188,7 +188,7 @@ func projectWithConnection(name, url, context string) *agentproject.Project {
 		Name:         "my-agent",
 		Instructions: &agentproject.Instructions{Body: "Body text.\n"},
 		Connections: []agentproject.Connection{
-			{Name: name, URL: url, Context: context, SourcePath: "mcp/" + name + ".md"},
+			{Kind: agentproject.ConnectionKindRemote, Name: name, URL: url, Context: context, SourcePath: "mcp/" + name + ".md"},
 		},
 	}
 }
@@ -246,6 +246,7 @@ func TestConnectionHeadersRenderVerbatim(t *testing.T) {
 		Instructions: &agentproject.Instructions{Body: "Body text.\n"},
 		Connections: []agentproject.Connection{
 			{
+				Kind:       agentproject.ConnectionKindRemote,
 				Name:       "catalog",
 				URL:        "https://example.com/mcp",
 				Headers:    map[string]string{"Authorization": "Bearer ${ACME_TOKEN}"},
@@ -498,5 +499,122 @@ func TestInstalledConnectionUnconfiguredStoreFailsClearly(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected mcp.package.unresolved, got %v", diags.All())
+	}
+}
+
+// --- Stdio connection rendering (ADR 0026, issue #50) -----------------------
+
+func stdioConnectionProject() *agentproject.Project {
+	return &agentproject.Project{
+		Root:         "/src/my-agent",
+		Name:         "my-agent",
+		Instructions: &agentproject.Instructions{Body: "Body text.\n"},
+		Connections: []agentproject.Connection{
+			{
+				Kind:       agentproject.ConnectionKindStdio,
+				Name:       "deployctl",
+				Command:    "/src/my-agent/servers/deployctl/bin/deployctl",
+				Args:       []string{"--flag"},
+				Env:        map[string]string{"TOKEN": "Bearer ${ACME_TOKEN}", "MODE": "prod"},
+				SourcePath: "mcp/deployctl.md",
+			},
+		},
+	}
+}
+
+// TestStdioConnectionRendersNativeStdioEntry proves a repo-relative stdio
+// connection renders as Claude's env -C working-directory adapter around the
+// absolute resolved command, with an undeclared cwd defaulting to the agent
+// root, args verbatim, and env verbatim including its ${VAR} reference left
+// for Claude's own expansion.
+func TestStdioConnectionRendersNativeStdioEntry(t *testing.T) {
+	p := stdioConnectionProject()
+	diags := &diagnostics.List{}
+	files := Driver{}.Generate(p, apply.Target{Workspace: "/ws", Executable: "/bin/tenon"}, diags)
+	if diags.HasErrors() {
+		t.Fatalf("unexpected diagnostics: %v", diags.All())
+	}
+
+	var mcpJSON []byte
+	for _, f := range files {
+		if f.Path == ".mcp.json" {
+			mcpJSON = f.Content
+		}
+	}
+	var doc struct {
+		MCPServers map[string]json.RawMessage `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(mcpJSON, &doc); err != nil {
+		t.Fatal(err)
+	}
+	var entry struct {
+		Type    string            `json:"type"`
+		Command string            `json:"command"`
+		Args    []string          `json:"args"`
+		Env     map[string]string `json:"env"`
+	}
+	if err := json.Unmarshal(doc.MCPServers["deployctl"], &entry); err != nil {
+		t.Fatal(err)
+	}
+	if entry.Type != "stdio" || entry.Command != "/usr/bin/env" {
+		t.Fatalf("entry = %+v", entry)
+	}
+	wantArgs := []string{"-C", "/src/my-agent", "--", "/src/my-agent/servers/deployctl/bin/deployctl", "--flag"}
+	if len(entry.Args) != len(wantArgs) {
+		t.Fatalf("args = %v, want %v", entry.Args, wantArgs)
+	}
+	for i, a := range wantArgs {
+		if entry.Args[i] != a {
+			t.Fatalf("args = %v, want %v", entry.Args, wantArgs)
+		}
+	}
+	if entry.Env["TOKEN"] != "Bearer ${ACME_TOKEN}" || entry.Env["MODE"] != "prod" {
+		t.Fatalf("env = %+v", entry.Env)
+	}
+}
+
+// TestStdioConnectionDeclaredCwdOverridesDefault proves a declared cwd is
+// used verbatim instead of the agent-root default.
+func TestStdioConnectionDeclaredCwdOverridesDefault(t *testing.T) {
+	p := stdioConnectionProject()
+	p.Connections[0].Cwd = "/src/my-agent/servers/deployctl"
+	diags := &diagnostics.List{}
+	files := Driver{}.Generate(p, apply.Target{Workspace: "/ws", Executable: "/bin/tenon"}, diags)
+	if diags.HasErrors() {
+		t.Fatalf("unexpected diagnostics: %v", diags.All())
+	}
+	var mcpJSON []byte
+	for _, f := range files {
+		if f.Path == ".mcp.json" {
+			mcpJSON = f.Content
+		}
+	}
+	if !strings.Contains(string(mcpJSON), `"/src/my-agent/servers/deployctl"`) {
+		t.Fatalf("declared cwd must render verbatim: %s", mcpJSON)
+	}
+}
+
+// TestClaudeMCPConfigDeterministic proves two renders of the same project
+// produce byte-identical .mcp.json output, including a stdio connection's
+// env map.
+func TestClaudeMCPConfigDeterministic(t *testing.T) {
+	p := stdioConnectionProject()
+	render := func() []byte {
+		diags := &diagnostics.List{}
+		files := Driver{}.Generate(p, apply.Target{Workspace: "/ws", Executable: "/bin/tenon"}, diags)
+		if diags.HasErrors() {
+			t.Fatalf("unexpected diagnostics: %v", diags.All())
+		}
+		for _, f := range files {
+			if f.Path == ".mcp.json" {
+				return f.Content
+			}
+		}
+		t.Fatal(".mcp.json not generated")
+		return nil
+	}
+	a, b := render(), render()
+	if string(a) != string(b) {
+		t.Fatalf("identical input must render byte-identical output:\n%s\nvs\n%s", a, b)
 	}
 }

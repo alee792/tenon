@@ -207,8 +207,9 @@ func acceptedConnections(p *agentproject.Project, diags *diagnostics.List) []age
 // executable against the absolute agent source and workspace, every accepted
 // plugin server, every accepted remote connection as a native http entry
 // carrying its declared headers verbatim (Claude expands ${VAR} references
-// itself), and every accepted installed connection that resolved cleanly as
-// a native stdio entry from its launch descriptor. An installed connection
+// itself), every accepted stdio connection as a native stdio entry (ADR 0026,
+// issue #50), and every accepted installed connection that resolved cleanly
+// as a native stdio entry from its launch descriptor. An installed connection
 // absent from resolved already carries a mcp.package.* error on diags and
 // contributes no entry. It is model-facing configuration, so it carries no
 // fingerprint, version, or other setup metadata beyond the paths the servers
@@ -231,6 +232,8 @@ func mcpConfig(executable, source, workspace string, servers []agentproject.Reso
 				continue // already reported as mcp.package.unresolved/mismatch
 			}
 			entries[c.Name] = installedServerEntry(desc)
+		case agentproject.ConnectionKindStdio:
+			entries[c.Name] = stdioConnectionEntry(c, source)
 		default:
 			entry := map[string]any{"type": "http", "url": c.URL}
 			if len(c.Headers) > 0 {
@@ -242,6 +245,34 @@ func mcpConfig(executable, source, workspace string, servers []agentproject.Reso
 	// A fixed map of strings, string slices, and string maps always encodes.
 	content, _ := json.MarshalIndent(map[string]any{"mcpServers": entries}, "", "  ")
 	return append(content, '\n')
+}
+
+// stdioConnectionEntry renders one accepted authored stdio connection (ADR
+// 0026): the exact absolute resolved command path under the agent root, with
+// its args copied verbatim after it (no expansion of any kind ever applies to
+// authored stdio args) and its env map with ${VAR} references left verbatim
+// for Claude's own expansion, exactly like a remote connection's headers.
+// Claude's project stdio format carries no working-directory field, so — as
+// serverEntry already does for a plugin server's declared cwd — the working
+// directory is preserved exactly by wrapping the command in the system exec
+// adapter, which changes directory before replacing itself with the declared
+// command. An undeclared cwd defaults to the agent root: root is where the
+// command itself is proven to live, so it is the one directory guaranteed to
+// exist for every accepted stdio connection, the same default choice ADR
+// 0010 documents for a plugin server's undeclared working directory (there,
+// the plugin root). encoding/json sorts a map's keys when marshalling, so an
+// env map always renders deterministically.
+func stdioConnectionEntry(c agentproject.Connection, source string) map[string]any {
+	cwd := c.Cwd
+	if cwd == "" {
+		cwd = source
+	}
+	args := append([]string{"-C", cwd, "--", c.Command}, c.Args...)
+	entry := map[string]any{"type": "stdio", "command": "/usr/bin/env", "args": args}
+	if len(c.Env) > 0 {
+		entry["env"] = c.Env
+	}
+	return entry
 }
 
 // installedServerEntry renders one resolved installed connection in Claude's

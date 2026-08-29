@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/alee792/tenon/internal/diagnostics"
 )
 
 func writeConnectionFile(t *testing.T, root, name, content string) {
@@ -289,14 +291,320 @@ func TestLoadConnectionsRejectsSSE(t *testing.T) {
 	requireErrorID(t, diags, "mcp.transport.invalid")
 }
 
-func TestLoadConnectionsRejectsStdioNotYetSupported(t *testing.T) {
+// TestLoadValidStdioConnection proves the exact accepted stdio shape: the
+// command resolves to an absolute real path inside the agent root, args and
+// env are preserved literally, and cwd defaults to empty (rendering fills in
+// the agent root; see internal/claude and internal/codex).
+func TestLoadValidStdioConnection(t *testing.T) {
 	root := writeAgent(t, "agent", validInstructions)
-	writeConnectionFile(t, root, "catalog.md", "---\ntype: stdio\ncommand: ./server\n---\n")
+	writeSkillFile(t, root, "servers/deployctl/bin/deployctl", []byte("#!/bin/sh\nexec cat\n"), 0o755)
+	writeConnectionFile(t, root, "deployctl.md",
+		"---\ntype: stdio\ncommand: ./servers/deployctl/bin/deployctl\nargs: [\"--flag\", \"value $HOME\"]\nenv:\n  DEPLOY_ENV: staging\n  TOKEN: \"Bearer ${ACME_TOKEN}\"\n---\n\nDeploy guidance.\n")
+
+	p, diags, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p == nil || diags.HasErrors() {
+		t.Fatalf("unexpected diagnostics: %v", diags.All())
+	}
+	if len(p.Connections) != 1 {
+		t.Fatalf("connections = %+v", p.Connections)
+	}
+	c := p.Connections[0]
+	wantCommand := filepath.Join(root, "servers", "deployctl", "bin", "deployctl")
+	if c.Kind != ConnectionKindStdio || c.Command != wantCommand {
+		t.Fatalf("connection = %+v, want command %q", c, wantCommand)
+	}
+	if len(c.Args) != 2 || c.Args[0] != "--flag" || c.Args[1] != "value $HOME" {
+		t.Fatalf("args = %+v", c.Args)
+	}
+	if c.Env["DEPLOY_ENV"] != "staging" || c.Env["TOKEN"] != "Bearer ${ACME_TOKEN}" {
+		t.Fatalf("env = %+v", c.Env)
+	}
+	if c.Cwd != "" {
+		t.Fatalf("cwd = %q, want empty (no cwd declared)", c.Cwd)
+	}
+	if c.Context != "Deploy guidance." {
+		t.Fatalf("context = %q", c.Context)
+	}
+}
+
+// TestLoadStdioConnectionWithCwd proves a declared cwd resolves the same way
+// command does: an agent-root-relative "./" path proven to exist as a real
+// directory inside the agent root.
+func TestLoadStdioConnectionWithCwd(t *testing.T) {
+	root := writeAgent(t, "agent", validInstructions)
+	writeSkillFile(t, root, "servers/deployctl/bin/deployctl", []byte("#!/bin/sh\n"), 0o755)
+	writeConnectionFile(t, root, "deployctl.md",
+		"---\ntype: stdio\ncommand: ./servers/deployctl/bin/deployctl\ncwd: ./servers/deployctl\n---\n")
+
+	p, diags, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p == nil || diags.HasErrors() {
+		t.Fatalf("unexpected diagnostics: %v", diags.All())
+	}
+	wantCwd := filepath.Join(root, "servers", "deployctl")
+	if p.Connections[0].Cwd != wantCwd {
+		t.Fatalf("cwd = %q, want %q", p.Connections[0].Cwd, wantCwd)
+	}
+}
+
+// --- Stdio command matrix -------------------------------------------------
+
+// TestLoadStdioCommandMatrix proves every rejected command shape fails with
+// mcp.command.invalid before workspace mutation, and the "./" form succeeds.
+func TestLoadStdioCommandMatrix(t *testing.T) {
+	setup := func(t *testing.T) (root string) {
+		root = writeAgent(t, "agent", validInstructions)
+		writeSkillFile(t, root, "servers/bin/serve", []byte("#!/bin/sh\n"), 0o755)
+		return root
+	}
+
+	cases := map[string]struct {
+		command string
+		valid   bool
+	}{
+		"ok":              {"./servers/bin/serve", true},
+		"bare name":       {"serve", false},
+		"absolute":        {"/usr/bin/serve", false},
+		"escape":          {"./../outside", false},
+		"missing":         {"./servers/bin/does-not-exist", false},
+		"dot dot literal": {"./servers/../../etc/passwd", false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			root := setup(t)
+			writeConnectionFile(t, root, "srv.md", "---\ntype: stdio\ncommand: "+tc.command+"\n---\n")
+			p, diags, err := Load(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			gotValid := p != nil && !diags.HasErrors()
+			if gotValid != tc.valid {
+				t.Fatalf("command %q: valid = %v, want %v (diags: %v)", tc.command, gotValid, tc.valid, diags.All())
+			}
+			if !tc.valid {
+				requireErrorID(t, diags, "mcp.command.invalid")
+			}
+		})
+	}
+
+	t.Run("non-regular (directory)", func(t *testing.T) {
+		root := setup(t)
+		writeConnectionFile(t, root, "srv.md", "---\ntype: stdio\ncommand: ./servers\n---\n")
+		_, diags, err := Load(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		requireErrorID(t, diags, "mcp.command.invalid")
+	})
+
+	t.Run("symlink escape", func(t *testing.T) {
+		root := setup(t)
+		outside := filepath.Join(t.TempDir(), "real-serve")
+		if err := os.WriteFile(outside, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, filepath.Join(root, "servers", "bin", "link")); err != nil {
+			t.Fatal(err)
+		}
+		writeConnectionFile(t, root, "srv.md", "---\ntype: stdio\ncommand: ./servers/bin/link\n---\n")
+		_, diags, err := Load(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		requireErrorID(t, diags, "mcp.command.invalid")
+	})
+}
+
+// --- Stdio cwd matrix -------------------------------------------------------
+
+func TestLoadStdioCwdMatrix(t *testing.T) {
+	setup := func(t *testing.T) string {
+		root := writeAgent(t, "agent", validInstructions)
+		writeSkillFile(t, root, "servers/bin/serve", []byte("#!/bin/sh\n"), 0o755)
+		if err := os.MkdirAll(filepath.Join(root, "servers", "work"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return root
+	}
+	cases := map[string]struct {
+		cwd   string
+		valid bool
+	}{
+		"ok":           {"./servers/work", true},
+		"absolute":     {"/tmp", false},
+		"escape":       {"./../outside", false},
+		"not-a-dir":    {"./servers/bin/serve", false},
+		"missing":      {"./servers/does-not-exist", false},
+		"bare (no ./)": {"servers/work", false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			root := setup(t)
+			writeConnectionFile(t, root, "srv.md",
+				"---\ntype: stdio\ncommand: ./servers/bin/serve\ncwd: "+tc.cwd+"\n---\n")
+			p, diags, err := Load(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			gotValid := p != nil && !diags.HasErrors()
+			if gotValid != tc.valid {
+				t.Fatalf("cwd %q: valid = %v, want %v (diags: %v)", tc.cwd, gotValid, tc.valid, diags.All())
+			}
+			if !tc.valid {
+				requireErrorID(t, diags, "mcp.cwd.invalid")
+			}
+		})
+	}
+}
+
+// --- Stdio env grammar spot-check (full matrix already covered for headers)
+
+func TestLoadStdioEnvValueGrammar(t *testing.T) {
+	root := writeAgent(t, "agent", validInstructions)
+	writeSkillFile(t, root, "servers/bin/serve", []byte("#!/bin/sh\n"), 0o755)
+	writeConnectionFile(t, root, "srv.md",
+		"---\ntype: stdio\ncommand: ./servers/bin/serve\nenv:\n  OK: \"Bearer ${ACME_TOKEN}\"\n---\n")
 	_, diags, err := Load(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireErrorID(t, diags, "mcp.transport.invalid")
+	if diags.HasErrors() {
+		t.Fatalf("a literal prefix plus one ${VAR} reference must be accepted: %v", diags.All())
+	}
+
+	root2 := writeAgent(t, "agent", validInstructions)
+	writeSkillFile(t, root2, "servers/bin/serve", []byte("#!/bin/sh\n"), 0o755)
+	writeConnectionFile(t, root2, "srv.md",
+		"---\ntype: stdio\ncommand: ./servers/bin/serve\nenv:\n  BAD: \"${PLUGIN_ROOT}\"\n---\n")
+	_, diags2, err := Load(root2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireErrorID(t, diags2, "mcp.env.invalid")
+}
+
+// --- Stdio args PLUGIN_ROOT/PLUGIN_DATA rejection ---------------------------
+
+func TestLoadStdioArgsRejectPluginVars(t *testing.T) {
+	cases := []string{"${PLUGIN_ROOT}/x", "${PLUGIN_DATA}"}
+	for _, arg := range cases {
+		t.Run(arg, func(t *testing.T) {
+			root := writeAgent(t, "agent", validInstructions)
+			writeSkillFile(t, root, "servers/bin/serve", []byte("#!/bin/sh\n"), 0o755)
+			writeConnectionFile(t, root, "srv.md",
+				"---\ntype: stdio\ncommand: ./servers/bin/serve\nargs: [\""+arg+"\"]\n---\n")
+			_, diags, err := Load(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			requireErrorID(t, diags, "mcp.args.invalid")
+		})
+	}
+	// Other "$" usage in args is allowed: it is shell-meaningless since args
+	// are execv'd, never interpolated by a shell tenon invokes.
+	t.Run("other dollar allowed", func(t *testing.T) {
+		root := writeAgent(t, "agent", validInstructions)
+		writeSkillFile(t, root, "servers/bin/serve", []byte("#!/bin/sh\n"), 0o755)
+		writeConnectionFile(t, root, "srv.md",
+			"---\ntype: stdio\ncommand: ./servers/bin/serve\nargs: [\"$HOME/x\", \"a${b}c\"]\n---\n")
+		p, diags, err := Load(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p == nil || diags.HasErrors() {
+			t.Fatalf("non-plugin-scoped $ in args must be accepted: %v", diags.All())
+		}
+	})
+}
+
+// --- Stdio fingerprint sensitivity ------------------------------------------
+
+// TestStdioCommandJoinsFingerprintSensitively proves a stdio command's exact
+// content and executable bit are source, exactly like a plugin-relative
+// command (ADR 0026).
+func TestStdioCommandJoinsFingerprintSensitively(t *testing.T) {
+	build := func(t *testing.T, script string, mode os.FileMode) string {
+		t.Helper()
+		root := writeAgent(t, "agent", validInstructions)
+		writeSkillFile(t, root, "servers/bin/serve", []byte(script), mode)
+		writeConnectionFile(t, root, "srv.md", "---\ntype: stdio\ncommand: ./servers/bin/serve\n---\n")
+		p, diags, err := Load(root)
+		if err != nil || p == nil || diags.HasErrors() {
+			t.Fatalf("load failed: %v %v", err, diags.All())
+		}
+		return p.Fingerprint
+	}
+	base := build(t, "#!/bin/sh\nexec cat\n", 0o755)
+	if again := build(t, "#!/bin/sh\nexec cat\n", 0o755); again != base {
+		t.Fatal("identical stdio command source must fingerprint identically")
+	}
+	if changed := build(t, "#!/bin/sh\nexec tee\n", 0o755); changed == base {
+		t.Fatal("changing a stdio command's content must change the fingerprint")
+	}
+	if mode := build(t, "#!/bin/sh\nexec cat\n", 0o644); mode == base {
+		t.Fatal("changing a stdio command's executable bit must change the fingerprint")
+	}
+}
+
+// --- Stdio aggregate bounds -------------------------------------------------
+
+// TestCheckStdioBudgetCount proves the 17th declared stdio server trips the
+// count bound, exercised directly against already-validated connections so
+// the test stays fast: 17 real files would work too, but the pure
+// accounting function is what actually enforces the bound.
+func TestCheckStdioBudgetCount(t *testing.T) {
+	diags := &diagnostics.List{}
+	var connections []Connection
+	for i := 0; i < MaxStdioServers; i++ {
+		connections = append(connections, Connection{Kind: ConnectionKindStdio, Command: fmt.Sprintf("/agent/bin/s%d", i)})
+	}
+	checkStdioBudget(connections, diags)
+	if diags.HasErrors() {
+		t.Fatalf("exactly the limit must be accepted: %v", diags.All())
+	}
+
+	connections = append(connections, Connection{Kind: ConnectionKindStdio, Command: "/agent/bin/one-too-many"})
+	diags = &diagnostics.List{}
+	checkStdioBudget(connections, diags)
+	requireErrorID(t, diags, "mcp.stdio.bounds.exceeded")
+}
+
+// TestCheckStdioBudgetAggregateBytes proves the aggregate byte bound trips
+// without ever writing a 64 MiB fixture file, and that the same command path
+// declared twice is charged once, matching the fingerprint's own dedup.
+func TestCheckStdioBudgetAggregateBytes(t *testing.T) {
+	diags := &diagnostics.List{}
+	connections := []Connection{
+		{Kind: ConnectionKindStdio, Command: "/agent/bin/big", commandBytes: MaxStdioCommandAggregateBytes},
+	}
+	checkStdioBudget(connections, diags)
+	if diags.HasErrors() {
+		t.Fatalf("exactly the byte limit must be accepted: %v", diags.All())
+	}
+
+	diags = &diagnostics.List{}
+	connections = []Connection{
+		{Kind: ConnectionKindStdio, Command: "/agent/bin/big", commandBytes: MaxStdioCommandAggregateBytes + 1},
+	}
+	checkStdioBudget(connections, diags)
+	requireErrorID(t, diags, "mcp.stdio.bounds.exceeded")
+
+	// The same resolved command path referenced by two connection names is
+	// charged once, not twice.
+	diags = &diagnostics.List{}
+	connections = []Connection{
+		{Kind: ConnectionKindStdio, Command: "/agent/bin/shared", commandBytes: MaxStdioCommandAggregateBytes},
+		{Kind: ConnectionKindStdio, Command: "/agent/bin/shared", commandBytes: MaxStdioCommandAggregateBytes},
+	}
+	checkStdioBudget(connections, diags)
+	if diags.HasErrors() {
+		t.Fatalf("a shared command path must be charged once: %v", diags.All())
+	}
 }
 
 // --- Installed frontmatter shape matrix --------------------------------
@@ -531,6 +839,23 @@ func TestLoadLegacyConnectionsDirFailsClosed(t *testing.T) {
 func TestLoadLegacyConnectionsDirEmptyStillFails(t *testing.T) {
 	root := writeAgent(t, "agent", validInstructions)
 	if err := os.MkdirAll(filepath.Join(root, "connections"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, diags, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireErrorID(t, diags, "mcp.migration.connections-dir")
+}
+
+// TestLoadLegacyConnectionsSymlinkFailsClosed proves a connections/ symlink —
+// not just a real directory — also trips the migration diagnostic (issue #49
+// review fix): checkLegacyConnectionsDir already checks for a symlink, but
+// nothing previously exercised that branch.
+func TestLoadLegacyConnectionsSymlinkFailsClosed(t *testing.T) {
+	root := writeAgent(t, "agent", validInstructions)
+	target := t.TempDir()
+	if err := os.Symlink(target, filepath.Join(root, "connections")); err != nil {
 		t.Fatal(err)
 	}
 	_, diags, err := Load(root)

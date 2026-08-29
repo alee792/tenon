@@ -34,7 +34,7 @@ Add capability by adding files — there is nothing to register:
 | --- | --- |
 | a directory under `skills/` | a skill |
 | a typed function file under `tools/` | a tool |
-| a Markdown file under `connections/` | a native MCP connection |
+| a Markdown file under `mcp/` | a native MCP connection |
 | a Markdown file under `schedules/` | a scheduled task |
 
 The [product specification](docs/product-spec.md) covers the full authoring

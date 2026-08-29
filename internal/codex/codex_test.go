@@ -160,6 +160,7 @@ func TestConnectionHeadersWarnForCodex(t *testing.T) {
 		Instructions: &agentproject.Instructions{Body: "Body text.\n"},
 		Connections: []agentproject.Connection{
 			{
+				Kind:       agentproject.ConnectionKindRemote,
 				Name:       "catalog",
 				URL:        "https://example.com/mcp",
 				Headers:    map[string]string{"Authorization": "Bearer ${ACME_TOKEN}"},
@@ -196,7 +197,7 @@ func projectWithConnection(name, url, context string) *agentproject.Project {
 		Name:         "my-agent",
 		Instructions: &agentproject.Instructions{Body: "Body text.\n"},
 		Connections: []agentproject.Connection{
-			{Name: name, URL: url, Context: context, SourcePath: "mcp/" + name + ".md"},
+			{Kind: agentproject.ConnectionKindRemote, Name: name, URL: url, Context: context, SourcePath: "mcp/" + name + ".md"},
 		},
 	}
 }
@@ -408,5 +409,101 @@ func TestInstalledConnectionServerNameMismatchFailsForCodex(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected mcp.package.mismatch, got %v", diags.All())
+	}
+}
+
+// --- Stdio connection rendering (ADR 0026, issue #50) -----------------------
+
+func stdioConnectionProject() *agentproject.Project {
+	return &agentproject.Project{
+		Root:         "/src/my-agent",
+		Name:         "my-agent",
+		Instructions: &agentproject.Instructions{Body: "Body text.\n"},
+		Connections: []agentproject.Connection{
+			{
+				Kind:    agentproject.ConnectionKindStdio,
+				Name:    "deployctl",
+				Command: "/src/my-agent/servers/deployctl/bin/deployctl",
+				Args:    []string{"--flag"},
+				Env: map[string]string{
+					"MODE":   "prod",
+					"TOKEN":  "${ACME_TOKEN}",
+					"PREFIX": "Bearer ${ACME_TOKEN}",
+				},
+				SourcePath: "mcp/deployctl.md",
+			},
+		},
+	}
+}
+
+// TestStdioConnectionRendersForCodex proves command/args/cwd render directly,
+// a literal env value renders verbatim, a bare ${VAR} reference is forwarded
+// by name only through env_vars, and a prefixed reference is reported
+// unforwardable and omitted rather than rendered as a literal nobody expands.
+func TestStdioConnectionRendersForCodex(t *testing.T) {
+	p := stdioConnectionProject()
+	diags := &diagnostics.List{}
+	files := Driver{}.Generate(p, apply.Target{Workspace: "/ws", Executable: "/bin/tenon"}, diags)
+
+	var config string
+	for _, f := range files {
+		if f.Path == ".codex/config.toml" {
+			config = string(f.Content)
+		}
+	}
+	if !strings.Contains(config, "[mcp_servers.deployctl]") {
+		t.Fatalf("missing the deployctl table: %s", config)
+	}
+	if !strings.Contains(config, `command = "/src/my-agent/servers/deployctl/bin/deployctl"`) {
+		t.Fatalf("missing the absolute resolved command: %s", config)
+	}
+	if !strings.Contains(config, `args = ["--flag"]`) {
+		t.Fatalf("missing the literal args: %s", config)
+	}
+	if !strings.Contains(config, `cwd = "/src/my-agent"`) {
+		t.Fatalf("an undeclared cwd must default to the agent root: %s", config)
+	}
+	if !strings.Contains(config, `"MODE" = "prod"`) {
+		t.Fatalf("a literal env value must render verbatim: %s", config)
+	}
+	if strings.Contains(config, "ACME_TOKEN\" = ") || strings.Contains(config, `"TOKEN" = "${ACME_TOKEN}"`) {
+		t.Fatalf("a bare ${VAR} reference must never render its literal text into env: %s", config)
+	}
+	if !strings.Contains(config, `env_vars = ["TOKEN"]`) {
+		t.Fatalf("a bare ${VAR} reference must be forwarded by name only through env_vars: %s", config)
+	}
+	if strings.Contains(config, "PREFIX") {
+		t.Fatalf("a prefixed ${VAR} reference must be omitted entirely, not rendered: %s", config)
+	}
+	found := false
+	for _, d := range diags.All() {
+		if d.ID == "mcp.env.not-honored" && d.Severity == diagnostics.Warning {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected mcp.env.not-honored warning, got %v", diags.All())
+	}
+}
+
+// TestCodexMCPConfigDeterministic proves two renders of the same project
+// produce byte-identical .codex/config.toml output, including a stdio
+// connection's split env.
+func TestCodexMCPConfigDeterministic(t *testing.T) {
+	p := stdioConnectionProject()
+	render := func() []byte {
+		diags := &diagnostics.List{}
+		files := Driver{}.Generate(p, apply.Target{Workspace: "/ws", Executable: "/bin/tenon"}, diags)
+		for _, f := range files {
+			if f.Path == ".codex/config.toml" {
+				return f.Content
+			}
+		}
+		t.Fatal(".codex/config.toml not generated")
+		return nil
+	}
+	a, b := render(), render()
+	if string(a) != string(b) {
+		t.Fatalf("identical input must render byte-identical output:\n%s\nvs\n%s", a, b)
 	}
 }

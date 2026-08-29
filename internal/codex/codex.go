@@ -3,6 +3,7 @@
 package codex
 
 import (
+	"regexp"
 	"slices"
 	"strings"
 
@@ -36,6 +37,13 @@ func (Driver) Generate(p *agentproject.Project, target apply.Target, diags *diag
 		if c.Kind != agentproject.ConnectionKindInstalled && len(c.Headers) > 0 {
 			diags.Warnf("mcp.header.not-honored", c.SourcePath,
 				"declared headers for connection %q are not emitted into Codex project configuration, which tenon generates without header support; the server may fail to authenticate", c.Name)
+		}
+		if c.Kind == agentproject.ConnectionKindStdio {
+			_, _, unforwardable := splitStdioEnv(c.Env)
+			for _, name := range unforwardable {
+				diags.Warnf("mcp.env.not-honored", c.SourcePath,
+					"the env %q for connection %q is not emitted into Codex project configuration: its value carries a literal prefix before the ${VAR} reference, which codex's name-only env_vars forwarding cannot represent; the server may fail without it", name, c.Name)
+			}
 		}
 	}
 	resolvedConnections := agentproject.ResolveInstalledConnections(p.Connections, target.IntegrationStore, target.TenonVersion, diags)
@@ -101,10 +109,12 @@ func (Driver) Generate(p *agentproject.Project, target apply.Target, diags *diag
 // executable against the absolute agent source and workspace, followed by
 // every accepted plugin server in lexical order, followed by every
 // standalone connection in lexical order — a remote connection as a native
-// url entry, an installed connection that resolved cleanly as a native
-// command/args/cwd/env entry from its launch descriptor, with its required
-// ambient names forwarded by name only through env_vars. An installed
-// connection absent from resolvedConnections already carries a
+// url entry, an authored stdio connection (ADR 0026, issue #50) as a native
+// command/args/cwd entry with its env split by splitStdioEnv, and an
+// installed connection that resolved cleanly as a native command/args/cwd/env
+// entry from its launch descriptor, with its required ambient names
+// forwarded by name only through env_vars. An installed connection absent
+// from resolvedConnections already carries a
 // mcp.package.* error on diags and contributes no entry. The managed
 // server alone is required and pre-approved, because tenon validates and
 // audits every call that crosses its own boundary; every other generated
@@ -161,6 +171,26 @@ func mcpConfig(executable, source, workspace, model string, servers []agentproje
 	})
 	for _, c := range sortedConnections {
 		switch c.Kind {
+		case agentproject.ConnectionKindStdio:
+			cwd := c.Cwd
+			if cwd == "" {
+				cwd = source
+			}
+			b.WriteString("\n[mcp_servers." + c.Name + "]\n")
+			b.WriteString("command = " + generated.TOMLString(c.Command) + "\n")
+			if len(c.Args) > 0 {
+				b.WriteString("args = " + tomlArray(c.Args) + "\n")
+			}
+			b.WriteString("cwd = " + generated.TOMLString(cwd) + "\n")
+			literalEnv, envVars, _ := splitStdioEnv(c.Env)
+			if len(literalEnv) > 0 {
+				b.WriteString("env = " + tomlInlineTable(literalEnv) + "\n")
+			}
+			if len(envVars) > 0 {
+				b.WriteString("env_vars = " + tomlArray(envVars) + "\n")
+			}
+			b.WriteString("required = false\n")
+			b.WriteString("default_tools_approval_mode = \"prompt\"\n")
 		case agentproject.ConnectionKindInstalled:
 			desc, ok := resolvedConnections[c.Name]
 			if !ok {
@@ -190,6 +220,49 @@ func mcpConfig(executable, source, workspace, model string, servers []agentproje
 		}
 	}
 	return []byte(b.String())
+}
+
+// bareVarRefPattern matches a stdio env value that is exactly one ${VAR}
+// reference with no literal prefix or suffix — the only shape codex's
+// name-only env_vars forwarding can represent.
+var bareVarRefPattern = regexp.MustCompile(`^\$\{[A-Z_][A-Z0-9_]*\}$`)
+
+// splitStdioEnv partitions one accepted stdio connection's declared env
+// values for Codex rendering (ADR 0026, issue #50). Codex's configuration
+// format documents no ${VAR} expansion of its own (the same gap ADR 0026's
+// acceptance sketch records for headers), so a value is handled one of three
+// ways: a literal with no "$" renders directly into the env inline table; a
+// value that is exactly one ${VAR} reference with no literal prefix is
+// forwarded by NAME ONLY through codex's env_vars mechanism — the same
+// mechanism an installed connection's required ambient name already uses
+// (see mcpConfig's desc.RequiredEnv handling) — so the ambient value itself
+// is still never read, copied, or rendered; a value carrying a literal
+// prefix before its ${VAR} reference (for example "Bearer ${TOKEN}") cannot
+// be represented that way, since env_vars can forward only the bare ambient
+// value under its own name, never a value with a prefix spliced onto it, so
+// it is reported unforwardable rather than silently rendering a literal
+// "${TOKEN}" no shell will ever expand.
+func splitStdioEnv(env map[string]string) (literal map[string]string, envVars, unforwardable []string) {
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	for _, name := range keys {
+		value := env[name]
+		switch {
+		case !strings.Contains(value, "$"):
+			if literal == nil {
+				literal = map[string]string{}
+			}
+			literal[name] = value
+		case bareVarRefPattern.MatchString(value):
+			envVars = append(envVars, name)
+		default:
+			unforwardable = append(unforwardable, name)
+		}
+	}
+	return literal, envVars, unforwardable
 }
 
 // tomlArray renders values as one TOML array of basic strings.
