@@ -41,16 +41,23 @@ The first release, v0.1.0, ships the core described in
   `plugin.reference.frontmatter.unknown-field`,
   `plugin.reference.source.invalid`, `plugin.reference.rev.invalid`,
   `plugin.reference.body.too-long`, and `plugin.reference.unresolved`.
+  `agentproject.PluginCache.Resolve` now takes both the declared source and
+  the rev (previously rev alone), so a rev reused under a different
+  declared source is caught at `Load` time itself — a rev is
+  content-addressed, not source-addressed, so this is a swap the digest
+  check alone cannot catch — rather than only by a later `tenon plugin
+  fetch`/`status`, which already re-checked it independently.
 - Composition policy split by relationship (issue #53, ADR 0026 §
   composition policy): an authored `mcp/<name>.md` server declaration
   colliding with an accepted plugin server of the same name now wins
   instead of failing the project — the authored server is emitted, the
   plugin's is not, and a warning (`mcp.name.shadowed`) names both sources.
-  Plugin-to-plugin collisions are unchanged (still fail-closed peers,
-  first-wins-with-warning). A new closed frontmatter form masks a plugin's
-  server outright, with no authored replacement: exactly `override:
-  plugins/<storage-name>` and `enabled: false`, no `type` and no other
-  field, and no body — masking is deliberate, so it produces no warning; the
+  Plugin-to-plugin collisions are unchanged (still ADR 0010's
+  first-wins-with-warning, never fail-closed). A new closed frontmatter
+  form masks a plugin's server outright, with no authored replacement:
+  exactly `override: plugins/<storage-name>` and `enabled: false`, no
+  `type` and no other field, and no body — masking is deliberate, so it
+  produces no warning; the
   mask file is the record. A dangling override (the named plugin absent, or
   present but not actually contributing a server named for that file) fails
   before workspace mutation (`mcp.override.dangling`), as does `enabled:
@@ -62,6 +69,31 @@ The first release, v0.1.0, ships the core described in
   composed server set with no per-driver collision logic. New diagnostic
   identifiers: `mcp.name.shadowed`, `mcp.override.invalid`,
   `mcp.override.dangling`, `mcp.override.enabled`, and `mcp.override.body`.
+
+- `tenon mcp status` is now the one offline view of an agent's entire
+  composed MCP surface (issue #54), not just its authored connections: it
+  loads plugins alongside `mcp/`, reusing the identical composition
+  `tenon apply`/`validate` already perform, and reports one row per
+  authored connection (unchanged), one row per accepted plugin-provided
+  server (`target=plugin`), one row per plugin server an authored
+  connection shadows (`shadowed-by=<path>`), and one row per masking
+  declaration (`target=mask`). An authored connection's `${VAR}`-backed
+  header or stdio env values are also named — never their values — matching
+  `tenon integration inspect`'s existing convention. A handful of review
+  findings from issue #53 land alongside this rework: a bare `mcp status`
+  no longer reports a false `mcp.override.dangling` on a legitimate mask
+  (a regression in the prior, plugin-blind status path); the masking union
+  arm now triggers on the presence of `override` alone, not `override` or
+  `enabled`, so a type-less server declaration missing `enabled` is
+  reported as a missing `type` rather than a misleading masking error; a
+  wrong-typed `enabled` now fails as `mcp.frontmatter.invalid`, the
+  identifier already established for a present field of the wrong YAML
+  type, rather than `mcp.override.invalid`; `override: plugins/x.md` now
+  fails as `mcp.override.invalid` with a hint to name the plugin
+  (`plugins/x`), not its reference file; and a mask naming a plugin that
+  did declare the overridden server but lost a plugin-to-plugin naming
+  collision (ADR 0010, unchanged) now names the winning plugin explicitly
+  instead of reporting a generic dangling override.
 
 - Standalone MCP connections move from `connections/` to `mcp/`, re-shaped to
   the Agent Plugins 1.0 `mcp.json` server-entry vocabulary (issue #49): a

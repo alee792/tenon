@@ -256,10 +256,15 @@ func containsPlaceholder(s string) bool {
 
 // mergePluginServers keeps the first exact server name in acceptance order —
 // plugin directories lexically, servers lexically within each document — and
-// skips every later duplicate with a warning naming both authored paths.
-// Names are never rewritten. The project-wide ceiling truncates the excess
-// (ADR 0013) rather than failing an otherwise valid project.
-func mergePluginServers(candidates []PluginServer, diags *diagnostics.List) []PluginServer {
+// skips every later duplicate with a warning naming both authored paths
+// (ADR 0010's first-wins-with-warning, unchanged). Names are never
+// rewritten. The project-wide ceiling truncates the excess (ADR 0013)
+// rather than failing an otherwise valid project. skipped carries every
+// server that lost a naming collision (not one dropped by the ceiling): a
+// masking declaration naming a plugin that did declare the server, but lost
+// this collision, can then report exactly that instead of a generic
+// dangling override (ADR 0026, issue #53 review).
+func mergePluginServers(candidates []PluginServer, diags *diagnostics.List) (accepted, skipped []PluginServer) {
 	seen := make(map[string]string, len(candidates))
 	var out []PluginServer
 	truncated := false
@@ -268,6 +273,7 @@ func mergePluginServers(candidates []PluginServer, diags *diagnostics.List) []Pl
 			diags.Warnf("plugin.mcp.server.collision", s.SourcePath,
 				"MCP server name %q declared at %s collides with the earlier server at %s; the later server is skipped and never renamed",
 				s.Name, s.SourcePath, existing)
+			skipped = append(skipped, s)
 			continue
 		}
 		if len(out) >= MaxPluginServers {
@@ -281,7 +287,7 @@ func mergePluginServers(candidates []PluginServer, diags *diagnostics.List) []Pl
 		seen[s.Name] = s.SourcePath
 		out = append(out, s)
 	}
-	return out
+	return out, skipped
 }
 
 // loadPluginMCP validates one accepted plugin's optional mcp.json: a

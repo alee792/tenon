@@ -170,7 +170,7 @@ func loadWithProof(dir, expectedFingerprint string, allowUnproven bool) (*Projec
 
 	skillBudget := &skillSetBudget{}
 	skills, skillInputs := loadSkills(root, skillBudget, diags)
-	pluginSkills, pluginServers, pluginInputs := loadPlugins(root, skillBudget, diags)
+	pluginSkills, pluginServers, skippedPluginServers, pluginInputs := loadPlugins(root, skillBudget, diags)
 	mergedSkills, pluginSkillInputs := mergeSkills(skills, pluginSkills, diags)
 	p.Skills = mergedSkills
 
@@ -187,7 +187,7 @@ func loadWithProof(dir, expectedFingerprint string, allowUnproven bool) (*Projec
 	// it returns pluginServers with every author-shadowed or masked name
 	// already removed, so both native drivers see one already-composed
 	// server set and carry no composition logic of their own.
-	connections, composedPluginServers, connectionInputs := loadConnections(root, pluginServers, diags)
+	connections, composedPluginServers, _, _, connectionInputs := loadConnections(root, pluginServers, skippedPluginServers, true, diags)
 	p.Connections = connections
 	p.PluginServers = composedPluginServers
 

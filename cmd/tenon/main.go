@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -1384,10 +1385,91 @@ func runMCPAdd(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// runMCPStatus reports the declared target and context presence of
-// every connection, or one named connection, without contacting anything.
-// Any malformed connection is reported with its authored path and makes the
-// result nonzero.
+// pluginEnvVarPattern extracts ${VAR}-shaped references from a plugin
+// server's stdio env/args/cwd values for status reporting only: unlike the
+// authored single-reference grammar (agentproject.PlaceholderVar), a
+// plugin's mcp.json env value may carry arbitrary ${...} text the harness
+// itself expands, so status just lists every name it finds rather than
+// enforcing a shape.
+var pluginEnvVarPattern = regexp.MustCompile(`\$\{([A-Z_][A-Z0-9_]*)\}`)
+
+// requiredEnvNames collects the ambient environment variable names an
+// authored connection's headers or stdio env values reference via exactly
+// one ${VAR} placeholder (agentproject.PlaceholderVar, the same grammar
+// Load enforces), sorted and deduplicated. It never returns a value, only
+// names — matching `tenon integration inspect`'s convention of reporting
+// required ambient env by name alone.
+func requiredEnvNames(c agentproject.Connection) []string {
+	seen := map[string]bool{}
+	for _, v := range c.Headers {
+		if name, _, ok := agentproject.PlaceholderVar(v); ok {
+			seen[name] = true
+		}
+	}
+	for _, v := range c.Env {
+		if name, _, ok := agentproject.PlaceholderVar(v); ok {
+			seen[name] = true
+		}
+	}
+	return sortedNames(seen)
+}
+
+// requiredPluginEnvNames collects ${VAR}-shaped ambient environment names
+// referenced by a plugin server's stdio args, env, and cwd, excluding
+// tenon's own ${PLUGIN_ROOT}/${PLUGIN_DATA} (supplied by tenon itself, not
+// ambient). Names only, never a resolved value.
+func requiredPluginEnvNames(s agentproject.PluginServer) []string {
+	seen := map[string]bool{}
+	scan := func(v string) {
+		for _, m := range pluginEnvVarPattern.FindAllStringSubmatch(v, -1) {
+			name := m[1]
+			if name == "PLUGIN_ROOT" || name == "PLUGIN_DATA" {
+				continue
+			}
+			seen[name] = true
+		}
+	}
+	for _, a := range s.Args {
+		scan(a)
+	}
+	for _, v := range s.Env {
+		scan(v)
+	}
+	scan(s.Cwd)
+	return sortedNames(seen)
+}
+
+func sortedNames(seen map[string]bool) []string {
+	out := make([]string, 0, len(seen))
+	for n := range seen {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// printRequiredEnv prints one "requires ambient env" line naming every
+// entry in names, when non-empty. Values are never read or printed (only
+// names), matching `tenon integration inspect`'s convention.
+func printRequiredEnv(stdout io.Writer, names []string) {
+	if len(names) == 0 {
+		return
+	}
+	fmt.Fprintf(stdout, "    requires ambient env: %s (value=not-read)\n", strings.Join(names, ", "))
+}
+
+// runMCPStatus reports the composed MCP surface for one agent: every
+// authored connection with its declared target and context presence, every
+// accepted plugin-provided server, every plugin server an authored
+// connection shadows, and every masking declaration — the one OFFLINE view
+// of the agent's entire MCP surface (issue #54). Composition (which server
+// wins a shadow, which is masked) is decided once in
+// internal/agentproject.LoadMCPSurface, the same seam Load itself uses; this
+// command only renders what that call already decided. Any real validation
+// failure — a malformed connection, a dangling override, an unresolved
+// installed connection — is reported with its authored path and makes the
+// result nonzero; a bare "mcp status" on an agent with no MCP surface at
+// all succeeds with empty output (issue #49, regression-fixed by cb68c44).
 func runMCPStatus(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("mcp status", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -1412,7 +1494,7 @@ func runMCPStatus(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	connections, diags, err := agentproject.LoadConnectionsForStatus(agent)
+	surface, diags, err := agentproject.LoadMCPSurface(agent)
 	if err != nil {
 		fmt.Fprintln(stderr, "tenon mcp status:", err)
 		return 1
@@ -1426,45 +1508,80 @@ func runMCPStatus(args []string, stdout, stderr io.Writer) int {
 
 	found := false
 	reportedUnresolved := false
-	for _, c := range connections {
-		if filterName != "" && c.Name != filterName {
-			continue
-		}
-		found = true
-		contextState := "no context"
-		if c.Context != "" {
-			contextState = "context present"
-		}
-		if c.Kind == agentproject.ConnectionKindInstalled {
-			resolved, detail := installedConnectionHealth(store, c)
-			health := "unresolved"
-			if resolved {
-				health = "resolved " + detail
+	if surface != nil {
+		for _, c := range surface.Connections {
+			if filterName != "" && c.Name != filterName {
+				continue
 			}
-			fmt.Fprintf(stdout, "%s: target=installed package=%s capability=%s %s %s (%s)\n",
-				c.Name, c.Package, c.Capability, contextState, health, c.SourcePath)
-			if !resolved {
-				fmt.Fprintf(stderr, "tenon mcp status: %s: %s\n", c.Name, detail)
-				reportedUnresolved = true
+			found = true
+			contextState := "no context"
+			if c.Context != "" {
+				contextState = "context present"
 			}
-			continue
-		}
-		if c.Kind == agentproject.ConnectionKindStdio {
-			cwd := c.Cwd
-			if cwd == "" {
-				cwd = "."
+			switch c.Kind {
+			case agentproject.ConnectionKindInstalled:
+				resolved, detail := installedConnectionHealth(store, c)
+				health := "unresolved"
+				if resolved {
+					health = "resolved " + detail
+				}
+				fmt.Fprintf(stdout, "%s: target=installed package=%s capability=%s %s %s (%s)\n",
+					c.Name, c.Package, c.Capability, contextState, health, c.SourcePath)
+				if !resolved {
+					fmt.Fprintf(stderr, "tenon mcp status: %s: %s\n", c.Name, detail)
+					reportedUnresolved = true
+				}
+			case agentproject.ConnectionKindStdio:
+				cwd := c.Cwd
+				if cwd == "" {
+					cwd = "."
+				}
+				fmt.Fprintf(stdout, "%s: target=stdio command=%s args=%d cwd=%s %s configured runtime=unchecked (%s)\n",
+					c.Name, c.Command, len(c.Args), cwd, contextState, c.SourcePath)
+				printRequiredEnv(stdout, requiredEnvNames(c))
+			default:
+				fmt.Fprintf(stdout, "%s: target=remote transport=streamable-http url=%s headers=%d %s configured runtime=unchecked (%s)\n",
+					c.Name, c.URL, len(c.Headers), contextState, c.SourcePath)
+				printRequiredEnv(stdout, requiredEnvNames(c))
 			}
-			fmt.Fprintf(stdout, "%s: target=stdio command=%s args=%d cwd=%s %s configured runtime=unchecked (%s)\n",
-				c.Name, c.Command, len(c.Args), cwd, contextState, c.SourcePath)
-			continue
 		}
-		fmt.Fprintf(stdout, "%s: target=remote transport=streamable-http url=%s headers=%d %s configured runtime=unchecked (%s)\n",
-			c.Name, c.URL, len(c.Headers), contextState, c.SourcePath)
+
+		for _, s := range surface.PluginServers {
+			if filterName != "" && s.Name != filterName {
+				continue
+			}
+			found = true
+			fmt.Fprintf(stdout, "%s: target=plugin plugin=%s transport=%s (%s)\n", s.Name, s.Plugin, s.Transport, s.SourcePath)
+			if s.Transport == agentproject.TransportStdio {
+				printRequiredEnv(stdout, requiredPluginEnvNames(s))
+			}
+		}
+
+		for _, sh := range surface.Shadowed {
+			if filterName != "" && sh.Server.Name != filterName {
+				continue
+			}
+			found = true
+			fmt.Fprintf(stdout, "%s: target=plugin plugin=%s transport=%s shadowed-by=%s (%s)\n",
+				sh.Server.Name, sh.Server.Plugin, sh.Server.Transport, sh.ShadowedBy, sh.Server.SourcePath)
+		}
+
+		for _, m := range surface.Masked {
+			if filterName != "" && m.Name != filterName {
+				continue
+			}
+			found = true
+			fmt.Fprintf(stdout, "%s: target=mask override=plugins/%s (%s)\n", m.Name, m.Override, m.SourcePath)
+		}
 	}
 
 	reportedMalformed := false
 	for _, d := range diags.All() {
-		if filterName != "" && d.Path != "mcp/"+filterName+".md" {
+		// A diagnostic on an mcp/ path is filtered to the named connection
+		// like before; a plugin diagnostic (plugins/...) is always shown
+		// regardless of NAME, since it may explain why a masked or shadowed
+		// server named by NAME resolved the way it did.
+		if filterName != "" && !strings.HasPrefix(d.Path, "plugins/") && d.Path != "mcp/"+filterName+".md" {
 			continue
 		}
 		fmt.Fprintln(stderr, d.String())

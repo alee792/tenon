@@ -15,11 +15,20 @@ import (
 type fakePluginCache struct {
 	roots map[string]string
 	errs  map[string]error
+	// sources, when non-nil, records the source each rev was "cached" under;
+	// Resolve fails with a source-mismatch error when the caller's source
+	// disagrees, mirroring internal/pluginref.Cache.Resolve.
+	sources map[string]string
 }
 
-func (f *fakePluginCache) Resolve(rev string) (string, error) {
+func (f *fakePluginCache) Resolve(source, rev string) (string, error) {
 	if err, ok := f.errs[rev]; ok {
 		return "", err
+	}
+	if f.sources != nil {
+		if cached, ok := f.sources[rev]; ok && cached != source {
+			return "", fmt.Errorf("pluginref.source.mismatch: rev %s is cached from a different source (%s) than declared (%s)", rev, cached, source)
+		}
 	}
 	root, ok := f.roots[rev]
 	if !ok {
@@ -145,6 +154,40 @@ func TestPluginReferenceDigestMismatchFailsClosed(t *testing.T) {
 		t.Fatalf("expected Load to fail on a digest mismatch")
 	}
 	requireErrorID(t, diags, "plugin.reference.unresolved")
+}
+
+// TestPluginReferenceSourceMismatchFailsClosed proves Load fails when the
+// declared reference's source disagrees with the source the cache recorded
+// for the same already-cached rev (Part C, PluginCache source threading): a
+// rev is content-addressed, not source-addressed, so this is exactly the
+// swap Resolve's source parameter exists to catch, independent of any
+// digest check.
+func TestPluginReferenceSourceMismatchFailsClosed(t *testing.T) {
+	root := writeAgent(t, "agent", validInstructions)
+	writePluginReference(t, root, "obs", "https://github.com/acme/renamed-plugin", validRev, "")
+	cachedRoot := newCachedPluginTree(t, "observability", "telemetry")
+	withPluginCache(t, &fakePluginCache{
+		roots:   map[string]string{validRev: cachedRoot},
+		sources: map[string]string{validRev: "https://github.com/acme/observability-plugin"},
+	})
+
+	p, diags, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p != nil {
+		t.Fatalf("expected Load to fail when the cached rev's recorded source disagrees with the declared source")
+	}
+	requireErrorID(t, diags, "plugin.reference.unresolved")
+	found := false
+	for _, d := range diags.All() {
+		if d.ID == "plugin.reference.unresolved" && strings.Contains(d.Rule, "different source") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected the unresolved diagnostic to name the source mismatch, got %v", diags.All())
+	}
 }
 
 func TestPluginReferenceCollidesWithVendoredDirectory(t *testing.T) {

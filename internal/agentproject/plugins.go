@@ -90,22 +90,26 @@ type pluginSkill struct {
 // resolution against root skills happens in the caller, which alone knows the
 // root names; server names have no root surface, so they are resolved here.
 // budget is the aggregate skill-set budget shared with root skills/ (ADR
-// 0013); it is not reset here.
-func loadPlugins(root string, budget *skillSetBudget, diags *diagnostics.List) ([]pluginSkill, []PluginServer, []sourceInput) {
+// 0013); it is not reset here. skippedServers carries every plugin server
+// that lost a plugin-to-plugin naming collision (see mergePluginServers);
+// it exists only so a masking declaration naming a server that lost such a
+// collision can report exactly that (ADR 0026, issue #53 review) — Load's
+// own composition never consults it.
+func loadPlugins(root string, budget *skillSetBudget, diags *diagnostics.List) ([]pluginSkill, []PluginServer, []PluginServer, []sourceInput) {
 	dir := filepath.Join(root, "plugins")
 	info, err := os.Lstat(dir)
 	if err != nil {
-		return nil, nil, nil // missing plugins/ is normal
+		return nil, nil, nil, nil // missing plugins/ is normal
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		diags.Errorf("plugin.entry.invalid", "plugins",
 			"plugins must be a real directory; symlinks are never followed")
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		diags.Errorf("plugin.entry.invalid", "plugins", "plugins could not be read: %v", err)
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 
 	// Each entry is either a vendored plugin directory or a plugin reference
@@ -197,7 +201,8 @@ func loadPlugins(root string, budget *skillSetBudget, diags *diagnostics.List) (
 		servers = append(servers, pluginServers...)
 		inputs = append(inputs, pluginInputs...)
 	}
-	return candidates, mergePluginServers(servers, diags), inputs
+	accepted, skipped := mergePluginServers(servers, diags)
+	return candidates, accepted, skipped, inputs
 }
 
 // loadPlugin validates one plugin's manifest and, when it is valid, its two
@@ -543,7 +548,6 @@ func loadPluginReference(dir, filename string, budget *skillSetBudget, diags *di
 	if !ok {
 		return nil, nil, inputs, name
 	}
-	_ = source // validated above; resolution below keys only on rev
 
 	if pluginCache == nil {
 		diags.Errorf("plugin.reference.unresolved", sourcePath,
@@ -551,7 +555,7 @@ func loadPluginReference(dir, filename string, budget *skillSetBudget, diags *di
 			name, rev)
 		return nil, nil, inputs, name
 	}
-	cachedRoot, err := pluginCache.Resolve(rev)
+	cachedRoot, err := pluginCache.Resolve(source, rev)
 	if err != nil {
 		diags.Errorf("plugin.reference.unresolved", sourcePath,
 			"plugin reference %q could not be resolved against the plugin cache for rev %s: %s; run `tenon plugin fetch`",

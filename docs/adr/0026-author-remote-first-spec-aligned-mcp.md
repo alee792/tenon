@@ -241,10 +241,11 @@ harness actually starts, without claiming enforcement it does not have —
 the direction is rejected with reasons and author↔plugin returns to
 failing closed.
 
-Plugin↔plugin server-name collisions remain fail-closed peers.
-Author↔plugin becomes a hierarchy: the author's `mcp/<name>.md` wins over a
-plugin-provided server of the same name, with a warning naming both
-sources, and a masking form (`override` naming the contributing plugin plus
+Plugin↔plugin server-name collisions remain ADR 0010's
+first-wins-with-warning, unchanged. Author↔plugin becomes a hierarchy: the
+author's `mcp/<name>.md` wins over a plugin-provided server of the same
+name, with a warning naming both sources, and a masking form (`override`
+naming the contributing plugin plus
 `enabled: false`) suppresses a plugin's server without replacing it. A
 dangling `override` fails validation — it is a load-bearing expectation,
 not a comment. `managed` stays reserved and unmaskable. Details and

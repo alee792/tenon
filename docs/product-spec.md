@@ -196,9 +196,12 @@ frontmatter (at most 1,024 characters) is
 model-facing usage context rendered once into generated instructions, with
 one boundary statement that the native harness owns MCP startup, trust,
 approval, authentication, discovery, calls, and effects. Composition policy
-splits by relationship (ADR 0026): `managed` and another connection still
-fail closed on a name collision, and so do two plugins declaring the same
-server name (first-wins-with-warning, unchanged). An authored server
+splits by relationship (ADR 0026): the reserved name `managed` fails for
+any connection that claims it (an authored `mcp/<name>.md` file is one per
+name, so two authored connections cannot otherwise collide on a name — the
+`mcp.name.collision` check exists only as defense-in-depth against a future
+change to that structure); two plugins declaring the same server name still
+resolve first-wins-with-warning, unchanged (ADR 0010). An authored server
 colliding with an accepted plugin server of the same name now wins instead
 of failing: the authored server is emitted, the plugin's is not, and a
 warning names both sources. A third, closed frontmatter form masks a
@@ -228,6 +231,12 @@ run `tenon apply` for each intended workspace. There is no update command;
 the Markdown is ordinary versioned source. Authoring an installed target
 through `mcp add` is not available yet — the file is written by hand, which
 every other command here treats identically (see Known limitations).
+`mcp status` is the one offline view of the agent's entire composed MCP
+surface (issue #54): it reports every authored connection, every accepted
+plugin-provided server, every plugin server an authored connection shadows,
+and every masking declaration, each as its own row; it never contacts
+anything, and required ambient environment variable names are reported by
+name only, matching `integration inspect`'s convention.
 
 The GitHub connection is the canonical installed target: the official
 `github/github-mcp-server` executable, installed as an integration package,

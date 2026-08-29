@@ -176,45 +176,89 @@ const (
 // checkLegacyConnectionsDir.
 const mcpAuthoredDir = "mcp"
 
+// ShadowedPluginServer names one accepted plugin-declared MCP server
+// suppressed because an authored mcp/<name>.md server of the same name won
+// (ADR 0026, issue #53). It exists for the offline status view (issue #54);
+// Load itself only needs the boolean fact, folded directly into
+// composedPluginServers.
+type ShadowedPluginServer struct {
+	// Server is the accepted plugin server that lost, exactly as loaded.
+	Server PluginServer
+	// ShadowedBy is the winning authored connection's SourcePath
+	// ("mcp/<name>.md").
+	ShadowedBy string
+}
+
+// MaskedPluginServer names one plugin-declared MCP server suppressed by a
+// valid (non-dangling) masking declaration (ADR 0026, issue #53). It exists
+// for the offline status view (issue #54).
+type MaskedPluginServer struct {
+	// Name is the masked server name (the mask file's own filename-derived
+	// name).
+	Name string
+	// Override is the plugin storage name the mask's "override" field
+	// names.
+	Override string
+	// SourcePath is the mask's own authored path, "mcp/<name>.md".
+	SourcePath string
+}
+
 // loadConnections discovers and validates the optional mcp/ directory,
 // returning the connections sorted by name, the accepted plugin MCP servers
 // with every author-shadowed or masked name already removed (ADR 0026,
-// issue #53's central composition seam), and every source file read as a
-// fingerprint input. pluginServers supplies the accepted plugin MCP servers
-// an authored connection composes against: a server-declaring connection of
-// the same name now wins with a warning (mcp.name.shadowed), and a masking
+// issue #53's central composition seam), every shadowed and every
+// (non-dangling) masked plugin server for the offline status view (issue
+// #54), and every source file read as a fingerprint input.
+//
+// pluginServers supplies the accepted plugin MCP servers an authored
+// connection composes against: a server-declaring connection of the same
+// name now wins with a warning (mcp.name.shadowed), and a masking
 // declaration (Kind == ConnectionKindMask) suppresses the named plugin
 // server outright with no warning and is never itself returned among the
-// rendered connections. A legacy connections/ directory fails closed with a
-// migration diagnostic rather than being silently ignored or read as mcp/.
-func loadConnections(root string, pluginServers []PluginServer, diags *diagnostics.List) ([]Connection, []PluginServer, []sourceInput) {
+// rendered connections. skippedPluginServers carries every plugin server
+// that lost a plugin-to-plugin naming collision (ADR 0010, unchanged) —
+// used only to give a dangling mask a precise diagnostic when the named
+// plugin did declare the server but lost that collision to a different
+// plugin, rather than the generic "no such server" message.
+// pluginsLoaded is false only for the legacy, plugin-blind status helper
+// (LoadConnectionsForStatus): in that mode neither the shadow nor the
+// dangling-override check can be trusted (there is no plugin data to check
+// against), so every mask is accepted without warning or error rather than
+// reporting a false mcp.override.dangling. A legacy connections/ directory
+// fails closed with a migration diagnostic rather than being silently
+// ignored or read as mcp/.
+func loadConnections(root string, pluginServers, skippedPluginServers []PluginServer, pluginsLoaded bool, diags *diagnostics.List) (
+	connections []Connection,
+	composedPluginServers []PluginServer,
+	shadowedServers []ShadowedPluginServer,
+	maskedServers []MaskedPluginServer,
+	inputs []sourceInput,
+) {
 	checkLegacyConnectionsDir(root, diags)
 
 	dir := filepath.Join(root, mcpAuthoredDir)
 	info, err := os.Lstat(dir)
 	if err != nil {
-		return nil, pluginServers, nil // mcp/ is optional
+		return nil, pluginServers, nil, nil, nil // mcp/ is optional
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		diags.Errorf("mcp.entry.invalid", mcpAuthoredDir,
 			"mcp must be a real directory; symlinks are never followed")
-		return nil, pluginServers, nil
+		return nil, pluginServers, nil, nil, nil
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		diags.Errorf("mcp.entry.invalid", mcpAuthoredDir, "mcp could not be read: %v", err)
-		return nil, pluginServers, nil
+		return nil, pluginServers, nil, nil, nil
 	}
 
-	pluginNames := make(map[string]string, len(pluginServers))
+	pluginByName := make(map[string]PluginServer, len(pluginServers))
 	for _, s := range pluginServers {
-		if _, ok := pluginNames[s.Name]; !ok {
-			pluginNames[s.Name] = s.SourcePath
+		if _, ok := pluginByName[s.Name]; !ok {
+			pluginByName[s.Name] = s
 		}
 	}
 
-	var connections []Connection
-	var inputs []sourceInput
 	seen := make(map[string]string, len(entries))
 	shadowed := make(map[string]bool, len(entries))
 	masked := make(map[string]bool, len(entries))
@@ -254,6 +298,12 @@ func loadConnections(root string, pluginServers []PluginServer, diags *diagnosti
 		if !ok {
 			continue
 		}
+		// Structurally unreachable in the current one-file-per-name layout:
+		// conn.Name is derived from entry.Name() by trimming exactly one
+		// ".md" suffix, so two distinct entries in one ReadDir listing can
+		// never derive the same name, and this branch never fires. It stays
+		// as defense-in-depth against a future change to name derivation,
+		// not a reachable collision surface today.
 		if earlier, collide := seen[conn.Name]; collide {
 			diags.Errorf("mcp.name.collision", conn.SourcePath,
 				"the connection name %q collides with the connection declared at %s; connection names must be unique",
@@ -263,35 +313,66 @@ func loadConnections(root string, pluginServers []PluginServer, diags *diagnosti
 		seen[conn.Name] = conn.SourcePath
 
 		if conn.Kind == ConnectionKindMask {
-			if !maskTargetsAcceptedServer(pluginServers, conn.Override, conn.Name) {
-				diags.Errorf("mcp.override.dangling", conn.SourcePath,
-					"the masking declaration's override %q names no MCP server %q actually contributed by an accepted plugin; a dangling override is rejected before workspace mutation",
-					"plugins/"+conn.Override, conn.Name)
-				continue
+			if pluginsLoaded {
+				if !maskTargetsAcceptedServer(pluginServers, conn.Override, conn.Name) {
+					diags.Errorf("mcp.override.dangling", conn.SourcePath, "%s",
+						danglingMaskDetail(pluginServers, skippedPluginServers, conn.Override, conn.Name))
+					continue
+				}
+				maskedServers = append(maskedServers, MaskedPluginServer{
+					Name: conn.Name, Override: conn.Override, SourcePath: conn.SourcePath,
+				})
 			}
 			masked[conn.Name] = true
 			continue // a mask carries no server declaration; never rendered
 		}
 
-		if sourcePath, collide := pluginNames[conn.Name]; collide {
+		if plugin, collide := pluginByName[conn.Name]; collide {
 			diags.Warnf("mcp.name.shadowed", conn.SourcePath,
 				"the authored server %q at %s takes precedence over the accepted plugin MCP server of the same name declared at %s; the plugin's server is not emitted",
-				conn.Name, conn.SourcePath, sourcePath)
+				conn.Name, conn.SourcePath, plugin.SourcePath)
 			shadowed[conn.Name] = true
+			shadowedServers = append(shadowedServers, ShadowedPluginServer{Server: plugin, ShadowedBy: conn.SourcePath})
 		}
 		connections = append(connections, conn)
 	}
 	slices.SortFunc(connections, func(a, b Connection) int { return strings.Compare(a.Name, b.Name) })
 	checkStdioBudget(connections, diags)
 
-	composedPluginServers := make([]PluginServer, 0, len(pluginServers))
+	composedPluginServers = make([]PluginServer, 0, len(pluginServers))
 	for _, s := range pluginServers {
 		if shadowed[s.Name] || masked[s.Name] {
 			continue
 		}
 		composedPluginServers = append(composedPluginServers, s)
 	}
-	return connections, composedPluginServers, inputs
+	return connections, composedPluginServers, shadowedServers, maskedServers, inputs
+}
+
+// danglingMaskDetail builds the mcp.override.dangling diagnostic detail for
+// a mask whose override does not name an accepted plugin server. When the
+// named plugin storage directory did declare a server of that name but lost
+// a plugin-to-plugin naming collision (ADR 0010, unchanged
+// first-wins-with-warning) to a different plugin, the message names the
+// winner explicitly rather than reporting the generic "no such server"
+// (post-#53-review finding: the generic message otherwise misleads an
+// author into thinking the plugin never declared the server at all).
+func danglingMaskDetail(pluginServers, skippedPluginServers []PluginServer, storage, name string) string {
+	for _, lost := range skippedPluginServers {
+		if lost.Plugin != storage || lost.Name != name {
+			continue
+		}
+		for _, winner := range pluginServers {
+			if winner.Name == name {
+				return fmt.Sprintf(
+					"the masking declaration's override %q names the plugin %q, which does declare an MCP server %q, but that server lost the plugin-to-plugin naming collision to %q; masking it here would leave %q's own server of the same name still rendered, which is not what this file names",
+					"plugins/"+storage, storage, name, winner.Plugin, winner.Plugin)
+			}
+		}
+	}
+	return fmt.Sprintf(
+		"the masking declaration's override %q names no MCP server %q actually contributed by an accepted plugin; a dangling override is rejected before workspace mutation",
+		"plugins/"+storage, name)
 }
 
 // maskTargetsAcceptedServer reports whether pluginServers contains an
@@ -487,18 +568,20 @@ func parseConnection(content, root, path string, budget *stdioReadBudget, diags 
 	keys := doc.Keys()
 
 	// The masking form (ADR 0026, issue #53) is tenon's own closed third
-	// union arm: exactly "override" and "enabled", and no "type" at all. It
-	// is detected ahead of the "type" dispatch below so that a file mixing
-	// "override" with a server-declaring field (e.g. "url") is rejected as
-	// an unknown field of whichever form actually applies, rather than as a
-	// missing "type".
-	if !doc.Has("type") && (doc.Has("override") || doc.Has("enabled")) {
+	// union arm: exactly "override" and "enabled", and no "type" at all. The
+	// arm triggers on "override" alone (not "enabled" alone, which a
+	// type-less server declaration missing "enabled" would also carry,
+	// misleadingly, as a masking error) — it is detected ahead of the "type"
+	// dispatch below so that a file mixing "override" with a
+	// server-declaring field (e.g. "url") is rejected as an unknown field of
+	// whichever form actually applies, rather than as a missing "type".
+	if !doc.Has("type") && doc.Has("override") {
 		return parseMaskConnection(doc, content, bodyStart, path, diags)
 	}
 
 	if !doc.Has("type") {
 		diags.Errorf("mcp.frontmatter.missing", path,
-			"frontmatter must carry the field \"type\" set to \"streamable-http\", \"stdio\", or \"installed\"")
+			"frontmatter must carry the field \"type\" set to \"streamable-http\", \"stdio\", or \"installed\"; a masking declaration instead carries exactly \"override\" and \"enabled: false\"")
 		return nil, nil, false
 	}
 	typeVal, err := doc.String("type")
@@ -643,6 +726,11 @@ func parseMaskConnection(doc *frontmatter.Doc, content string, bodyStart int, pa
 	}
 	storage, ok := parseOverrideTarget(overrideRaw)
 	if !ok {
+		if trimmed, isRef := strings.CutSuffix(strings.TrimPrefix(overrideRaw, "plugins/"), ".md"); isRef && trimmed != "" && !strings.Contains(trimmed, "/") {
+			diags.Errorf("mcp.override.invalid", path,
+				"frontmatter field \"override\" must name the plugin, not its reference file: use \"plugins/%s\" instead of %q", trimmed, overrideRaw)
+			return nil, nil, false
+		}
 		diags.Errorf("mcp.override.invalid", path,
 			"frontmatter field \"override\" must be exactly \"plugins/<name>\" naming one plugins/ entry; found %q", overrideRaw)
 		return nil, nil, false
@@ -650,7 +738,11 @@ func parseMaskConnection(doc *frontmatter.Doc, content string, bodyStart int, pa
 
 	enabled, err := doc.Bool("enabled")
 	if err != nil {
-		diags.Errorf("mcp.override.invalid", path,
+		// A wrong-typed field is mcp.frontmatter.invalid, the identifier
+		// established elsewhere for exactly this shape of violation (a
+		// present field of the wrong YAML type); mcp.override.invalid is
+		// reserved for a wrong-shaped "override" value.
+		diags.Errorf("mcp.frontmatter.invalid", path,
 			"frontmatter field \"enabled\" must be the YAML boolean true or false")
 		return nil, nil, false
 	}
@@ -677,11 +769,14 @@ func parseMaskConnection(doc *frontmatter.Doc, content string, bodyStart int, pa
 
 // parseOverrideTarget splits a masking declaration's "override" value into
 // the plugin storage name after its required "plugins/" prefix, rejecting
-// anything else (no prefix, empty remainder, or a remainder carrying a
-// further "/", since a plugins/ entry name is one path segment).
+// anything else (no prefix, empty remainder, a remainder carrying a further
+// "/" since a plugins/ entry name is one path segment, or a remainder
+// ending ".md" — a plugin storage name, never a plugin reference file's own
+// filename; the caller recognizes that specific shape to offer a precise
+// hint instead of this function's generic rejection).
 func parseOverrideTarget(raw string) (string, bool) {
 	storage, ok := strings.CutPrefix(raw, "plugins/")
-	if !ok || storage == "" || strings.Contains(storage, "/") {
+	if !ok || storage == "" || strings.Contains(storage, "/") || strings.HasSuffix(storage, ".md") {
 		return "", false
 	}
 	return storage, true
@@ -894,14 +989,18 @@ func ValidateConnectionHeaders(headers map[string]string) error {
 // LoadConnectionsForStatus validates every mcp/<name>.md entry independent
 // of the rest of the project's validity: unlike Load, one malformed
 // connection or an unrelated project defect never suppresses reporting the
-// others, which is exactly what "tenon mcp status" needs. It does not load
-// plugins, so it cannot detect a connection/plugin server name collision or
-// shadow, and every masking declaration necessarily reports
-// mcp.override.dangling here (there is no plugin server list to check it
-// against) and is never returned among the connections; Load remains the
-// authority for composition at apply and validate time. Issue #54's status
-// view is expected to load plugins itself and call the lower-level
-// composition path directly rather than reuse this helper unchanged.
+// others. It does not load plugins, so it cannot detect a connection/plugin
+// server name collision or shadow; a masking declaration is accepted
+// without reporting mcp.override.dangling here regardless of whether it
+// would actually resolve, because there is no plugin server list to check
+// it against and reporting dangling anyway would be a false positive, not a
+// real finding (this was a real regression once: bare "mcp status" exiting
+// nonzero on an otherwise legitimate mask, fixed alongside issue #54's
+// status rework). Load remains the authority for composition at apply and
+// validate time. `tenon mcp status` itself calls LoadMCPSurface instead,
+// which does load plugins and reports the full composed view (issue #54);
+// this helper remains for a caller that deliberately wants connection-only
+// validation with no plugin composition at all.
 func LoadConnectionsForStatus(root string) ([]Connection, *diagnostics.List, error) {
 	diags := &diagnostics.List{}
 	abs, err := filepath.Abs(root)
@@ -913,7 +1012,7 @@ func LoadConnectionsForStatus(root string) ([]Connection, *diagnostics.List, err
 		diags.Errorf("project.root.missing", ".", "the agent root must be an existing directory: %s", root)
 		return nil, diags, nil
 	}
-	connections, _, _ := loadConnections(abs, nil, diags)
+	connections, _, _, _, _ := loadConnections(abs, nil, nil, false, diags)
 	return connections, diags, nil
 }
 

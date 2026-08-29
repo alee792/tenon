@@ -77,7 +77,7 @@ func TestFetchThenResolveRoundTrips(t *testing.T) {
 		t.Fatalf("Fetch returned an empty digest")
 	}
 
-	root, err := cache.Resolve(rev)
+	root, err := cache.Resolve(repo, rev)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestFetchThenResolveRoundTrips(t *testing.T) {
 func TestResolveWithoutFetchFails(t *testing.T) {
 	cache := NewCache(t.TempDir())
 	rev := strings.Repeat("a", 40)
-	if _, err := cache.Resolve(rev); err == nil {
+	if _, err := cache.Resolve("https://example.invalid/x", rev); err == nil {
 		t.Fatal("expected Resolve to fail for an unfetched rev")
 	} else if perr, ok := err.(*Error); !ok || perr.Code != "pluginref.not-cached" {
 		t.Fatalf("expected pluginref.not-cached, got %v", err)
@@ -121,17 +121,39 @@ func TestResolveDetectsTamperedContent(t *testing.T) {
 	if _, err := cache.Fetch(repo, rev); err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
-	root, err := cache.Resolve(rev)
+	root, err := cache.Resolve(repo, rev)
 	if err != nil {
 		t.Fatalf("Resolve before tamper: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(root, "plugin.json"), []byte("tampered"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := cache.Resolve(rev); err == nil {
+	if _, err := cache.Resolve(repo, rev); err == nil {
 		t.Fatal("expected Resolve to fail after the cached tree was tampered with")
 	} else if perr, ok := err.(*Error); !ok || perr.Code != "pluginref.digest.mismatch" {
 		t.Fatalf("expected pluginref.digest.mismatch, got %v", err)
+	}
+}
+
+// TestResolveDetectsSourceMismatch proves Resolve fails when the caller's
+// source disagrees with the source recorded at fetch time for the same
+// rev, independent of the tree's digest still verifying cleanly: a rev is
+// content-addressed, not source-addressed, so this is the one swap the
+// digest alone cannot catch.
+func TestResolveDetectsSourceMismatch(t *testing.T) {
+	repo, rev := newFixtureRepo(t, map[string]string{"plugin.json": `{"$schema":"x","name":"fixture"}`})
+	cache := NewCache(t.TempDir())
+	if _, err := cache.Fetch(repo, rev); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if _, err := cache.Resolve("https://example.invalid/a-different-repo", rev); err == nil {
+		t.Fatal("expected Resolve to fail when the declared source disagrees with the recorded one")
+	} else if perr, ok := err.(*Error); !ok || perr.Code != "pluginref.source.mismatch" {
+		t.Fatalf("expected pluginref.source.mismatch, got %v", err)
+	}
+	// The identical source still resolves cleanly.
+	if _, err := cache.Resolve(repo, rev); err != nil {
+		t.Fatalf("Resolve with the correct source: %v", err)
 	}
 }
 
@@ -177,14 +199,14 @@ func TestResolveDetectsDeletedFile(t *testing.T) {
 	if _, err := cache.Fetch(repo, rev); err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
-	root, err := cache.Resolve(rev)
+	root, err := cache.Resolve(repo, rev)
 	if err != nil {
 		t.Fatalf("Resolve before tamper: %v", err)
 	}
 	if err := os.Remove(filepath.Join(root, "extra.txt")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := cache.Resolve(rev); err == nil {
+	if _, err := cache.Resolve(repo, rev); err == nil {
 		t.Fatal("expected Resolve to fail after a cached file was deleted")
 	} else if perr, ok := err.(*Error); !ok || perr.Code != "pluginref.digest.mismatch" {
 		t.Fatalf("expected pluginref.digest.mismatch, got %v", err)
@@ -199,14 +221,14 @@ func TestResolveDetectsAddedFile(t *testing.T) {
 	if _, err := cache.Fetch(repo, rev); err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
-	root, err := cache.Resolve(rev)
+	root, err := cache.Resolve(repo, rev)
 	if err != nil {
 		t.Fatalf("Resolve before tamper: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(root, "smuggled.txt"), []byte("not part of the fetch"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := cache.Resolve(rev); err == nil {
+	if _, err := cache.Resolve(repo, rev); err == nil {
 		t.Fatal("expected Resolve to fail after an extra file was added to the cached tree")
 	} else if perr, ok := err.(*Error); !ok || perr.Code != "pluginref.digest.mismatch" {
 		t.Fatalf("expected pluginref.digest.mismatch, got %v", err)
@@ -222,14 +244,14 @@ func TestResolveDetectsExecutableBitChange(t *testing.T) {
 	if _, err := cache.Fetch(repo, rev); err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
-	root, err := cache.Resolve(rev)
+	root, err := cache.Resolve(repo, rev)
 	if err != nil {
 		t.Fatalf("Resolve before tamper: %v", err)
 	}
 	if err := os.Chmod(filepath.Join(root, "plugin.json"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := cache.Resolve(rev); err == nil {
+	if _, err := cache.Resolve(repo, rev); err == nil {
 		t.Fatal("expected Resolve to fail after the executable bit changed")
 	} else if perr, ok := err.(*Error); !ok || perr.Code != "pluginref.digest.mismatch" {
 		t.Fatalf("expected pluginref.digest.mismatch, got %v", err)
@@ -263,7 +285,7 @@ func TestVerifyRejectsWrongRecordedDigest(t *testing.T) {
 	if err := os.WriteFile(statePath, rewritten, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := cache.Resolve(rev); err == nil {
+	if _, err := cache.Resolve(repo, rev); err == nil {
 		t.Fatal("expected Resolve to fail against a wrong recorded digest")
 	} else if perr, ok := err.(*Error); !ok || perr.Code != "pluginref.digest.mismatch" {
 		t.Fatalf("expected pluginref.digest.mismatch, got %v", err)

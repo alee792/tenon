@@ -9,10 +9,17 @@ package agentproject
 type PluginCache interface {
 	// Resolve returns the absolute path to rev's cached, digest-verified
 	// plugin tree, or an error naming why resolution failed (no cache entry,
-	// a digest mismatch). It must perform no network operation: Load never
-	// fetches anything, by construction, because it never calls anything
-	// but Resolve.
-	Resolve(rev string) (root string, err error)
+	// a digest mismatch, or source names a different provenance than the one
+	// recorded for rev at fetch time). It must perform no network operation:
+	// Load never fetches anything, by construction, because it never calls
+	// anything but Resolve. source is the exact value the reference file
+	// itself declares, so a source swap on an already-cached rev — a rev
+	// reused by mistake, or in bad faith, to point the same content-addressed
+	// cache entry at a claim of different provenance — is caught here, at
+	// Load time, rather than only by a later `tenon plugin fetch` or
+	// `tenon plugin status` (both of which already re-check the recorded
+	// source independently).
+	Resolve(source, rev string) (root string, err error)
 }
 
 // pluginCache is the plugin cache every subsequent Load call consults to

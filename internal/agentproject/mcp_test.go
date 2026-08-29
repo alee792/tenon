@@ -1093,6 +1093,110 @@ func TestMaskJoinsFingerprint(t *testing.T) {
 	}
 }
 
+// TestLoadMaskArmTriggersOnOverrideAlone proves the masking union arm is
+// detected by the presence of "override" alone, not "override or enabled"
+// (post-#53-review finding): a type-less file carrying "enabled" without
+// "override" is a missing-type server declaration, never a masking
+// declaration, and must be reported as such rather than with a masking
+// diagnostic that would obscure the real problem.
+func TestLoadMaskArmTriggersOnOverrideAlone(t *testing.T) {
+	root := writeAgent(t, "agent", validInstructions)
+	writeConnectionFile(t, root, "catalog.md", "---\nenabled: false\n---\n")
+
+	_, diags, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireErrorID(t, diags, "mcp.frontmatter.missing")
+	for _, d := range diags.All() {
+		if d.ID == "mcp.frontmatter.missing" && !strings.Contains(d.Rule, "masking declaration") {
+			t.Fatalf("expected the missing-type message to name the masking declaration shape as an alternative: %v", diags.All())
+		}
+	}
+}
+
+// TestLoadMaskEnabledWrongTypeIsFrontmatterInvalid proves a wrong-typed
+// "enabled" value on an otherwise well-formed masking declaration is
+// reported as mcp.frontmatter.invalid, the identifier established for a
+// present field of the wrong YAML type, not mcp.override.invalid (post-#53-
+// review finding).
+func TestLoadMaskEnabledWrongTypeIsFrontmatterInvalid(t *testing.T) {
+	root := writeAgent(t, "agent", validInstructions)
+	writeConnectionFile(t, root, "catalog.md", "---\noverride: plugins/vendor-x\nenabled: \"nope\"\n---\n")
+
+	_, diags, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireErrorID(t, diags, "mcp.frontmatter.invalid")
+	for _, d := range diags.All() {
+		if d.ID == "mcp.override.invalid" {
+			t.Fatalf("a wrong-typed enabled must never report mcp.override.invalid: %v", diags.All())
+		}
+	}
+}
+
+// TestLoadMaskOverrideReferenceFileRejectedWithHint proves naming a plugin
+// reference file's own filename in "override" (a common mistake: "plugins/
+// x.md" instead of "plugins/x") is rejected with a hint naming the correct
+// form, rather than the generic bad-grammar message (post-#53-review
+// finding).
+func TestLoadMaskOverrideReferenceFileRejectedWithHint(t *testing.T) {
+	root := writeAgent(t, "agent", validInstructions)
+	writeConnectionFile(t, root, "catalog.md", maskConnection("plugins/vendor-x.md", false))
+
+	_, diags, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireErrorID(t, diags, "mcp.override.invalid")
+	found := false
+	for _, d := range diags.All() {
+		if d.ID == "mcp.override.invalid" && strings.Contains(d.Rule, "name the plugin, not its reference file") &&
+			strings.Contains(d.Rule, "plugins/vendor-x") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected a hint naming the plugin storage name instead of the reference file, got %v", diags.All())
+	}
+}
+
+// TestLoadMaskDanglingNamesWinningPluginOnCollision proves a mask naming a
+// plugin that did declare the overridden server, but lost a plugin-to-plugin
+// naming collision (ADR 0010, unchanged) to a different plugin, reports the
+// winning plugin by name rather than the generic "no such server" message
+// (post-#53-review finding 4): the author needs to know the server the mask
+// would need to suppress is actually rendered by the winner, not by the
+// plugin they named.
+func TestLoadMaskDanglingNamesWinningPluginOnCollision(t *testing.T) {
+	root := writeAgent(t, "agent", validInstructions)
+	// "alpha" and "beta" both declare "catalog"; first-wins-with-warning
+	// (ADR 0010) means "alpha" (lexically first) wins and "beta" loses.
+	writePluginManifest(t, root, "alpha", validPluginJSON("alpha"))
+	writePluginMCP(t, root, "alpha", mcpDoc(`"catalog": {"command": "server-a"}`))
+	writePluginManifest(t, root, "beta", validPluginJSON("beta"))
+	writePluginMCP(t, root, "beta", mcpDoc(`"catalog": {"command": "server-b"}`))
+	// The mask names the loser, "beta", not the winner "alpha".
+	writeConnectionFile(t, root, "catalog.md", maskConnection("plugins/beta", false))
+
+	_, diags, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireErrorID(t, diags, "mcp.override.dangling")
+	found := false
+	for _, d := range diags.All() {
+		if d.ID == "mcp.override.dangling" && strings.Contains(d.Rule, "beta") && strings.Contains(d.Rule, "alpha") &&
+			strings.Contains(d.Rule, "naming collision") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected the dangling message to name both the losing plugin and the winner, got %v", diags.All())
+	}
+}
+
 // --- Fingerprint sensitivity --------------------------------------------------
 
 func TestConnectionJoinsFingerprint(t *testing.T) {

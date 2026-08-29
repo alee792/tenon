@@ -335,15 +335,33 @@ func protocolConfig(source string) []string {
 }
 
 // Resolve returns the absolute path to rev's cached, digest-verified plugin
-// tree. It satisfies agentproject.PluginCache: Load calls exactly this, and
-// only this, to resolve a plugins/<name>.md reference file — never Fetch.
-// It performs no network operation.
-func (c *Cache) Resolve(rev string) (string, error) {
+// tree, after checking that the recorded state's Source equals source. It
+// satisfies agentproject.PluginCache: Load calls exactly this, and only
+// this, to resolve a plugins/<name>.md reference file — never Fetch. It
+// performs no network operation.
+//
+// The source check catches a swap Verify's digest re-hash alone cannot: the
+// cache is keyed only by rev, so a rev reused under a different declared
+// source would otherwise resolve to content whose provenance no longer
+// matches what the reference file claims. `tenon plugin fetch` and
+// `tenon plugin status` already re-check this independently via State; this
+// makes the same check load-bearing at Load time itself, for every command
+// that loads a project, not only the two that inspect plugin references
+// directly.
+func (c *Cache) Resolve(source, rev string) (string, error) {
 	var root string
 	err := c.withLock(func() error {
-		r, _, err := c.verify(rev)
+		r, _, state, err := c.verifyState(rev)
+		if err != nil {
+			return err
+		}
+		if state.Source != source {
+			return errorf("pluginref.source.mismatch",
+				"rev %s is cached from a different source (%s) than the one now declared (%s); a rev is content-addressed, not source-addressed, so this is either a stale local cache entry or a genuine provenance change — re-run tenon plugin fetch to confirm and re-pin",
+				rev, boundText(state.Source, 256), boundText(source, 256))
+		}
 		root = r
-		return err
+		return nil
 	})
 	if err != nil {
 		return "", err

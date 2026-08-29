@@ -1510,6 +1510,51 @@ func TestMCPSubcommandRejectsUnknownVerbs(t *testing.T) {
 	}
 }
 
+// TestMCPStatusReportsComposedSurface proves `tenon mcp status` (issue #54)
+// reports the full composed MCP surface, not just authored connections: a
+// plugin-provided server, an authored server shadowing another plugin
+// server, and a masking declaration each get their own row, and env-name
+// requirements are named without ever printing a value.
+func TestMCPStatusReportsComposedSurface(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	writeFile(t, agent, "plugins/vendor-x/plugin.json",
+		[]byte(`{"$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json", "name": "vendor-x"}`), 0o644)
+	writeFile(t, agent, "plugins/vendor-x/mcp.json",
+		[]byte(`{"$schema": "`+pluginMCPSchema+`", "mcpServers": {`+
+			`"catalog": {"command": "server"}, `+
+			`"legacy": {"command": "old-server", "env": {"TOKEN": "${ACME_TOKEN}"}}, `+
+			`"other": {"command": "server2"}}}`), 0o644)
+	writeFile(t, agent, "mcp/catalog.md",
+		[]byte("---\ntype: streamable-http\nurl: https://example.com/mcp\nheaders:\n  Authorization: \"Bearer ${ACME_KEY}\"\n---\n"), 0o644)
+	writeFile(t, agent, "mcp/legacy.md", []byte("---\noverride: plugins/vendor-x\nenabled: false\n---\n"), 0o644)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"mcp", "status", agent}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("status exit %d: %s", code, stderr.String())
+	}
+	out := stdout.String()
+
+	if !strings.Contains(out, "catalog: target=remote") {
+		t.Fatalf("expected the authored, shadowing catalog connection reported: %s", out)
+	}
+	if !strings.Contains(out, "requires ambient env: ACME_KEY (value=not-read)") {
+		t.Fatalf("expected catalog's required env name without a value: %s", out)
+	}
+	if !strings.Contains(out, "other: target=plugin plugin=vendor-x transport=stdio") {
+		t.Fatalf("expected the surviving plugin server other reported: %s", out)
+	}
+	if !strings.Contains(out, "catalog: target=plugin plugin=vendor-x transport=stdio shadowed-by=mcp/catalog.md") {
+		t.Fatalf("expected the shadowed plugin server catalog reported: %s", out)
+	}
+	if !strings.Contains(out, "legacy: target=mask override=plugins/vendor-x") {
+		t.Fatalf("expected the masked server legacy reported as its own row: %s", out)
+	}
+	if strings.Contains(out, "old-server") {
+		t.Fatalf("a masked plugin server's own declaration must never render: %s", out)
+	}
+}
+
 // pluginMCPSchema is the canonical Agent Plugins v1.0.0 MCP schema
 // identifier every plugin mcp.json must target.
 const pluginMCPSchema = "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json"
