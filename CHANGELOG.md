@@ -9,92 +9,6 @@ The first release, v0.1.0, ships the core described in
 
 ### Added
 
-- Plugin acquisition by pointer and pin (issue #52, ADR 0026 § plugin
-  acquisition): `plugins/<name>.md` may now declare a plugin by reference
-  instead of vendoring it, with closed frontmatter naming an absolute HTTPS
-  `source` and a full 40-character commit `rev`, plus an optional bounded
-  provenance body never rendered into instructions. A new `tenon plugin`
-  verb adds three commands: `tenon plugin fetch AGENT [NAME]`, the one
-  explicitly online step, resolves each reference into a new owner-only,
-  content-addressed plugin cache (`internal/pluginref`) by shelling out to
-  the system `git` executable; `tenon plugin update AGENT NAME --rev REV`
-  fetches the new revision, prints a bounded added/removed/changed
-  component-path diff against the currently pinned revision, and only then
-  rewrites the reference file's `rev`; `tenon plugin status AGENT [NAME]`
-  reports each reference's declared pin and offline resolution health.
-  `tenon apply`, `tenon validate`, and every other project load stay fully
-  offline: a reference file resolves against the cache with an offline
-  digest re-verification and fails, naming `tenon plugin fetch`, when the
-  pin is not cached or no longer matches its recorded digest. A resolved
-  reference's plugin tree loads through the identical manifest, `skills/`,
-  and `mcp.json` validation a vendored `plugins/<name>/` directory uses, and
-  its resolved bytes join the project fingerprint on the same terms as
-  vendored bytes; the reference file's own bytes always join the
-  fingerprint too. A reference and a vendored directory sharing a name fail
-  the project before any workspace mutation
-  (`plugin.entry.collision`). Vendoring a complete directory beneath
-  `plugins/<name>/` remains fully supported and requires none of this. New
-  diagnostic identifiers: `plugin.entry.invalid` (extended to cover
-  malformed reference filenames), `plugin.entry.collision`,
-  `plugin.reference.invalid`, `plugin.reference.frontmatter.missing`,
-  `plugin.reference.frontmatter.invalid`,
-  `plugin.reference.frontmatter.unknown-field`,
-  `plugin.reference.source.invalid`, `plugin.reference.rev.invalid`,
-  `plugin.reference.body.too-long`, and `plugin.reference.unresolved`.
-  `agentproject.PluginCache.Resolve` now takes both the declared source and
-  the rev (previously rev alone), so a rev reused under a different
-  declared source is caught at `Load` time itself — a rev is
-  content-addressed, not source-addressed, so this is a swap the digest
-  check alone cannot catch — rather than only by a later `tenon plugin
-  fetch`/`status`, which already re-checked it independently.
-- Composition policy split by relationship (issue #53, ADR 0026 §
-  composition policy): an authored `mcp/<name>.md` server declaration
-  colliding with an accepted plugin server of the same name now wins
-  instead of failing the project — the authored server is emitted, the
-  plugin's is not, and a warning (`mcp.name.shadowed`) names both sources.
-  Plugin-to-plugin collisions are unchanged (still ADR 0010's
-  first-wins-with-warning, never fail-closed). A new closed frontmatter
-  form masks a plugin's server outright, with no authored replacement:
-  exactly `override: plugins/<storage-name>` and `enabled: false`, no
-  `type` and no other field, and no body — masking is deliberate, so it
-  produces no warning; the
-  mask file is the record. A dangling override (the named plugin absent, or
-  present but not actually contributing a server named for that file) fails
-  before workspace mutation (`mcp.override.dangling`), as does `enabled:
-  true` (`mcp.override.enabled` — a true mask would be a no-op) and a
-  non-empty body (`mcp.override.body` — a mask declares absence, not
-  guidance); a malformed `override` value fails as `mcp.override.invalid`.
-  `managed` remains reserved and unmaskable. Suppression is computed once in
-  `internal/agentproject`, so both native drivers render the identical
-  composed server set with no per-driver collision logic. New diagnostic
-  identifiers: `mcp.name.shadowed`, `mcp.override.invalid`,
-  `mcp.override.dangling`, `mcp.override.enabled`, and `mcp.override.body`.
-
-- `tenon mcp status` is now the one offline view of an agent's entire
-  composed MCP surface (issue #54), not just its authored connections: it
-  loads plugins alongside `mcp/`, reusing the identical composition
-  `tenon apply`/`validate` already perform, and reports one row per
-  authored connection (unchanged), one row per accepted plugin-provided
-  server (`target=plugin`), one row per plugin server an authored
-  connection shadows (`shadowed-by=<path>`), and one row per masking
-  declaration (`target=mask`). An authored connection's `${VAR}`-backed
-  header or stdio env values are also named — never their values — matching
-  `tenon integration inspect`'s existing convention. A handful of review
-  findings from issue #53 land alongside this rework: a bare `mcp status`
-  no longer reports a false `mcp.override.dangling` on a legitimate mask
-  (a regression in the prior, plugin-blind status path); the masking union
-  arm now triggers on the presence of `override` alone, not `override` or
-  `enabled`, so a type-less server declaration missing `enabled` is
-  reported as a missing `type` rather than a misleading masking error; a
-  wrong-typed `enabled` now fails as `mcp.frontmatter.invalid`, the
-  identifier already established for a present field of the wrong YAML
-  type, rather than `mcp.override.invalid`; `override: plugins/x.md` now
-  fails as `mcp.override.invalid` with a hint to name the plugin
-  (`plugins/x`), not its reference file; and a mask naming a plugin that
-  did declare the overridden server but lost a plugin-to-plugin naming
-  collision (ADR 0010, unchanged) now names the winning plugin explicitly
-  instead of reporting a generic dangling override.
-
 - Standalone MCP connections move from `connections/` to `mcp/`, re-shaped to
   the Agent Plugins 1.0 `mcp.json` server-entry vocabulary (issue #49): a
   remote connection now declares `type: streamable-http` (replacing
@@ -144,6 +58,93 @@ The first release, v0.1.0, ships the core described in
   reported and omitted (`mcp.env.not-honored`). New diagnostic identifiers:
   `mcp.command.invalid`, `mcp.cwd.invalid`, `mcp.args.invalid`,
   `mcp.env.invalid`, `mcp.env.not-honored`, and `mcp.stdio.bounds.exceeded`.
+
+- Plugin acquisition by pointer and pin (issue #52, ADR 0026 § plugin
+  acquisition): `plugins/<name>.md` may now declare a plugin by reference
+  instead of vendoring it, with closed frontmatter naming an absolute HTTPS
+  `source` and a full 40-character commit `rev`, plus an optional bounded
+  provenance body never rendered into instructions. A new `tenon plugin`
+  verb adds three commands: `tenon plugin fetch AGENT [NAME]`, the one
+  explicitly online step, resolves each reference into a new owner-only,
+  content-addressed plugin cache (`internal/pluginref`) by shelling out to
+  the system `git` executable; `tenon plugin update AGENT NAME --rev REV`
+  fetches the new revision, prints a bounded added/removed/changed
+  component-path diff against the currently pinned revision, and only then
+  rewrites the reference file's `rev`; `tenon plugin status AGENT [NAME]`
+  reports each reference's declared pin and offline resolution health.
+  `tenon apply`, `tenon validate`, and every other project load stay fully
+  offline: a reference file resolves against the cache with an offline
+  digest re-verification and fails, naming `tenon plugin fetch`, when the
+  pin is not cached or no longer matches its recorded digest. A resolved
+  reference's plugin tree loads through the identical manifest, `skills/`,
+  and `mcp.json` validation a vendored `plugins/<name>/` directory uses, and
+  its resolved bytes join the project fingerprint on the same terms as
+  vendored bytes; the reference file's own bytes always join the
+  fingerprint too. A reference and a vendored directory sharing a name fail
+  the project before any workspace mutation
+  (`plugin.entry.collision`). Vendoring a complete directory beneath
+  `plugins/<name>/` remains fully supported and requires none of this. New
+  diagnostic identifiers: `plugin.entry.invalid` (extended to cover
+  malformed reference filenames), `plugin.entry.collision`,
+  `plugin.reference.invalid`, `plugin.reference.frontmatter.missing`,
+  `plugin.reference.frontmatter.invalid`,
+  `plugin.reference.frontmatter.unknown-field`,
+  `plugin.reference.source.invalid`, `plugin.reference.rev.invalid`,
+  `plugin.reference.body.too-long`, and `plugin.reference.unresolved`.
+  `agentproject.PluginCache.Resolve` now takes both the declared source and
+  the rev (previously rev alone), so a rev reused under a different
+  declared source is caught at `Load` time itself — a rev is
+  content-addressed, not source-addressed, so this is a swap the digest
+  check alone cannot catch — rather than only by a later `tenon plugin
+  fetch`/`status`, which already re-checked it independently.
+
+- Composition policy split by relationship (issue #53, ADR 0026 §
+  composition policy): an authored `mcp/<name>.md` server declaration
+  colliding with an accepted plugin server of the same name now wins
+  instead of failing the project — the authored server is emitted, the
+  plugin's is not, and a warning (`mcp.name.shadowed`) names both sources.
+  Plugin-to-plugin collisions are unchanged (still ADR 0010's
+  first-wins-with-warning, never fail-closed). A new closed frontmatter
+  form masks a plugin's server outright, with no authored replacement:
+  exactly `override: plugins/<storage-name>` and `enabled: false`, no
+  `type` and no other field, and no body — masking is deliberate, so it
+  produces no warning; the
+  mask file is the record. A dangling override (the named plugin absent, or
+  present but not actually contributing a server named for that file) fails
+  before workspace mutation (`mcp.override.dangling`), as does `enabled:
+  true` (`mcp.override.enabled` — a true mask would be a no-op) and a
+  non-empty body (`mcp.override.body` — a mask declares absence, not
+  guidance); a malformed `override` value fails as `mcp.override.invalid`.
+  `managed` remains reserved and unmaskable. Suppression is computed once in
+  `internal/agentproject`, so both native drivers render the identical
+  composed server set with no per-driver collision logic. New diagnostic
+  identifiers: `mcp.name.shadowed`, `mcp.override.invalid`,
+  `mcp.override.dangling`, `mcp.override.enabled`, and `mcp.override.body`.
+
+- `tenon mcp status` is now the one offline view of an agent's entire
+  composed MCP surface (issue #54), not just its authored connections: it
+  loads plugins alongside `mcp/`, reusing the identical composition
+  `tenon apply`/`validate` already perform, and reports one row per
+  authored connection (unchanged), one row per accepted plugin-provided
+  server (`target=plugin`), one row per plugin server an authored
+  connection shadows (`shadowed-by=<path>`), and one row per masking
+  declaration (`target=mask`). An authored connection's `${VAR}`-backed
+  header or stdio env values are also named — never their values — matching
+  `tenon integration inspect`'s existing convention. A handful of review
+  findings from issue #53 land alongside this rework: a bare `mcp status`
+  no longer reports a false `mcp.override.dangling` on a legitimate mask
+  (a regression in the prior, plugin-blind status path); the masking union
+  arm now triggers on the presence of `override` alone, not `override` or
+  `enabled`, so a type-less server declaration missing `enabled` is
+  reported as a missing `type` rather than a misleading masking error; a
+  wrong-typed `enabled` now fails as `mcp.frontmatter.invalid`, the
+  identifier already established for a present field of the wrong YAML
+  type, rather than `mcp.override.invalid`; `override: plugins/x.md` now
+  fails as `mcp.override.invalid` with a hint to name the plugin
+  (`plugins/x`), not its reference file; and a mask naming a plugin that
+  did declare the overridden server but lost a plugin-to-plugin naming
+  collision (ADR 0010, unchanged) now names the winning plugin explicitly
+  instead of reporting a generic dangling override.
 
 - `tenon stage` never emits a Go tool tree that verifies but cannot serve
   (issue #14): the staged apply record now names the closure root relative
@@ -287,13 +288,14 @@ The first release, v0.1.0, ships the core described in
 
 - `tenon apply` and `tenon validate` compile one filesystem-authored agent
   project (`instructions.md`, `skills/`, `plugins/`, `tools/`,
-  `subagents/`, `connections/`, `schedules/`, `harnesses/`)
+  `subagents/`, `mcp/`, `schedules/`, `harnesses/`)
   deterministically into native configuration for Claude Code and Codex,
   refusing hand-authored and modified-owned files before any mutation and
   reporting failures as prose or stable-identifier JSONL diagnostics.
-- Authored TypeScript, Python, and Go tools, and vendored Agent Plugin
-  skills and MCP declarations, join subagents and native connections on
-  one managed MCP boundary, with content-free lifecycle audit.
+- Authored TypeScript, Python, and Go tools reach both harnesses through one
+  managed MCP boundary with content-free lifecycle audit; Agent Plugin
+  skills and MCP declarations, subagents, and authored `mcp/` servers compile
+  alongside it into ordinary native configuration the harness owns.
 - `tenon run` dispatches bounded JSONL turns through the real Claude and
   Codex drivers with FIFO queuing, dedup, and session resume.
 - `tenon schedule run` is a foreground UTC cron clock.
@@ -318,6 +320,10 @@ for the full list. Notably:
   they are specific to each project's own source; only the pinned CPython
   interpreter and `deno` executable themselves are shared machine-wide
   (issue #38), not a project's locked dependencies.
+- A remote MCP server's behavior is not pinned by the source fingerprint: a
+  hosted endpoint's tool catalog can change under an unchanged fingerprint.
+- `tenon stage` does not yet carry a fetched plugin reference's resolved
+  bytes into the staged tree (issue #58); vendor a plugin a container needs.
 - A supplied manifest is verified at `tenon run`'s session start, not
   re-verified per turn within that session (`schedule run` re-verifies
   each occurrence).

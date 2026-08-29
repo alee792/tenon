@@ -33,13 +33,13 @@ directory name supplies the agent name; `instructions.md` carries YAML
 frontmatter with one plain `description` and a Markdown body; a directory
 under `skills/` is a skill; a `tools/*.ts`, `tools/*.py`, or
 `tools/NAME/tool.go` file is one typed function; a directory under
-`subagents/` is a subagent; a Markdown file under `mcp/` is a native
-MCP connection; one under `schedules/` is a cron task. Adding capability
+`subagents/` is a subagent; a Markdown file under `mcp/` is an MCP server the
+harness connects to; one under `schedules/` is a cron task. Adding capability
 means adding a file — there is no manifest to update and nothing to
 register. `tenon apply . --harness claude` (or `--harness codex`) validates
 the whole project and compiles it into native harness files, and the author
 then starts the harness normally. The README's
-[first five minutes](../README.md#the-first-five-minutes) is the whole
+[quick start](../README.md#quick-start) is the whole
 journey; the specification's
 [authored project](product-spec.md#the-authored-project) is the full
 convention, including the bounds every surface is held to.
@@ -115,32 +115,41 @@ a lockfile, and a network path that runs at build time. Each of those is a
 place where what ships stops matching what was reviewed.
 
 **What tenon does.** A plugin is a complete publisher-authored Agent Plugin
-v1 package vendored intact beneath `plugins/<storage-name>/`; review,
-pinning, and provenance belong to the author's own version control, and
-tenon performs no network acquisition and records no dependency lock.
-Plugin `plugin.json` and `mcp.json` are validated locally, without fetching,
-and accepted skills and MCP servers map into native harness configuration
-with deterministic collision handling. A standalone connection is one
-`mcp/<name>.md` whose filename is the native server name, declaring either an
-installed integration-package capability or a remote HTTPS endpoint (with
-optional headers), validated without contacting anything. Machine-
-installed integrations go through exactly one trust journey,
+v1 package. A consumer either vendors the reviewed directory intact beneath
+`plugins/<storage-name>/`, or writes a plugin reference file,
+`plugins/<name>.md`, naming a `source` and a full commit `rev`; review,
+pinning, and provenance belong to the author's own version control either
+way, and there is no dependency lock and no resolver. `tenon plugin fetch` is
+the one explicitly online command, resolving a reference into an owner-only,
+content-addressed cache; `tenon apply` and every other load stay offline and
+fail, naming the fetch command, when a pin is not cached. Plugin
+`plugin.json` and `mcp.json` are validated locally, without fetching, and
+accepted skills and MCP servers map into native harness configuration with
+deterministic collision handling. An authored MCP server is one
+`mcp/<name>.md` whose filename is the native server name — a hosted
+`streamable-http` endpoint, a `stdio` command in the agent tree, or an
+installed integration-package capability — validated without contacting
+anything, with the harness discovering and performing any authentication.
+Machine-installed integrations go through exactly one trust journey,
 `tenon integration install SOURCE --trust operator`, into an owner-only
 content-addressed store that is re-verified before every use. Portable agent
 source can never choose an install source, grant trust, or carry a
 credential — apply gains no network path. See
-[integration packages](product-spec.md#integration-packages) and
+[authored MCP servers](product-spec.md#the-authored-project) and
 [the native GitHub MCP journey](github-native-mcp.md).
 
 **The boundary.** Configuring or acquiring a third-party component does not
 make it managed: the harness owns process lifecycle, credentials, approvals,
-calls, and effects for everything a plugin or connection launches. GitHub
-authentication is deliberately unmanaged — the operator injects
-`GITHUB_PERSONAL_ACCESS_TOKEN` into the harness launch environment, and the
-harness, model-accessible execution tools, and any process inheriting that
-environment can read it. Tenon is not a marketplace or an updater. Today
-`tenon mcp add` writes remote `--url` targets only; an installed
-`package`/`capability` connection is authored as the Markdown file directly.
+calls, and effects for everything a plugin or authored server launches.
+Authentication is deliberately unmanaged — an OAuth grant the harness obtains
+lives in harness-owned storage tenon neither writes nor reads, and a
+`GITHUB_PERSONAL_ACCESS_TOKEN` injected for the deferred installed journey is
+readable by the harness, the model-accessible execution tools, and any
+process inheriting that environment. Nor is a remote server pinned: its tool
+catalog can change under an unchanged fingerprint. Tenon is not a marketplace
+or an updater. Today `tenon mcp add` writes remote `--url` servers only; the
+stdio, installed, and masking forms are authored as the Markdown file
+directly.
 
 **Measure leg.** The first five minutes, extended up the ladder without a
 second persona.

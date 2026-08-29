@@ -34,8 +34,18 @@ Add capability by adding files — there is nothing to register:
 | --- | --- |
 | a directory under `skills/` | a skill |
 | a typed function file under `tools/` | a tool |
-| a Markdown file under `mcp/` | a native MCP connection |
+| a Markdown file under `mcp/` | an MCP server the harness connects to |
+| a directory or `<name>.md` reference under `plugins/` | a vendored or pinned Agent Plugin |
 | a Markdown file under `schedules/` | a scheduled task |
+
+An `mcp/<name>.md` is four lines of the standard Agent Plugins `mcp.json`
+server entry plus prose — a hosted `type: streamable-http` URL, a tree-local
+`type: stdio` command, or an installed package — and the harness owns
+authentication, so an OAuth server needs no credential in your source. See
+[the GitHub journey](docs/github-native-mcp.md). A `plugins/<name>.md` names
+a `source` and a full commit `rev` instead of vendoring the package;
+`tenon plugin fetch` is the one explicitly online command, and `tenon apply`
+stays offline.
 
 The [product specification](docs/product-spec.md) covers the full authoring
 convention; the [glossary](docs/glossary.md) defines the vocabulary.
