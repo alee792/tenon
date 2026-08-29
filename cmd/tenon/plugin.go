@@ -319,7 +319,8 @@ func runPluginStatus(args []string, stdout, stderr io.Writer) int {
 			failed = true
 			continue
 		}
-		fmt.Fprintf(stdout, "%s: source %s rev %s digest %s: resolved\n", ref.Name, ref.Source, ref.Rev, digest)
+		fmt.Fprintf(stdout, "%s: source %s rev %s digest %s: resolved (a plain apply's generated MCP config points at this cache entry; pruning it breaks the workspace until the next tenon plugin fetch; tenon stage materializes this content into the staged tree instead)\n",
+			ref.Name, ref.Source, ref.Rev, digest)
 	}
 	if filterName != "" && !found {
 		fmt.Fprintf(stderr, "tenon plugin status: no plugin reference named %q was found\n", filterName)

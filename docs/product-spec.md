@@ -737,20 +737,25 @@ above:
   reference, though it can still `apply` a project whose references are
   already cached from an earlier fetch. `tenon plugin status` and `tenon
   apply` never invoke `git`.
-- **Staging does not yet materialize a fetched plugin reference's resolved
-  bytes into the tree it publishes.** `tenon stage` copies the authored
-  source directory byte-for-byte, so a `plugins/<name>.md` reference's own
-  bytes stage, but the plugin content it resolves to (in the operator's
-  plugin cache) does not travel into the staged tree the way vendored
-  `plugins/<name>/` bytes do. A staged agent that needs its plugins present
-  at container runtime should vendor them until a later slice threads the
-  plugin cache through OCI staging
-  ([issue #58](https://github.com/alee792/tenon/issues/58)). The same issue
-  carries a related wart in plain local apply: a resolved reference's stdio
-  `mcp.json` servers render `PLUGIN_ROOT` as the operator's absolute per-user
-  cache path, so pruning the cache silently breaks an already-applied
-  workspace until the next `tenon plugin fetch`. Vendored plugins are
-  re-anchored into the tree and are unaffected.
+- **A plugin reference's resolved content lives in two different places,
+  deliberately, depending on the journey.** `tenon stage`
+  ([issue #58](https://github.com/alee792/tenon/issues/58)) materializes a
+  `plugins/<name>.md` reference's resolved cache tree into the staged
+  filesystem at `plugins/<name>/`, re-anchored exactly like a vendored
+  plugin: a staged image is self-contained, and its generated configuration
+  never points outside the tree it ships. An ordinary `tenon apply` does
+  not copy that content into the workspace — it keeps pointing the
+  resolved reference's `mcp.json` servers at the operator's plugin cache,
+  including `PLUGIN_ROOT`, exactly as a plain apply always has, because
+  copying multi-megabyte plugin trees into every workspace on every apply
+  is the wrong default when the cache already exists for this. The
+  consequence is real and operator-visible: pruning the plugin cache
+  silently breaks an already-applied workspace's reference-declared servers
+  until the next `tenon plugin fetch` re-populates it. `tenon mcp status`
+  and `tenon plugin status` name this dependency explicitly for every
+  reference-declared server and every resolved reference, respectively.
+  Vendored plugins are unaffected in both journeys: their content already
+  lives in the agent tree, so there is no cache to depend on.
 - **Staging.** Per [ADR 0021](adr/0021-execute-authored-tools-from-a-self-contained-closure.md),
   the native harness runtime is not yet bundled into the staged tree
   (expected on the base image), and the authored-tool execution closure is

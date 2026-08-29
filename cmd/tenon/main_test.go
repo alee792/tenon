@@ -13,6 +13,7 @@ import (
 
 	"github.com/alee792/tenon/internal/agentproject"
 	"github.com/alee792/tenon/internal/generated"
+	"github.com/alee792/tenon/internal/pluginref"
 
 	"github.com/alee792/tenon/internal/version"
 )
@@ -1552,6 +1553,38 @@ func TestMCPStatusReportsComposedSurface(t *testing.T) {
 	}
 	if strings.Contains(out, "old-server") {
 		t.Fatalf("a masked plugin server's own declaration must never render: %s", out)
+	}
+}
+
+// TestMCPStatusNamesPluginReferenceCacheDependency proves `tenon mcp status`
+// surfaces the plain-apply cache-path wart legibly (issue #58): a server
+// declared by a resolved plugins/<name>.md reference is marked
+// cache-dependent=true, while an otherwise identical vendored plugin server
+// carries no such marker.
+func TestMCPStatusNamesPluginReferenceCacheDependency(t *testing.T) {
+	base := isolatedPluginCache(t)
+	repo, rev := newLocalGitFixture(t, map[string]string{
+		"plugin.json": `{"$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json", "name": "observability"}`,
+		"mcp.json": `{"$schema": "` + pluginMCPSchema + `", "mcpServers": {` +
+			`"telemetry": {"command": "server"}}}`,
+	})
+	declaredSource := "https://github.com/acme/observability-plugin"
+	cache := pluginref.NewCache(base)
+	if _, err := cache.Fetch(repo, rev); err != nil {
+		t.Fatalf("seeding cache: %v", err)
+	}
+	rewriteCachedSource(t, base, rev, declaredSource)
+
+	agent := writeAgent(t, "ref-status-agent", validInstructions)
+	writePluginReferenceFile(t, agent, "obs", declaredSource, rev)
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"mcp", "status", agent}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("mcp status failed: %d\nstdout=%s\nstderr=%s", code, stdout.String(), stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "telemetry: target=plugin plugin=obs transport=stdio cache-dependent=true") {
+		t.Fatalf("expected the reference-declared server marked cache-dependent, got: %s", out)
 	}
 }
 

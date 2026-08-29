@@ -2,11 +2,12 @@
 
 - Status: accepted
 - Re-records: prototype ADR 0036 (alee792/hctl)
-- Amendment proposed by:
+- Amended by:
   [ADR 0026](0026-author-remote-first-spec-aligned-mcp.md)
-  (§ plugin acquisition), which offers pointer-plus-commit-SHA plugin
-  references and an explicitly online fetch, separate from an offline
-  apply, as the evidence this record requires
+  (§ plugin acquisition), whose pointer-plus-commit-SHA plugin references
+  and explicitly online fetch, separate from an offline apply, are the
+  evidence this record required; the amendment is now in effect as of
+  issue #58
 
 ## Context
 

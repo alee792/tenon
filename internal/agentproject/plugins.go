@@ -95,21 +95,21 @@ type pluginSkill struct {
 // it exists only so a masking declaration naming a server that lost such a
 // collision can report exactly that (ADR 0026, issue #53 review) — Load's
 // own composition never consults it.
-func loadPlugins(root string, budget *skillSetBudget, diags *diagnostics.List) ([]pluginSkill, []PluginServer, []PluginServer, []sourceInput) {
+func loadPlugins(root string, budget *skillSetBudget, diags *diagnostics.List) ([]pluginSkill, []PluginServer, []PluginServer, []sourceInput, []PluginReference) {
 	dir := filepath.Join(root, "plugins")
 	info, err := os.Lstat(dir)
 	if err != nil {
-		return nil, nil, nil, nil // missing plugins/ is normal
+		return nil, nil, nil, nil, nil // missing plugins/ is normal
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		diags.Errorf("plugin.entry.invalid", "plugins",
 			"plugins must be a real directory; symlinks are never followed")
-		return nil, nil, nil, nil
+		return nil, nil, nil, nil, nil
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		diags.Errorf("plugin.entry.invalid", "plugins", "plugins could not be read: %v", err)
-		return nil, nil, nil, nil
+		return nil, nil, nil, nil, nil
 	}
 
 	// Each entry is either a vendored plugin directory or a plugin reference
@@ -188,12 +188,17 @@ func loadPlugins(root string, budget *skillSetBudget, diags *diagnostics.List) (
 	var candidates []pluginSkill
 	var servers []PluginServer
 	var inputs []sourceInput
+	var references []PluginReference
 	for _, f := range found {
 		var pluginCandidates []pluginSkill
 		var pluginServers []PluginServer
 		var pluginInputs []sourceInput
 		if f.isRef {
-			pluginCandidates, pluginServers, pluginInputs, _ = loadPluginReference(dir, f.fileName, budget, diags)
+			var ref *PluginReference
+			pluginCandidates, pluginServers, pluginInputs, _, ref = loadPluginReference(dir, f.fileName, budget, diags)
+			if ref != nil {
+				references = append(references, *ref)
+			}
 		} else {
 			pluginCandidates, pluginServers, pluginInputs = loadPlugin(filepath.Join(dir, f.fileName), "plugins/"+f.fileName, f.fileName, true, budget, diags)
 		}
@@ -202,7 +207,7 @@ func loadPlugins(root string, budget *skillSetBudget, diags *diagnostics.List) (
 		inputs = append(inputs, pluginInputs...)
 	}
 	accepted, skipped := mergePluginServers(servers, diags)
-	return candidates, accepted, skipped, inputs
+	return candidates, accepted, skipped, inputs, references
 }
 
 // loadPlugin validates one plugin's manifest and, when it is valid, its two
@@ -512,7 +517,7 @@ func jsonTypeName(v any) string {
 // project error, naming `tenon plugin fetch`, because an authored reference
 // is a first-class request exactly like mcp/<name>.md (ADR 0026), never a
 // silently-skipped optional plugin component.
-func loadPluginReference(dir, filename string, budget *skillSetBudget, diags *diagnostics.List) ([]pluginSkill, []PluginServer, []sourceInput, string) {
+func loadPluginReference(dir, filename string, budget *skillSetBudget, diags *diagnostics.List) ([]pluginSkill, []PluginServer, []sourceInput, string, *PluginReference) {
 	sourcePath := "plugins/" + filename
 	name := strings.TrimSuffix(filename, ".md")
 
@@ -520,53 +525,97 @@ func loadPluginReference(dir, filename string, budget *skillSetBudget, diags *di
 	info, err := os.Lstat(full)
 	if err != nil {
 		diags.Errorf("plugin.reference.invalid", sourcePath, "the plugin reference file could not be read: %v", err)
-		return nil, nil, nil, name
+		return nil, nil, nil, name, nil
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		diags.Errorf("plugin.reference.invalid", sourcePath,
 			"a plugin reference must be a real regular file; symlinks are never followed")
-		return nil, nil, nil, name
+		return nil, nil, nil, name, nil
 	}
 	if info.Size() > MaxPluginReferenceBytes {
 		diags.Errorf("plugin.reference.invalid", sourcePath,
 			"a plugin reference file may contain at most %d bytes; found %d", MaxPluginReferenceBytes, info.Size())
-		return nil, nil, nil, name
+		return nil, nil, nil, name, nil
 	}
 	raw, err := os.ReadFile(full)
 	if err != nil {
 		diags.Errorf("plugin.reference.invalid", sourcePath, "the plugin reference file could not be read: %v", err)
-		return nil, nil, nil, name
+		return nil, nil, nil, name, nil
 	}
 	inputs := []sourceInput{{Path: sourcePath, Content: raw, Executable: false}}
 
 	if !utf8.Valid(raw) {
 		diags.Errorf("plugin.reference.invalid", sourcePath, "the plugin reference file must be valid UTF-8")
-		return nil, nil, inputs, name
+		return nil, nil, inputs, name, nil
 	}
 
 	source, rev, ok := parsePluginReference(raw, sourcePath, diags)
 	if !ok {
-		return nil, nil, inputs, name
+		return nil, nil, inputs, name, nil
 	}
 
 	if pluginCache == nil {
 		diags.Errorf("plugin.reference.unresolved", sourcePath,
 			"plugin reference %q pins rev %s, which is not cached; run `tenon plugin fetch` before apply or validate",
 			name, rev)
-		return nil, nil, inputs, name
+		return nil, nil, inputs, name, nil
 	}
 	cachedRoot, err := pluginCache.Resolve(source, rev)
 	if err != nil {
 		diags.Errorf("plugin.reference.unresolved", sourcePath,
 			"plugin reference %q could not be resolved against the plugin cache for rev %s: %s; run `tenon plugin fetch`",
 			name, rev, diagnostics.Bound(err.Error(), 256))
-		return nil, nil, inputs, name
+		return nil, nil, inputs, name, nil
 	}
 
 	authoredRoot := fmt.Sprintf("plugins/%s.md -> %s", name, rev)
 	candidates, servers, pluginInputs := loadPlugin(cachedRoot, authoredRoot, name, false, budget, diags)
 	inputs = append(inputs, pluginInputs...)
-	return candidates, servers, inputs, name
+	ref := &PluginReference{Name: name, Source: source, Rev: rev, SourcePath: sourcePath, CachedRoot: cachedRoot}
+	return candidates, servers, inputs, name, ref
+}
+
+// PluginReference is one successfully resolved plugins/<name>.md reference
+// (ADR 0026 "plugin acquisition by pointer and pin"), carrying enough to
+// re-resolve its cached tree later against the same plugin cache — used by
+// staging (issue #58) to materialize the resolved content into the staged
+// tree, re-verifying the cache's digest immediately before the copy rather
+// than trusting the root captured at Load time.
+type PluginReference struct {
+	// Name is the filename-derived plugin storage name, the same value that
+	// becomes PluginServer.Plugin for every server this reference declares.
+	Name string
+	// Source and Rev are the exact validated values the reference file
+	// declares, passed to PluginCache.Resolve to re-verify and re-resolve.
+	Source string
+	Rev    string
+	// SourcePath is "plugins/<name>.md", for diagnostics.
+	SourcePath string
+	// CachedRoot is the absolute cache tree path PluginCache.Resolve returned
+	// at Load time. It is not staged directly: a caller that must stage this
+	// content re-resolves through ResolvePluginReferenceRoot immediately
+	// before copying, so a cache mutated or pruned between Load and staging
+	// fails closed instead of copying stale or missing bytes.
+	CachedRoot string
+}
+
+// ResolvePluginReferenceRoot re-resolves one plugin reference's cached tree
+// against the currently configured plugin cache (ConfigurePluginCache),
+// exactly as Load itself does, so a caller staging the content after Load
+// re-verifies the cache digest immediately before copying rather than
+// trusting a root captured earlier. It returns the same error shape Load's
+// own unresolved diagnostic reports, for a caller that wants to surface it
+// under the identical "plugin.reference.unresolved" naming.
+func ResolvePluginReferenceRoot(ref PluginReference) (string, error) {
+	if pluginCache == nil {
+		return "", fmt.Errorf("plugin reference %q pins rev %s, which is not cached; run `tenon plugin fetch` before apply or validate", ref.Name, ref.Rev)
+	}
+	root, err := pluginCache.Resolve(ref.Source, ref.Rev)
+	if err != nil {
+		return "", fmt.Errorf("plugin reference %q could not be resolved against the plugin cache for rev %s: %s; run `tenon plugin fetch`",
+			ref.Name, ref.Rev, diagnostics.Bound(err.Error(), 256))
+	}
+	return root, nil
 }
 
 // parsePluginReference validates a plugin reference file's closed frontmatter

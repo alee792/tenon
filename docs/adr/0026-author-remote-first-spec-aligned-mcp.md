@@ -190,13 +190,16 @@ ADR 0014's store primitive survives on its own merits: owner-only,
 immutable, content-addressed, offline-verifiable. It is re-targeted at
 plugin acquisition, where the authoring pressure actually is.
 
-**Plugin acquisition by pointer and pin (direction).** *Direction —
-binding appetite, not architecture (tenet 4).* Acceptance trigger: issue
-#52's implementation slice, whose own acceptance completes this section.
-Falsifier: if the fetch cannot be kept a separate online step with apply
-fully offline, or if pointer plus pin cannot preserve the review-and-pin
-discipline, the direction is rejected with reasons and manual vendoring
-stays the only journey.
+**Plugin acquisition by pointer and pin — accepted.** *Was a direction —
+binding appetite, not architecture (tenet 4) — pending its acceptance
+trigger.* Issue #52's implementation slice landed the pointer-and-pin format,
+the offline fetch/apply split, and the fingerprint coverage this section
+committed to; issue #58 closed the two gaps that slice left open — a
+resolved reference's content now materializes into the staged tree
+re-anchored like a vendored plugin, and the plain-apply cache-path rendering
+is a documented, legible behavior rather than a silent wart — completing the
+trigger. The direction stands accepted: manual vendoring remains supported,
+but pointer-and-pin is no longer binding appetite alone.
 
 `plugins/<name>.md` carrying `source` plus a full commit `rev` declares a
 plugin by pointer; a directory under `plugins/` continues to mean a

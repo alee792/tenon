@@ -31,6 +31,33 @@ import (
 // workspace (ADR 0021): the staged apply record names the closure root it was
 // published with, so serving can honor it instead of assuming the ordinary
 // workspace-cache layout.
+// reAnchorReferencedServers clones servers and marks every server declared by
+// a resolved plugin reference (issue #58) as Vendored, so
+// agentproject.ResolveServers re-anchors its PLUGIN_ROOT and any
+// plugin-relative stdio command against the staged agent root — exactly the
+// mechanism a genuinely vendored plugins/<name>/ directory already uses —
+// instead of the operator's cache path a plain apply still renders. It never
+// mutates the input slice: PluginServer.Plugin names the plugin storage name
+// a server was declared under, matched here against every successfully
+// resolved reference's name.
+func reAnchorReferencedServers(servers []agentproject.PluginServer, references []agentproject.PluginReference) []agentproject.PluginServer {
+	if len(references) == 0 {
+		return servers
+	}
+	referenced := make(map[string]bool, len(references))
+	for _, ref := range references {
+		referenced[ref.Name] = true
+	}
+	out := make([]agentproject.PluginServer, len(servers))
+	copy(out, servers)
+	for i := range out {
+		if referenced[out[i].Plugin] {
+			out[i].Vendored = true
+		}
+	}
+	return out
+}
+
 func generateIntegration(p *agentproject.Project, driver apply.Driver, finalAgentSource, closureRootFinal, tmp string, diags *diagnostics.List) error {
 	staged := *p
 	staged.Root = finalAgentSource

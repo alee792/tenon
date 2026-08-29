@@ -59,7 +59,7 @@ func LoadMCPSurface(root string) (*MCPSurface, *diagnostics.List, error) {
 	}
 
 	budget := &skillSetBudget{}
-	_, pluginServers, skippedPluginServers, _ := loadPlugins(abs, budget, diags)
+	_, pluginServers, skippedPluginServers, _, _ := loadPlugins(abs, budget, diags)
 	connections, composedPluginServers, shadowed, masked, _ := loadConnections(abs, pluginServers, skippedPluginServers, true, diags)
 
 	return &MCPSurface{

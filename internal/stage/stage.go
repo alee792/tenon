@@ -213,7 +213,13 @@ func Stage(ctx context.Context, opts Options) (*Result, *diagnostics.List, error
 
 	// Step: generate the native integration for the final paths, writing the
 	// physical files under <tmp>/workspace while embedding /opt and /workspace.
-	genErr := generateIntegration(p, opts.Driver, finalAgentSource, closureRootFinal, tmp, diags)
+	// renderProject carries every plugin-reference server re-anchored as
+	// Vendored (see reAnchorReferencedServers) so the rendered configuration
+	// points PLUGIN_ROOT and any plugin-relative command inside the staged
+	// tree rather than at the operator's cache.
+	renderProject := *p
+	renderProject.PluginServers = reAnchorReferencedServers(p.PluginServers, p.PluginReferences)
+	genErr := generateIntegration(&renderProject, opts.Driver, finalAgentSource, closureRootFinal, tmp, diags)
 	if genErr != nil {
 		return nil, diags, genErr
 	}
@@ -240,6 +246,43 @@ func Stage(ctx context.Context, opts Options) (*Result, *diagnostics.List, error
 	if err := copySource(p.Root, physical(tmp, finalAgentSource)); err != nil {
 		return nil, diags, err
 	}
+
+	// Step: materialize every resolved plugin reference's cached tree into
+	// the staged filesystem at plugins/<name>/ (issue #58): copySource above
+	// carries the plugins/<name>.md reference file itself (harmless
+	// provenance) but not the plugin content it resolves to, which lives in
+	// the operator's plugin cache rather than the agent source tree. Each
+	// reference is re-resolved against the cache here — immediately before
+	// copying, not trusting the root Load captured earlier — so a cache
+	// pruned or tampered with between Load and staging fails the stage
+	// closed with the same diagnostic Load itself would raise, rather than
+	// copying stale, missing, or corrupted bytes. The copy reuses copyTree:
+	// regular files only, executable bits preserved, any symlink rejected
+	// (defensive; the cache's own Fetch already refuses to store one).
+	for _, ref := range p.PluginReferences {
+		root, err := agentproject.ResolvePluginReferenceRoot(ref)
+		if err != nil {
+			diags.Errorf("plugin.reference.unresolved", ref.SourcePath, "%s", diagnostics.Bound(err.Error(), 512))
+			continue
+		}
+		dest := physical(tmp, finalAgentSource+"/plugins/"+ref.Name)
+		if err := copyTree(root, dest); err != nil {
+			return nil, diags, fmt.Errorf("staging the resolved plugin reference %q: %w", ref.Name, err)
+		}
+	}
+	if diags.HasErrors() {
+		return nil, diags, nil
+	}
+	// Deliberately not joining the build-machine-path scan below: a plugin
+	// reference's cache tree path is keyed by its pinned rev, and that same
+	// rev legitimately appears as plain text in the authored
+	// plugins/<name>.md reference file (the "rev:" field) — a real value,
+	// not a leak. Every reference server was re-anchored as Vendored above,
+	// so PLUGIN_ROOT and any plugin-relative command already render under
+	// the staged path rather than the cache's; the negative property that no
+	// staged file embeds the cache *base* directory is proven directly by
+	// the staging tests instead (issue #58), which is a check this
+	// component/rev-shaped needle set cannot make safely.
 
 	// Step: carry the tool execution closure into /opt/tenon/runtimes.
 	runtimeInfo := RuntimeInfo{Bundled: false, Minimized: false}
