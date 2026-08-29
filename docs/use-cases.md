@@ -33,7 +33,7 @@ directory name supplies the agent name; `instructions.md` carries YAML
 frontmatter with one plain `description` and a Markdown body; a directory
 under `skills/` is a skill; a `tools/*.ts`, `tools/*.py`, or
 `tools/NAME/tool.go` file is one typed function; a directory under
-`subagents/` is a subagent; a Markdown file under `connections/` is a native
+`subagents/` is a subagent; a Markdown file under `mcp/` is a native
 MCP connection; one under `schedules/` is a cron task. Adding capability
 means adding a file — there is no manifest to update and nothing to
 register. `tenon apply . --harness claude` (or `--harness codex`) validates
@@ -121,9 +121,9 @@ tenon performs no network acquisition and records no dependency lock.
 Plugin `plugin.json` and `mcp.json` are validated locally, without fetching,
 and accepted skills and MCP servers map into native harness configuration
 with deterministic collision handling. A standalone connection is one
-`connections/<name>.md` whose filename is the native server name, declaring
-either an installed integration-package capability or a credential-free
-remote HTTPS endpoint, validated without contacting anything. Machine-
+`mcp/<name>.md` whose filename is the native server name, declaring either an
+installed integration-package capability or a remote HTTPS endpoint (with
+optional headers), validated without contacting anything. Machine-
 installed integrations go through exactly one trust journey,
 `tenon integration install SOURCE --trust operator`, into an owner-only
 content-addressed store that is re-verified before every use. Portable agent
@@ -139,7 +139,7 @@ authentication is deliberately unmanaged — the operator injects
 `GITHUB_PERSONAL_ACCESS_TOKEN` into the harness launch environment, and the
 harness, model-accessible execution tools, and any process inheriting that
 environment can read it. Tenon is not a marketplace or an updater. Today
-`tenon connection add` writes remote `--url` targets only; an installed
+`tenon mcp add` writes remote `--url` targets only; an installed
 `package`/`capability` connection is authored as the Markdown file directly.
 
 **Measure leg.** The first five minutes, extended up the ladder without a

@@ -188,7 +188,7 @@ func projectWithConnection(name, url, context string) *agentproject.Project {
 		Name:         "my-agent",
 		Instructions: &agentproject.Instructions{Body: "Body text.\n"},
 		Connections: []agentproject.Connection{
-			{Name: name, URL: url, Context: context, SourcePath: "connections/" + name + ".md"},
+			{Name: name, URL: url, Context: context, SourcePath: "mcp/" + name + ".md"},
 		},
 	}
 }
@@ -236,6 +236,51 @@ func TestConnectionRendersAsNativeHTTPServer(t *testing.T) {
 	}
 }
 
+// TestConnectionHeadersRenderVerbatim proves a remote connection's declared
+// headers render into .mcp.json's native headers field, with ${VAR}
+// references left verbatim for Claude's own expansion (issue #49).
+func TestConnectionHeadersRenderVerbatim(t *testing.T) {
+	p := &agentproject.Project{
+		Root:         "/src/my-agent",
+		Name:         "my-agent",
+		Instructions: &agentproject.Instructions{Body: "Body text.\n"},
+		Connections: []agentproject.Connection{
+			{
+				Name:       "catalog",
+				URL:        "https://example.com/mcp",
+				Headers:    map[string]string{"Authorization": "Bearer ${ACME_TOKEN}"},
+				SourcePath: "mcp/catalog.md",
+			},
+		},
+	}
+	diags := &diagnostics.List{}
+	files := Driver{}.Generate(p, apply.Target{Workspace: "/ws", Executable: "/bin/tenon"}, diags)
+	if diags.HasErrors() {
+		t.Fatalf("unexpected diagnostics: %v", diags.All())
+	}
+
+	var mcpJSON []byte
+	for _, f := range files {
+		if f.Path == ".mcp.json" {
+			mcpJSON = f.Content
+		}
+	}
+	var doc struct {
+		MCPServers map[string]json.RawMessage `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(mcpJSON, &doc); err != nil {
+		t.Fatal(err)
+	}
+	var entry map[string]any
+	if err := json.Unmarshal(doc.MCPServers["catalog"], &entry); err != nil {
+		t.Fatal(err)
+	}
+	headers, _ := entry["headers"].(map[string]any)
+	if headers["Authorization"] != "Bearer ${ACME_TOKEN}" {
+		t.Fatalf("connection entry headers = %+v", entry["headers"])
+	}
+}
+
 // TestClaudeReservedConnectionNameFailsForClaude proves the Claude-only
 // native project surface names are rejected at generation for claude, with
 // an error that stops apply before it mutates the workspace.
@@ -247,13 +292,13 @@ func TestClaudeReservedConnectionNameFailsForClaude(t *testing.T) {
 
 		found := false
 		for _, d := range diags.All() {
-			if d.ID == "connection.name.reserved" && d.Severity == diagnostics.Error &&
-				d.Path == "connections/"+name+".md" {
+			if d.ID == "mcp.name.reserved" && d.Severity == diagnostics.Error &&
+				d.Path == "mcp/"+name+".md" {
 				found = true
 			}
 		}
 		if !found {
-			t.Fatalf("name %q: expected an error connection.name.reserved, got %v", name, diags.All())
+			t.Fatalf("name %q: expected an error mcp.name.reserved, got %v", name, diags.All())
 		}
 		for _, f := range files {
 			if f.Path == ".mcp.json" && strings.Contains(string(f.Content), `"`+name+`"`) {
@@ -347,7 +392,7 @@ func projectWithInstalledConnection(name, pkg, capability string) *agentproject.
 		Root: "/src/my-agent",
 		Name: "my-agent",
 		Connections: []agentproject.Connection{
-			{Kind: agentproject.ConnectionKindInstalled, Name: name, Package: pkg, Capability: capability, SourcePath: "connections/" + name + ".md"},
+			{Kind: agentproject.ConnectionKindInstalled, Name: name, Package: pkg, Capability: capability, SourcePath: "mcp/" + name + ".md"},
 		},
 	}
 }
@@ -415,7 +460,7 @@ func TestInstalledConnectionRendersNativeStdioEntry(t *testing.T) {
 
 // TestInstalledConnectionServerNameMismatchFailsBeforeMutation proves a
 // connection whose filename differs from the capability's declared native
-// server name fails with connection.package.mismatch and contributes no
+// server name fails with mcp.package.mismatch and contributes no
 // entry.
 func TestInstalledConnectionServerNameMismatchFailsBeforeMutation(t *testing.T) {
 	base := installClaudeFixture(t, "demo-pkg", "actual-name")
@@ -428,18 +473,18 @@ func TestInstalledConnectionServerNameMismatchFailsBeforeMutation(t *testing.T) 
 
 	found := false
 	for _, d := range diags.All() {
-		if d.ID == "connection.package.mismatch" {
+		if d.ID == "mcp.package.mismatch" {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("expected connection.package.mismatch, got %v", diags.All())
+		t.Fatalf("expected mcp.package.mismatch, got %v", diags.All())
 	}
 }
 
 // TestInstalledConnectionUnconfiguredStoreFailsClearly proves an installed
 // connection with no configured integration store fails with
-// connection.package.unresolved rather than panicking.
+// mcp.package.unresolved rather than panicking.
 func TestInstalledConnectionUnconfiguredStoreFailsClearly(t *testing.T) {
 	p := projectWithInstalledConnection("demo", "demo-pkg", "mcp")
 	diags := &diagnostics.List{}
@@ -447,11 +492,11 @@ func TestInstalledConnectionUnconfiguredStoreFailsClearly(t *testing.T) {
 
 	found := false
 	for _, d := range diags.All() {
-		if d.ID == "connection.package.unresolved" {
+		if d.ID == "mcp.package.unresolved" {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("expected connection.package.unresolved, got %v", diags.All())
+		t.Fatalf("expected mcp.package.unresolved, got %v", diags.All())
 	}
 }

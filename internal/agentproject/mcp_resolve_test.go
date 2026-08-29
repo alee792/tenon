@@ -112,7 +112,7 @@ func installedConn(name, pkg, capability string) Connection {
 		Name:       name,
 		Package:    pkg,
 		Capability: capability,
-		SourcePath: "connections/" + name + ".md",
+		SourcePath: "mcp/" + name + ".md",
 	}
 }
 
@@ -146,7 +146,7 @@ func TestResolveInstalledConnectionsSuccess(t *testing.T) {
 
 // TestResolveInstalledConnectionsServerNameMismatch proves a connection
 // whose filename differs from the capability's declared server name fails
-// with connection.package.mismatch before any generation proceeds.
+// with mcp.package.mismatch before any generation proceeds.
 func TestResolveInstalledConnectionsServerNameMismatch(t *testing.T) {
 	base := installFixture(t, "demo-pkg", "actual-server-name")
 	diags := &diagnostics.List{}
@@ -154,11 +154,11 @@ func TestResolveInstalledConnectionsServerNameMismatch(t *testing.T) {
 	if _, ok := resolved["demo"]; ok {
 		t.Fatal("a mismatched connection must not resolve")
 	}
-	requireErrorID(t, diags, "connection.package.mismatch")
+	requireErrorID(t, diags, "mcp.package.mismatch")
 }
 
 // TestResolveInstalledConnectionsMissingPackage proves an uninstalled
-// package fails with connection.package.unresolved.
+// package fails with mcp.package.unresolved.
 func TestResolveInstalledConnectionsMissingPackage(t *testing.T) {
 	base := t.TempDir()
 	diags := &diagnostics.List{}
@@ -166,11 +166,11 @@ func TestResolveInstalledConnectionsMissingPackage(t *testing.T) {
 	if _, ok := resolved["demo"]; ok {
 		t.Fatal("an uninstalled package must not resolve")
 	}
-	requireErrorID(t, diags, "connection.package.unresolved")
+	requireErrorID(t, diags, "mcp.package.unresolved")
 }
 
 // TestResolveInstalledConnectionsDisabledPackage proves a disabled package
-// fails with connection.package.unresolved.
+// fails with mcp.package.unresolved.
 func TestResolveInstalledConnectionsDisabledPackage(t *testing.T) {
 	base := installFixture(t, "demo-pkg", "demo")
 	store := integration.NewStore(base)
@@ -182,12 +182,12 @@ func TestResolveInstalledConnectionsDisabledPackage(t *testing.T) {
 	if _, ok := resolved["demo"]; ok {
 		t.Fatal("a disabled package must not resolve")
 	}
-	requireErrorID(t, diags, "connection.package.unresolved")
+	requireErrorID(t, diags, "mcp.package.unresolved")
 }
 
 // TestResolveInstalledConnectionsEmptyStoreBase proves an unconfigured
 // store (empty IntegrationStore) fails every installed connection with
-// connection.package.unresolved rather than panicking or opening a store
+// mcp.package.unresolved rather than panicking or opening a store
 // outside a configured base.
 func TestResolveInstalledConnectionsEmptyStoreBase(t *testing.T) {
 	diags := &diagnostics.List{}
@@ -195,7 +195,7 @@ func TestResolveInstalledConnectionsEmptyStoreBase(t *testing.T) {
 	if _, ok := resolved["demo"]; ok {
 		t.Fatal("an unconfigured store must not resolve")
 	}
-	requireErrorID(t, diags, "connection.package.unresolved")
+	requireErrorID(t, diags, "mcp.package.unresolved")
 }
 
 // TestResolveInstalledConnectionsIgnoresRemote proves a remote connection is
@@ -203,7 +203,7 @@ func TestResolveInstalledConnectionsEmptyStoreBase(t *testing.T) {
 // resolved map.
 func TestResolveInstalledConnectionsIgnoresRemote(t *testing.T) {
 	diags := &diagnostics.List{}
-	remote := Connection{Kind: ConnectionKindRemote, Name: "catalog", URL: "https://example.com/mcp", SourcePath: "connections/catalog.md"}
+	remote := Connection{Kind: ConnectionKindRemote, Name: "catalog", URL: "https://example.com/mcp", SourcePath: "mcp/catalog.md"}
 	resolved := ResolveInstalledConnections([]Connection{remote}, "", fixtureTenonVersion, diags)
 	if len(resolved) != 0 || diags.HasErrors() {
 		t.Fatalf("a remote connection must be ignored: resolved=%v diags=%v", resolved, diags.All())

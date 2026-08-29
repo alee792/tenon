@@ -79,7 +79,7 @@ my-agent/
   plugins/                 # complete publisher-authored Agent Plugin packages
   tools/                   # one typed function per TS/Python file or Go dir
   subagents/               # one instructions.md per immediate subagent
-  connections/             # one <name>.md per standalone MCP connection
+  mcp/                     # one <name>.md per standalone MCP connection
   schedules/               # nested Markdown cron tasks
   harnesses/               # literal harness-specific native files
   channels/                # second product; specified separately
@@ -151,26 +151,33 @@ instructions, skills, managed tools, and permissions. Child skills, tools,
 dependencies, and nested subagents are rejected, not ignored. Subagent and
 tool names may not collide.
 
-**Connections.** Each `connections/<name>.md` authors one standalone native
-MCP connection; the filename supplies the connection and native server name
-(`managed` reserved). Closed YAML frontmatter declares `type: mcp` plus
-exactly one target form: an installed stdio target (`package` +
+**Connections.** Each `mcp/<name>.md` authors one standalone native MCP
+connection; the filename supplies the connection and native server name
+(`managed` reserved). Closed YAML frontmatter's `type` field selects exactly
+one target form (issue #49): `type: streamable-http` with absolute HTTPS
+`url` (no query, validated without contact) and optional `headers` (a
+string-to-string map; a header value may end with exactly one `${VAR}`
+environment-variable reference, never resolved by tenon and never
+`${PLUGIN_ROOT}`/`${PLUGIN_DATA}`), or `type: installed` with `package` +
 `capability`, resolved offline through the integration store, whose stable
-server name must equal the filename) or a credential-free remote target
-(`transport: streamable-http` + absolute HTTPS `url`, validated without
-contact). No headers, tokens, OAuth, timeouts, or tool filters in v1.
+server name must equal the filename. Declaring a remote endpoint that
+requires OAuth is fine — the harness discovers and performs auth; tenon only
+ever renders the URL and headers. `type: sse` fails as a deprecated,
+unsupported transport; `type: stdio` is not yet supported in authored files.
 Optional trimmed Markdown after the frontmatter (at most 1,024 characters) is
 model-facing usage context rendered once into generated instructions, with
 one boundary statement that the native harness owns MCP startup, trust,
 approval, authentication, discovery, calls, and effects. Name collisions with
-`managed`, another connection, or a plugin server fail before mutation.
+`managed`, another connection, or a plugin server fail before mutation. A
+leftover `connections/` directory (the prior name) fails closed with a
+migration diagnostic naming `mcp/` rather than being silently ignored.
 
 Authors need not hand-edit native configuration:
 
 ```text
-tenon connection add AGENT NAME --url HTTPS_URL [--context TEXT] [--manifest PATH]
-tenon connection status AGENT [NAME] [--manifest PATH]
-tenon connection remove AGENT NAME [--manifest PATH]
+tenon mcp add AGENT NAME --url HTTPS_URL [--header 'K: V'] [--context TEXT] [--manifest PATH]
+tenon mcp status AGENT [NAME] [--manifest PATH]
+tenon mcp remove AGENT NAME [--manifest PATH]
 ```
 
 Commands take the exact positional agent root, proven either way the
@@ -179,8 +186,8 @@ instructions-free root here exactly as it does for validate and apply — never
 search ancestors or choose a harness, and finish by directing the author to
 run `tenon apply` for each intended workspace. There is no update command;
 the Markdown is ordinary versioned source. Authoring an installed target
-through `connection add` is not available yet — the file is written by hand,
-which every other command here treats identically (see Known limitations).
+through `mcp add` is not available yet — the file is written by hand, which
+every other command here treats identically (see Known limitations).
 
 The GitHub connection is the canonical installed target: the official
 `github/github-mcp-server` executable, installed as an integration package,
@@ -225,7 +232,7 @@ workspace mutation:
 | Vendored plugins | 128 directory entries | `plugin.json` and `mcp.json` 128 KiB each; 1,024 entries per plugin `skills/` location |
 | Accepted plugin MCP servers | 128 aggregate | Generated native MCP configuration at most 8 MiB |
 | Selected harness-specific files | 1,024 | 1 MiB each and 8 MiB aggregate |
-| Standalone MCP connections | 128 | 8 KiB per source; context at most 1,024 characters |
+| Standalone MCP connections (`mcp/`) | 128 | 8 KiB per source; context at most 1,024 characters |
 | Agent manifest | One optional file, supplied at application | 32 KiB |
 
 Everywhere: authored entries are bounded regular files and real directories
@@ -596,15 +603,18 @@ credential-free tests (fake harness processes; no live model calls) prove:
 Recorded here rather than hidden, per the failure and safety principle
 above:
 
-- **`connection add` authors remote targets only.** The installed
+- **`mcp add` authors remote targets only.** The installed
   package-and-capability target is fully specified, validated, resolved, and
   emitted for both harnesses; only the authoring convenience is missing, so
-  `tenon connection add --package ... --capability ...` is refused with a
+  `tenon mcp add --package ... --capability ...` is refused with a
   diagnostic rather than silently writing a file it cannot prove. Authors
-  write `connections/<name>.md` by hand — the two-line frontmatter shown in
-  [the native GitHub MCP journey](github-native-mcp.md) — and `connection
+  write `mcp/<name>.md` by hand — the frontmatter shown in
+  [the native GitHub MCP journey](github-native-mcp.md) — and `mcp
   status`, `validate`, and `apply` treat the result exactly as they treat a
   generated one.
+- **Repo-relative stdio connections are not yet supported.** `type: stdio` in
+  an authored `mcp/<name>.md` is refused with a diagnostic; that target form
+  is a later slice.
 - **Staging.** Per [ADR 0021](adr/0021-execute-authored-tools-from-a-self-contained-closure.md),
   the native harness runtime is not yet bundled into the staged tree
   (expected on the base image), and the authored-tool execution closure is

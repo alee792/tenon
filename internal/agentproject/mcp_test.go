@@ -11,7 +11,7 @@ import (
 
 func writeConnectionFile(t *testing.T, root, name, content string) {
 	t.Helper()
-	dir := filepath.Join(root, "connections")
+	dir := filepath.Join(root, "mcp")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -21,7 +21,22 @@ func writeConnectionFile(t *testing.T, root, name, content string) {
 }
 
 func remoteConnection(url, context string) string {
-	body := "---\ntype: mcp\ntransport: streamable-http\nurl: " + url + "\n---\n"
+	body := "---\ntype: streamable-http\nurl: " + url + "\n---\n"
+	if context != "" {
+		body += "\n" + context + "\n"
+	}
+	return body
+}
+
+func remoteConnectionWithHeaders(url string, headers map[string]string, context string) string {
+	body := "---\ntype: streamable-http\nurl: " + url + "\n"
+	if len(headers) > 0 {
+		body += "headers:\n"
+		for _, name := range sortedStringKeys(headers) {
+			body += "  " + name + ": \"" + headers[name] + "\"\n"
+		}
+	}
+	body += "---\n"
 	if context != "" {
 		body += "\n" + context + "\n"
 	}
@@ -47,7 +62,7 @@ func TestLoadValidRemoteConnection(t *testing.T) {
 	}
 	c := p.Connections[0]
 	if c.Name != "catalog" || c.URL != "https://example.com/mcp" ||
-		c.Context != "Use this for the public catalog." || c.SourcePath != "connections/catalog.md" {
+		c.Context != "Use this for the public catalog." || c.SourcePath != "mcp/catalog.md" {
 		t.Fatalf("connection = %+v", c)
 	}
 }
@@ -75,7 +90,7 @@ func TestLoadConnectionsSortedByName(t *testing.T) {
 // no context, not an empty-string special case.
 func TestLoadEmptyBodyIsNoContext(t *testing.T) {
 	root := writeAgent(t, "agent", validInstructions)
-	writeConnectionFile(t, root, "catalog.md", "---\ntype: mcp\ntransport: streamable-http\nurl: https://example.com/mcp\n---\n\n   \n")
+	writeConnectionFile(t, root, "catalog.md", "---\ntype: streamable-http\nurl: https://example.com/mcp\n---\n\n   \n")
 
 	p, diags, err := Load(root)
 	if err != nil {
@@ -94,26 +109,26 @@ func TestLoadEmptyBodyIsNoContext(t *testing.T) {
 func TestLoadConnectionsRejectsSymlink(t *testing.T) {
 	root := writeAgent(t, "agent", validInstructions)
 	writeConnectionFile(t, root, "target.md", remoteConnection("https://example.com/mcp", ""))
-	if err := os.Symlink(filepath.Join(root, "connections", "target.md"), filepath.Join(root, "connections", "link.md")); err != nil {
+	if err := os.Symlink(filepath.Join(root, "mcp", "target.md"), filepath.Join(root, "mcp", "link.md")); err != nil {
 		t.Fatal(err)
 	}
 	_, diags, err := Load(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireErrorID(t, diags, "connection.entry.invalid")
+	requireErrorID(t, diags, "mcp.entry.invalid")
 }
 
 func TestLoadConnectionsRejectsDirectory(t *testing.T) {
 	root := writeAgent(t, "agent", validInstructions)
-	if err := os.MkdirAll(filepath.Join(root, "connections", "nested"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, "mcp", "nested"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	_, diags, err := Load(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireErrorID(t, diags, "connection.entry.invalid")
+	requireErrorID(t, diags, "mcp.entry.invalid")
 }
 
 func TestLoadConnectionsRejectsOtherExtension(t *testing.T) {
@@ -123,7 +138,7 @@ func TestLoadConnectionsRejectsOtherExtension(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireErrorID(t, diags, "connection.entry.invalid")
+	requireErrorID(t, diags, "mcp.entry.invalid")
 }
 
 func TestLoadConnectionsRejectsOverLimitCount(t *testing.T) {
@@ -135,7 +150,7 @@ func TestLoadConnectionsRejectsOverLimitCount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireErrorID(t, diags, "connection.bounds.exceeded")
+	requireErrorID(t, diags, "mcp.bounds.exceeded")
 }
 
 func TestLoadConnectionsRejectsOversizedFile(t *testing.T) {
@@ -146,7 +161,7 @@ func TestLoadConnectionsRejectsOversizedFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireErrorID(t, diags, "connection.bounds.exceeded")
+	requireErrorID(t, diags, "mcp.bounds.exceeded")
 }
 
 func TestLoadConnectionsRejectsInvalidNames(t *testing.T) {
@@ -159,7 +174,7 @@ func TestLoadConnectionsRejectsInvalidNames(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			requireErrorID(t, diags, "connection.name.invalid")
+			requireErrorID(t, diags, "mcp.name.invalid")
 		})
 	}
 }
@@ -183,7 +198,7 @@ func TestLoadConnectionsRejectsManagedName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireErrorID(t, diags, "connection.name.reserved")
+	requireErrorID(t, diags, "mcp.name.reserved")
 }
 
 // --- Frontmatter and target-shape diagnostics ------------------------------
@@ -195,7 +210,7 @@ func TestLoadConnectionsRejectsMissingFrontmatter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireErrorID(t, diags, "connection.frontmatter.missing")
+	requireErrorID(t, diags, "mcp.frontmatter.missing")
 }
 
 func TestLoadConnectionsRejectsWrongType(t *testing.T) {
@@ -205,67 +220,89 @@ func TestLoadConnectionsRejectsWrongType(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireErrorID(t, diags, "connection.frontmatter.invalid")
+	requireErrorID(t, diags, "mcp.frontmatter.invalid")
 }
 
 func TestLoadConnectionsRejectsMissingTarget(t *testing.T) {
 	root := writeAgent(t, "agent", validInstructions)
-	writeConnectionFile(t, root, "catalog.md", "---\ntype: mcp\n---\n")
+	writeConnectionFile(t, root, "catalog.md", "---\ndescription: no type field\n---\n")
 	_, diags, err := Load(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireErrorID(t, diags, "connection.frontmatter.missing")
+	requireErrorID(t, diags, "mcp.frontmatter.missing")
 }
 
 func TestLoadConnectionsRejectsMixedTargetFields(t *testing.T) {
 	root := writeAgent(t, "agent", validInstructions)
 	writeConnectionFile(t, root, "catalog.md",
-		"---\ntype: mcp\ntransport: streamable-http\nurl: https://example.com/mcp\npackage: github-mcp-server\ncapability: github\n---\n")
+		"---\ntype: streamable-http\nurl: https://example.com/mcp\npackage: github-mcp-server\ncapability: github\n---\n")
 	_, diags, err := Load(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireErrorID(t, diags, "connection.frontmatter.unknown-field")
+	requireErrorID(t, diags, "mcp.frontmatter.unknown-field")
 }
 
 func TestLoadConnectionsRejectsUnknownField(t *testing.T) {
 	root := writeAgent(t, "agent", validInstructions)
 	writeConnectionFile(t, root, "catalog.md",
-		"---\ntype: mcp\ntransport: streamable-http\nurl: https://example.com/mcp\nheaders:\n  X-Trace: on\n---\n")
+		"---\ntype: streamable-http\nurl: https://example.com/mcp\ntimeout: 5\n---\n")
 	_, diags, err := Load(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireErrorID(t, diags, "connection.frontmatter.unknown-field")
+	requireErrorID(t, diags, "mcp.frontmatter.unknown-field")
 }
 
 func TestLoadConnectionsRejectsDuplicateField(t *testing.T) {
 	root := writeAgent(t, "agent", validInstructions)
 	writeConnectionFile(t, root, "catalog.md",
-		"---\ntype: mcp\ntransport: streamable-http\nurl: https://example.com/mcp\nurl: https://example.com/other\n---\n")
+		"---\ntype: streamable-http\nurl: https://example.com/mcp\nurl: https://example.com/other\n---\n")
 	_, diags, err := Load(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireErrorID(t, diags, "connection.frontmatter.invalid")
+	requireErrorID(t, diags, "mcp.frontmatter.invalid")
 }
 
 func TestLoadConnectionsRejectsYAMLAlias(t *testing.T) {
 	root := writeAgent(t, "agent", validInstructions)
 	writeConnectionFile(t, root, "catalog.md",
-		"---\nanchor: &a mcp\ntype: *a\ntransport: streamable-http\nurl: https://example.com/mcp\n---\n")
+		"---\nanchor: &a streamable-http\ntype: *a\nurl: https://example.com/mcp\n---\n")
 	_, diags, err := Load(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireErrorID(t, diags, "connection.frontmatter.invalid")
+	requireErrorID(t, diags, "mcp.frontmatter.invalid")
+}
+
+// --- SSE and stdio rejection --------------------------------------------
+
+func TestLoadConnectionsRejectsSSE(t *testing.T) {
+	root := writeAgent(t, "agent", validInstructions)
+	writeConnectionFile(t, root, "catalog.md", "---\ntype: sse\nurl: https://example.com/mcp\n---\n")
+	_, diags, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireErrorID(t, diags, "mcp.transport.invalid")
+}
+
+func TestLoadConnectionsRejectsStdioNotYetSupported(t *testing.T) {
+	root := writeAgent(t, "agent", validInstructions)
+	writeConnectionFile(t, root, "catalog.md", "---\ntype: stdio\ncommand: ./server\n---\n")
+	_, diags, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireErrorID(t, diags, "mcp.transport.invalid")
 }
 
 // --- Installed frontmatter shape matrix --------------------------------
 
 func installedConnection(pkg, capability, context string) string {
-	body := "---\ntype: mcp\npackage: " + pkg + "\ncapability: " + capability + "\n---\n"
+	body := "---\ntype: installed\npackage: " + pkg + "\ncapability: " + capability + "\n---\n"
 	if context != "" {
 		body += "\n" + context + "\n"
 	}
@@ -299,22 +336,22 @@ func TestLoadValidInstalledConnection(t *testing.T) {
 
 func TestLoadInstalledConnectionMissingPackage(t *testing.T) {
 	root := writeAgent(t, "agent", validInstructions)
-	writeConnectionFile(t, root, "github.md", "---\ntype: mcp\ncapability: github\n---\n")
+	writeConnectionFile(t, root, "github.md", "---\ntype: installed\ncapability: github\n---\n")
 	_, diags, err := Load(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireErrorID(t, diags, "connection.target.invalid")
+	requireErrorID(t, diags, "mcp.target.invalid")
 }
 
 func TestLoadInstalledConnectionMissingCapability(t *testing.T) {
 	root := writeAgent(t, "agent", validInstructions)
-	writeConnectionFile(t, root, "github.md", "---\ntype: mcp\npackage: github-mcp-server\n---\n")
+	writeConnectionFile(t, root, "github.md", "---\ntype: installed\npackage: github-mcp-server\n---\n")
 	_, diags, err := Load(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireErrorID(t, diags, "connection.target.invalid")
+	requireErrorID(t, diags, "mcp.target.invalid")
 }
 
 func TestLoadInstalledConnectionBadPackageGrammar(t *testing.T) {
@@ -324,7 +361,7 @@ func TestLoadInstalledConnectionBadPackageGrammar(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireErrorID(t, diags, "connection.target.invalid")
+	requireErrorID(t, diags, "mcp.target.invalid")
 }
 
 func TestLoadInstalledConnectionBadCapabilityGrammar(t *testing.T) {
@@ -334,7 +371,7 @@ func TestLoadInstalledConnectionBadCapabilityGrammar(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireErrorID(t, diags, "connection.target.invalid")
+	requireErrorID(t, diags, "mcp.target.invalid")
 }
 
 // TestLoadConnectionsRejectsMixedRemoteAndInstalledFields proves a
@@ -343,12 +380,12 @@ func TestLoadInstalledConnectionBadCapabilityGrammar(t *testing.T) {
 func TestLoadConnectionsRejectsMixedRemoteAndInstalledFields(t *testing.T) {
 	root := writeAgent(t, "agent", validInstructions)
 	writeConnectionFile(t, root, "catalog.md",
-		"---\ntype: mcp\ntransport: streamable-http\nurl: https://example.com/mcp\npackage: github-mcp-server\ncapability: github\n---\n")
+		"---\ntype: installed\npackage: github-mcp-server\ncapability: github\nurl: https://example.com/mcp\n---\n")
 	_, diags, err := Load(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireErrorID(t, diags, "connection.frontmatter.unknown-field")
+	requireErrorID(t, diags, "mcp.frontmatter.unknown-field")
 }
 
 // --- URL matrix -------------------------------------------------------------
@@ -378,7 +415,7 @@ func TestLoadConnectionsURLMatrix(t *testing.T) {
 				t.Fatalf("url %q: valid = %v, want %v (diags: %v)", raw, gotValid, wantValid, diags.All())
 			}
 			if !wantValid && gotValid == false {
-				requireErrorID(t, diags, "connection.target.invalid")
+				requireErrorID(t, diags, "mcp.target.invalid")
 			}
 		})
 	}
@@ -408,7 +445,7 @@ func TestLoadConnectionsContextOverBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireErrorID(t, diags, "connection.context.too-long")
+	requireErrorID(t, diags, "mcp.context.too-long")
 }
 
 // --- Collisions --------------------------------------------------------------
@@ -427,7 +464,7 @@ func TestLoadConnectionsCollideWithPluginServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireErrorID(t, diags, "connection.name.collision")
+	requireErrorID(t, diags, "mcp.name.collision")
 }
 
 // --- Fingerprint sensitivity --------------------------------------------------
@@ -465,4 +502,117 @@ func TestConnectionJoinsFingerprint(t *testing.T) {
 	if p2.Fingerprint == p3.Fingerprint {
 		t.Fatal("changing a connection's body must change the fingerprint")
 	}
+}
+
+// --- Legacy connections/ migration ---------------------------------------
+
+// TestLoadLegacyConnectionsDirFailsClosed proves a leftover connections/
+// directory is a hard migration failure naming mcp/, not a silent no-op
+// (issue #49).
+func TestLoadLegacyConnectionsDirFailsClosed(t *testing.T) {
+	root := writeAgent(t, "agent", validInstructions)
+	if err := os.MkdirAll(filepath.Join(root, "connections"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "connections", "catalog.md"),
+		[]byte("---\ntype: mcp\ntransport: streamable-http\nurl: https://example.com/mcp\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, diags, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireErrorID(t, diags, "mcp.migration.connections-dir")
+}
+
+// TestLoadLegacyConnectionsDirEmptyStillFails proves the migration diagnostic
+// fires even when the legacy directory is empty: presence alone is the
+// signal, not its content.
+func TestLoadLegacyConnectionsDirEmptyStillFails(t *testing.T) {
+	root := writeAgent(t, "agent", validInstructions)
+	if err := os.MkdirAll(filepath.Join(root, "connections"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, diags, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireErrorID(t, diags, "mcp.migration.connections-dir")
+}
+
+// --- Header matrix --------------------------------------------------------
+
+// TestLoadValidRemoteConnectionWithHeaders proves headers are preserved
+// exactly, including a value ending with one ${VAR} reference.
+func TestLoadValidRemoteConnectionWithHeaders(t *testing.T) {
+	root := writeAgent(t, "agent", validInstructions)
+	writeConnectionFile(t, root, "catalog.md", remoteConnectionWithHeaders(
+		"https://example.com/mcp",
+		map[string]string{"Authorization": "Bearer ${ACME_TOKEN}", "X-Trace": "on"},
+		""))
+
+	p, diags, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p == nil || diags.HasErrors() {
+		t.Fatalf("unexpected diagnostics: %v", diags.All())
+	}
+	c := p.Connections[0]
+	if c.Headers["Authorization"] != "Bearer ${ACME_TOKEN}" || c.Headers["X-Trace"] != "on" {
+		t.Fatalf("headers = %+v", c.Headers)
+	}
+}
+
+// TestLoadConnectionHeaderValueMatrix proves the exact, falsifiable header
+// value grammar: a literal with no "$", or a literal prefix (possibly empty)
+// containing no "$" followed by exactly one ${VAR} reference and nothing
+// after it. Any other use of "$" fails, as does referencing a plugin-scoped
+// variable.
+func TestLoadConnectionHeaderValueMatrix(t *testing.T) {
+	cases := map[string]bool{
+		"Bearer ${ACME_TOKEN}":  true,  // prefix + ref
+		"${ACME_TOKEN}":         true,  // bare ref
+		"static-value":          true,  // literal, no $
+		"":                      true,  // empty literal
+		"${A}${B}":              false, // two refs
+		"${ACME_TOKEN}suffix":   false, // ref then suffix
+		"has $ in it":           false, // lone $
+		"${lowercase}":          false, // VAR must be uppercase
+		"${PLUGIN_ROOT}":        false, // plugin-scoped denylist
+		"${PLUGIN_DATA}":        false, // plugin-scoped denylist
+		"Bearer ${PLUGIN_ROOT}": false,
+	}
+	for value, wantValid := range cases {
+		t.Run(value, func(t *testing.T) {
+			root := writeAgent(t, "agent", validInstructions)
+			writeConnectionFile(t, root, "catalog.md", remoteConnectionWithHeaders(
+				"https://example.com/mcp", map[string]string{"X-Auth": value}, ""))
+			p, diags, err := Load(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			gotValid := p != nil && !diags.HasErrors()
+			if gotValid != wantValid {
+				t.Fatalf("header value %q: valid = %v, want %v (diags: %v)", value, gotValid, wantValid, diags.All())
+			}
+			if !wantValid {
+				requireErrorID(t, diags, "mcp.header.invalid")
+			}
+		})
+	}
+}
+
+// TestLoadConnectionHeaderNameMatrix proves bad HTTP header names and
+// case-insensitive collisions are rejected via the shared plugin mcp.json
+// header rules.
+func TestLoadConnectionHeaderNameMatrix(t *testing.T) {
+	root := writeAgent(t, "agent", validInstructions)
+	writeConnectionFile(t, root, "catalog.md",
+		"---\ntype: streamable-http\nurl: https://example.com/mcp\nheaders:\n  \"bad header\": value\n---\n")
+	_, diags, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireErrorID(t, diags, "mcp.header.invalid")
 }

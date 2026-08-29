@@ -27,6 +27,7 @@ import (
 	"github.com/alee792/tenon/internal/dispatch"
 	"github.com/alee792/tenon/internal/dispatchstate"
 	"github.com/alee792/tenon/internal/friction"
+	"github.com/alee792/tenon/internal/generated"
 	"github.com/alee792/tenon/internal/harness"
 	claudeharness "github.com/alee792/tenon/internal/harness/claude"
 	codexharness "github.com/alee792/tenon/internal/harness/codex"
@@ -53,9 +54,9 @@ const usage = `usage:
   tenon schedule run AGENT --workspace DIR --harness <claude|codex> [--manifest PATH] [--turn-timeout DUR] [--max-active-turns N]
   tenon stage AGENT --harness <claude|codex> --output DIR
   tenon stage verify --artifact PATH [--prefix DIR]
-  tenon connection add AGENT NAME --url HTTPS_URL [--context TEXT] [--manifest PATH]
-  tenon connection status AGENT [NAME] [--manifest PATH]
-  tenon connection remove AGENT NAME [--manifest PATH]
+  tenon mcp add AGENT NAME --url HTTPS_URL [--header 'K: V'] [--context TEXT] [--manifest PATH]
+  tenon mcp status AGENT [NAME] [--manifest PATH]
+  tenon mcp remove AGENT NAME [--manifest PATH]
   tenon integration install SOURCE --trust operator
   tenon integration inspect|verify|list|enable|disable|remove [ID]
   tenon integration update ID SOURCE --trust operator
@@ -87,19 +88,13 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "manifest":
 		return runManifest(args[1:], stdout, stderr)
 	case "mcp":
-		if len(args) < 2 || args[1] != "serve" {
-			fmt.Fprintf(stderr, "tenon mcp: the only subcommand is serve\n%s", usage)
-			return 2
-		}
-		return runMCPServe(args[2:], stdin, stdout, stderr)
+		return runMCP(args[1:], stdin, stdout, stderr)
 	case "run":
 		return runRun(args[1:], stdin, stdout, stderr)
 	case "schedule":
 		return runSchedule(args[1:], stdout, stderr)
 	case "stage":
 		return runStage(args[1:], stdout, stderr)
-	case "connection":
-		return runConnection(args[1:], stdout, stderr)
 	case "integration":
 		return runIntegration(args[1:], stdout, stderr)
 	case "version":
@@ -1118,21 +1113,25 @@ func stateBase() (string, error) {
 	return filepath.Join(home, ".local", "state", "tenon"), nil
 }
 
-// runConnection dispatches the "tenon connection" subcommands (ADR 0016).
-func runConnection(args []string, stdout, stderr io.Writer) int {
+// runMCP dispatches the "tenon mcp" subcommands: serve (internal, used by
+// the harness's managed server launch) plus add, status, and remove, the
+// standalone-connection authoring commands (ADR 0016, issue #49).
+func runMCP(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintf(stderr, "tenon connection: a subcommand is required (add, status, remove)\n%s", usage)
+		fmt.Fprintf(stderr, "tenon mcp: a subcommand is required (serve, add, status, remove)\n%s", usage)
 		return 2
 	}
 	switch args[0] {
+	case "serve":
+		return runMCPServe(args[1:], stdin, stdout, stderr)
 	case "add":
-		return runConnectionAdd(args[1:], stdout, stderr)
+		return runMCPAdd(args[1:], stdout, stderr)
 	case "status":
-		return runConnectionStatus(args[1:], stdout, stderr)
+		return runMCPStatus(args[1:], stdout, stderr)
 	case "remove":
-		return runConnectionRemove(args[1:], stdout, stderr)
+		return runMCPRemove(args[1:], stdout, stderr)
 	default:
-		fmt.Fprintf(stderr, "tenon connection: unknown subcommand %q\n%s", args[0], usage)
+		fmt.Fprintf(stderr, "tenon mcp: unknown subcommand %q\n%s", args[0], usage)
 		return 2
 	}
 }
@@ -1202,14 +1201,58 @@ func proveAgentRoot(agent, cmdName, expectedFingerprint string, stderr io.Writer
 	return p.Root, true
 }
 
-// runConnectionAdd validates a new connection entirely offline — name, URL,
-// context length, and every collision it can check — then creates the file
-// atomically. It never overwrites an existing connection and never applies a
-// workspace.
-func runConnectionAdd(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("connection add", flag.ContinueOnError)
+// headerFlags accumulates repeatable --header 'Name: Value' flags into an
+// ordered name/value pair list, preserving the exact authoring order and
+// rejecting a malformed pair immediately, before any other validation runs.
+type headerFlags struct {
+	names  []string
+	values []string
+}
+
+func (h *headerFlags) String() string { return "" }
+
+func (h *headerFlags) Set(raw string) error {
+	name, value, ok := strings.Cut(raw, ":")
+	if !ok {
+		return fmt.Errorf("a --header value must be \"Name: Value\"; found %q", raw)
+	}
+	name = strings.TrimSpace(name)
+	value = strings.TrimPrefix(value, " ")
+	if name == "" {
+		return fmt.Errorf("a --header name must not be empty: %q", raw)
+	}
+	h.names = append(h.names, name)
+	h.values = append(h.values, value)
+	return nil
+}
+
+func (h *headerFlags) asMap() (map[string]string, error) {
+	if len(h.names) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]string, len(h.names))
+	for i, name := range h.names {
+		lower := strings.ToLower(name)
+		for _, existing := range h.names[:i] {
+			if strings.ToLower(existing) == lower {
+				return nil, fmt.Errorf("the header name %q collides case-insensitively with %q", name, existing)
+			}
+		}
+		out[name] = h.values[i]
+	}
+	return out, nil
+}
+
+// runMCPAdd validates a new connection entirely offline — name, URL,
+// headers, context length, and every collision it can check — then creates
+// the file atomically. It never overwrites an existing connection and never
+// applies a workspace.
+func runMCPAdd(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("mcp add", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	urlFlag := fs.String("url", "", "absolute HTTPS remote endpoint URL")
+	var headers headerFlags
+	fs.Var(&headers, "header", "repeatable HTTP header as 'Name: Value'; a value may end with one ${VAR} reference")
 	contextFlag := fs.String("context", "", "optional model-facing usage context")
 	packageFlag := fs.String("package", "", "installed package identifier (not supported yet)")
 	capabilityFlag := fs.String("capability", "", "installed capability identifier (not supported yet)")
@@ -1217,23 +1260,28 @@ func runConnectionAdd(args []string, stdout, stderr io.Writer) int {
 
 	positional, ok := parsePositional(fs, args)
 	if !ok || len(positional) != 2 {
-		fmt.Fprintf(stderr, "tenon connection add: usage: tenon connection add AGENT NAME --url HTTPS_URL [--context TEXT]\n")
+		fmt.Fprintf(stderr, "tenon mcp add: usage: tenon mcp add AGENT NAME --url HTTPS_URL [--header 'K: V'] [--context TEXT]\n")
 		return 2
 	}
 	agent, name := positional[0], positional[1]
 
 	if *packageFlag != "" || *capabilityFlag != "" {
-		fmt.Fprintln(stderr, "tenon connection add: installed package targets are not supported yet; only remote streamable-http targets are available")
+		fmt.Fprintln(stderr, "tenon mcp add: installed package targets are not supported yet; only remote streamable-http targets are available")
 		return 1
 	}
 	if *urlFlag == "" {
-		fmt.Fprintln(stderr, "tenon connection add: --url is required")
+		fmt.Fprintln(stderr, "tenon mcp add: --url is required")
 		return 2
+	}
+	headerMap, err := headers.asMap()
+	if err != nil {
+		fmt.Fprintln(stderr, "tenon mcp add:", err)
+		return 1
 	}
 
 	supplied, err := readSuppliedManifest(*manifestPath)
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon connection add:", err)
+		fmt.Fprintln(stderr, "tenon mcp add:", err)
 		return 1
 	}
 
@@ -1244,74 +1292,83 @@ func runConnectionAdd(args []string, stdout, stderr io.Writer) int {
 	// so add needs no separate root proof.
 	p, diags, err := agentproject.LoadWithManifest(agent, expectedFingerprint(supplied))
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon connection add:", err)
+		fmt.Fprintln(stderr, "tenon mcp add:", err)
 		return 1
 	}
 	if p == nil || diags.HasErrors() {
 		_ = diags.WriteProse(stderr)
-		fmt.Fprintln(stderr, "tenon connection add: the agent project is invalid; fix it before adding a connection")
+		fmt.Fprintln(stderr, "tenon mcp add: the agent project is invalid; fix it before adding a connection")
 		return 1
 	}
 
 	if !agentproject.ValidConnectionName(name) {
-		fmt.Fprintf(stderr, "tenon connection add: %q is not a valid connection name: 1-64 characters, a leading lowercase letter, then lowercase letters, digits, underscores, or hyphens\n", name)
+		fmt.Fprintf(stderr, "tenon mcp add: %q is not a valid connection name: 1-64 characters, a leading lowercase letter, then lowercase letters, digits, underscores, or hyphens\n", name)
 		return 1
 	}
 	if name == agentproject.ManagedConnectionName {
-		fmt.Fprintf(stderr, "tenon connection add: the name %q is reserved for tenon's own managed server\n", name)
+		fmt.Fprintf(stderr, "tenon mcp add: the name %q is reserved for tenon's own managed server\n", name)
 		return 1
 	}
 	for _, c := range p.Connections {
 		if c.Name == name {
-			fmt.Fprintf(stderr, "tenon connection add: the connection name %q already exists at %s\n", name, c.SourcePath)
+			fmt.Fprintf(stderr, "tenon mcp add: the connection name %q already exists at %s\n", name, c.SourcePath)
 			return 1
 		}
 	}
 	for _, s := range p.PluginServers {
 		if s.Name == name {
-			fmt.Fprintf(stderr, "tenon connection add: the connection name %q collides with the accepted plugin MCP server declared at %s\n", name, s.SourcePath)
+			fmt.Fprintf(stderr, "tenon mcp add: the connection name %q collides with the accepted plugin MCP server declared at %s\n", name, s.SourcePath)
 			return 1
 		}
 	}
 	if err := agentproject.ValidateConnectionURL(*urlFlag); err != nil {
-		fmt.Fprintln(stderr, "tenon connection add:", err)
+		fmt.Fprintln(stderr, "tenon mcp add:", err)
+		return 1
+	}
+	if err := agentproject.ValidateConnectionHeaders(headerMap); err != nil {
+		fmt.Fprintln(stderr, "tenon mcp add:", err)
 		return 1
 	}
 	context := strings.TrimSpace(*contextFlag)
 	if n := utf8.RuneCountInString(context); n > agentproject.MaxConnectionContextRunes {
-		fmt.Fprintf(stderr, "tenon connection add: context may contain at most %d Unicode characters; found %d\n", agentproject.MaxConnectionContextRunes, n)
+		fmt.Fprintf(stderr, "tenon mcp add: context may contain at most %d Unicode characters; found %d\n", agentproject.MaxConnectionContextRunes, n)
 		return 1
 	}
 
-	connectionsDir := filepath.Join(p.Root, "connections")
-	if err := os.MkdirAll(connectionsDir, 0o755); err != nil {
-		fmt.Fprintln(stderr, "tenon connection add:", err)
+	mcpDir := filepath.Join(p.Root, "mcp")
+	if err := os.MkdirAll(mcpDir, 0o755); err != nil {
+		fmt.Fprintln(stderr, "tenon mcp add:", err)
 		return 1
 	}
-	path := filepath.Join(connectionsDir, name+".md")
+	path := filepath.Join(mcpDir, name+".md")
 	if _, err := os.Lstat(path); err == nil {
-		fmt.Fprintf(stderr, "tenon connection add: connections/%s.md already exists; there is no update command, edit it directly\n", name)
+		fmt.Fprintf(stderr, "tenon mcp add: mcp/%s.md already exists; there is no update command, edit it directly\n", name)
 		return 1
 	} else if !os.IsNotExist(err) {
-		fmt.Fprintln(stderr, "tenon connection add:", err)
+		fmt.Fprintln(stderr, "tenon mcp add:", err)
 		return 1
 	}
 
 	var b strings.Builder
 	b.WriteString("---\n")
-	b.WriteString("type: mcp\n")
-	b.WriteString("transport: streamable-http\n")
+	b.WriteString("type: streamable-http\n")
 	b.WriteString("url: " + *urlFlag + "\n")
+	if len(headers.names) > 0 {
+		b.WriteString("headers:\n")
+		for i, hname := range headers.names {
+			b.WriteString("  " + hname + ": " + generated.YAMLString(headers.values[i]) + "\n")
+		}
+	}
 	b.WriteString("---\n")
 	if context != "" {
 		b.WriteString("\n" + context + "\n")
 	}
 	if err := writeFileAtomic(path, []byte(b.String())); err != nil {
-		fmt.Fprintln(stderr, "tenon connection add:", err)
+		fmt.Fprintln(stderr, "tenon mcp add:", err)
 		return 1
 	}
 
-	fmt.Fprintf(stdout, "added: connection %s at connections/%s.md\n", name, name)
+	fmt.Fprintf(stdout, "added: connection %s at mcp/%s.md\n", name, name)
 	fmt.Fprintln(stdout, "run tenon apply for each intended workspace")
 	return 0
 }
@@ -1320,13 +1377,13 @@ func runConnectionAdd(args []string, stdout, stderr io.Writer) int {
 // every connection, or one named connection, without contacting anything.
 // Any malformed connection is reported with its authored path and makes the
 // result nonzero.
-func runConnectionStatus(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("connection status", flag.ContinueOnError)
+func runMCPStatus(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("mcp status", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	manifestPath := fs.String("manifest", "", "optional supplied agent manifest proving an instructions-free root")
 	positional, ok := parsePositional(fs, args)
 	if !ok || len(positional) < 1 || len(positional) > 2 {
-		fmt.Fprintf(stderr, "tenon connection status: usage: tenon connection status AGENT [NAME] [--manifest PATH]\n")
+		fmt.Fprintf(stderr, "tenon mcp status: usage: tenon mcp status AGENT [NAME] [--manifest PATH]\n")
 		return 2
 	}
 	agent := positional[0]
@@ -1337,16 +1394,16 @@ func runConnectionStatus(args []string, stdout, stderr io.Writer) int {
 
 	supplied, err := readSuppliedManifest(*manifestPath)
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon connection status:", err)
+		fmt.Fprintln(stderr, "tenon mcp status:", err)
 		return 1
 	}
-	if _, ok := proveAgentRoot(agent, "connection status", expectedFingerprint(supplied), stderr); !ok {
+	if _, ok := proveAgentRoot(agent, "mcp status", expectedFingerprint(supplied), stderr); !ok {
 		return 1
 	}
 
 	connections, diags, err := agentproject.LoadConnectionsForStatus(agent)
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon connection status:", err)
+		fmt.Fprintln(stderr, "tenon mcp status:", err)
 		return 1
 	}
 
@@ -1376,18 +1433,18 @@ func runConnectionStatus(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stdout, "%s: target=installed package=%s capability=%s %s %s (%s)\n",
 				c.Name, c.Package, c.Capability, contextState, health, c.SourcePath)
 			if !resolved {
-				fmt.Fprintf(stderr, "tenon connection status: %s: %s\n", c.Name, detail)
+				fmt.Fprintf(stderr, "tenon mcp status: %s: %s\n", c.Name, detail)
 				reportedUnresolved = true
 			}
 			continue
 		}
-		fmt.Fprintf(stdout, "%s: target=remote transport=streamable-http url=%s %s configured runtime=unchecked (%s)\n",
-			c.Name, c.URL, contextState, c.SourcePath)
+		fmt.Fprintf(stdout, "%s: target=remote transport=streamable-http url=%s headers=%d %s configured runtime=unchecked (%s)\n",
+			c.Name, c.URL, len(c.Headers), contextState, c.SourcePath)
 	}
 
 	reportedMalformed := false
 	for _, d := range diags.All() {
-		if filterName != "" && d.Path != "connections/"+filterName+".md" {
+		if filterName != "" && d.Path != "mcp/"+filterName+".md" {
 			continue
 		}
 		fmt.Fprintln(stderr, d.String())
@@ -1398,7 +1455,7 @@ func runConnectionStatus(args []string, stdout, stderr io.Writer) int {
 	}
 
 	if !found {
-		fmt.Fprintf(stderr, "tenon connection status: no connection named %q\n", filterName)
+		fmt.Fprintf(stderr, "tenon mcp status: no connection named %q\n", filterName)
 		return 1
 	}
 	if reportedMalformed || reportedUnresolved {
@@ -1430,49 +1487,49 @@ func installedConnectionHealth(store *integration.Store, c agentproject.Connecti
 	return true, "targets=" + strings.Join(targets, ",")
 }
 
-// runConnectionRemove deletes exactly the named real connection file,
-// without requiring it — or any other connection — to be healthy.
-func runConnectionRemove(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("connection remove", flag.ContinueOnError)
+// runMCPRemove deletes exactly the named real connection file, without
+// requiring it — or any other connection — to be healthy.
+func runMCPRemove(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("mcp remove", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	manifestPath := fs.String("manifest", "", "optional supplied agent manifest proving an instructions-free root")
 	positional, ok := parsePositional(fs, args)
 	if !ok || len(positional) != 2 {
-		fmt.Fprintf(stderr, "tenon connection remove: usage: tenon connection remove AGENT NAME [--manifest PATH]\n")
+		fmt.Fprintf(stderr, "tenon mcp remove: usage: tenon mcp remove AGENT NAME [--manifest PATH]\n")
 		return 2
 	}
 	agent, name := positional[0], positional[1]
 
 	supplied, err := readSuppliedManifest(*manifestPath)
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon connection remove:", err)
+		fmt.Fprintln(stderr, "tenon mcp remove:", err)
 		return 1
 	}
-	root, ok := proveAgentRoot(agent, "connection remove", expectedFingerprint(supplied), stderr)
+	root, ok := proveAgentRoot(agent, "mcp remove", expectedFingerprint(supplied), stderr)
 	if !ok {
 		return 1
 	}
 	if !agentproject.ValidConnectionName(name) {
-		fmt.Fprintf(stderr, "tenon connection remove: %q is not a valid connection name\n", name)
+		fmt.Fprintf(stderr, "tenon mcp remove: %q is not a valid connection name\n", name)
 		return 1
 	}
 
-	path := filepath.Join(root, "connections", name+".md")
+	path := filepath.Join(root, "mcp", name+".md")
 	info, err := os.Lstat(path)
 	if err != nil {
-		fmt.Fprintf(stderr, "tenon connection remove: no connection file at connections/%s.md\n", name)
+		fmt.Fprintf(stderr, "tenon mcp remove: no connection file at mcp/%s.md\n", name)
 		return 1
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		fmt.Fprintf(stderr, "tenon connection remove: connections/%s.md is not a real regular file; refusing to remove it\n", name)
+		fmt.Fprintf(stderr, "tenon mcp remove: mcp/%s.md is not a real regular file; refusing to remove it\n", name)
 		return 1
 	}
 	if err := os.Remove(path); err != nil {
-		fmt.Fprintln(stderr, "tenon connection remove:", err)
+		fmt.Fprintln(stderr, "tenon mcp remove:", err)
 		return 1
 	}
 
-	fmt.Fprintf(stdout, "removed: connection %s at connections/%s.md\n", name, name)
+	fmt.Fprintf(stdout, "removed: connection %s at mcp/%s.md\n", name, name)
 	fmt.Fprintln(stdout, "run tenon apply for each intended workspace")
 	return 0
 }

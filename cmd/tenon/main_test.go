@@ -1755,7 +1755,7 @@ func TestConnectionAddCreatesExactFile(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"connection", "add", agent, "catalog",
+	code := run([]string{"mcp", "add", agent, "catalog",
 		"--url", "https://example.com/mcp", "--context", "Use for the catalog."}, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("add exit %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
@@ -1764,19 +1764,19 @@ func TestConnectionAddCreatesExactFile(t *testing.T) {
 		t.Fatalf("expected a directive to run tenon apply: %s", stdout.String())
 	}
 
-	got := mustRead(t, filepath.Join(agent, "connections", "catalog.md"))
-	want := "---\ntype: mcp\ntransport: streamable-http\nurl: https://example.com/mcp\n---\n\nUse for the catalog.\n"
+	got := mustRead(t, filepath.Join(agent, "mcp", "catalog.md"))
+	want := "---\ntype: streamable-http\nurl: https://example.com/mcp\n---\n\nUse for the catalog.\n"
 	if string(got) != want {
-		t.Fatalf("connections/catalog.md =\n%q\nwant\n%q", got, want)
+		t.Fatalf("mcp/catalog.md =\n%q\nwant\n%q", got, want)
 	}
 
 	stdout.Reset()
 	stderr.Reset()
-	code = run([]string{"connection", "add", agent, "catalog", "--url", "https://example.com/other"}, nil, &stdout, &stderr)
+	code = run([]string{"mcp", "add", agent, "catalog", "--url", "https://example.com/other"}, nil, &stdout, &stderr)
 	if code == 0 {
 		t.Fatal("add must refuse to overwrite an existing connection")
 	}
-	got2 := mustRead(t, filepath.Join(agent, "connections", "catalog.md"))
+	got2 := mustRead(t, filepath.Join(agent, "mcp", "catalog.md"))
 	if string(got2) != want {
 		t.Fatalf("a refused overwrite must not change the existing file: %q", got2)
 	}
@@ -1787,13 +1787,43 @@ func TestConnectionAddCreatesExactFile(t *testing.T) {
 func TestConnectionAddWithoutContextOmitsBody(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"connection", "add", agent, "catalog", "--url", "https://example.com/mcp"}, nil, &stdout, &stderr); code != 0 {
+	if code := run([]string{"mcp", "add", agent, "catalog", "--url", "https://example.com/mcp"}, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("add exit %d: %s", code, stderr.String())
 	}
-	got := mustRead(t, filepath.Join(agent, "connections", "catalog.md"))
-	want := "---\ntype: mcp\ntransport: streamable-http\nurl: https://example.com/mcp\n---\n"
+	got := mustRead(t, filepath.Join(agent, "mcp", "catalog.md"))
+	want := "---\ntype: streamable-http\nurl: https://example.com/mcp\n---\n"
 	if string(got) != want {
-		t.Fatalf("connections/catalog.md =\n%q\nwant\n%q", got, want)
+		t.Fatalf("mcp/catalog.md =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// TestConnectionAddWithHeaders proves repeatable --header flags render into
+// the frontmatter's headers mapping, in authoring order, and that an invalid
+// header value is refused offline without creating a file (issue #49).
+func TestConnectionAddWithHeaders(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"mcp", "add", agent, "catalog", "--url", "https://example.com/mcp",
+		"--header", "Authorization: Bearer ${ACME_TOKEN}", "--header", "X-Trace: on"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("add exit %d: %s", code, stderr.String())
+	}
+	got := string(mustRead(t, filepath.Join(agent, "mcp", "catalog.md")))
+	want := "---\ntype: streamable-http\nurl: https://example.com/mcp\nheaders:\n" +
+		"  Authorization: \"Bearer ${ACME_TOKEN}\"\n  X-Trace: \"on\"\n---\n"
+	if got != want {
+		t.Fatalf("mcp/catalog.md =\n%q\nwant\n%q", got, want)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = run([]string{"mcp", "add", agent, "other", "--url", "https://example.com/mcp",
+		"--header", "X-Bad: ${one}${two}"}, nil, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("a header value using $ outside the single-reference grammar must be refused")
+	}
+	if _, err := os.Stat(filepath.Join(agent, "mcp", "other.md")); !os.IsNotExist(err) {
+		t.Fatal("a refused add must not create a file")
 	}
 }
 
@@ -1803,7 +1833,7 @@ func TestConnectionAddWithoutContextOmitsBody(t *testing.T) {
 func TestConnectionAddPackageFlagFailsUnsupported(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"connection", "add", agent, "github",
+	code := run([]string{"mcp", "add", agent, "github",
 		"--package", "github-mcp-server", "--capability", "github"}, nil, &stdout, &stderr)
 	if code == 0 {
 		t.Fatal("expected failure: installed targets are not supported yet")
@@ -1811,7 +1841,7 @@ func TestConnectionAddPackageFlagFailsUnsupported(t *testing.T) {
 	if !strings.Contains(stderr.String(), "installed package targets are not supported yet; only remote streamable-http targets are available") {
 		t.Fatalf("expected the exact honest diagnostic, got: %s", stderr.String())
 	}
-	if _, err := os.Stat(filepath.Join(agent, "connections", "github.md")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(agent, "mcp", "github.md")); !os.IsNotExist(err) {
 		t.Fatal("an unsupported add must not create a file")
 	}
 }
@@ -1821,12 +1851,12 @@ func TestConnectionAddPackageFlagFailsUnsupported(t *testing.T) {
 func TestConnectionAddRejectsInvalidURL(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"connection", "add", agent, "catalog", "--url", "http://example.com/mcp"}, nil, &stdout, &stderr)
+	code := run([]string{"mcp", "add", agent, "catalog", "--url", "http://example.com/mcp"}, nil, &stdout, &stderr)
 	if code == 0 {
 		t.Fatal("expected failure: plain http is never accepted")
 	}
-	if _, err := os.Stat(filepath.Join(agent, "connections")); !os.IsNotExist(err) {
-		t.Fatal("a failed add must not create connections/")
+	if _, err := os.Stat(filepath.Join(agent, "mcp")); !os.IsNotExist(err) {
+		t.Fatal("a failed add must not create mcp/")
 	}
 }
 
@@ -1836,11 +1866,11 @@ func TestConnectionAddRejectsInvalidURL(t *testing.T) {
 // nonzero result.
 func TestConnectionStatusReportsConfiguredAndMalformed(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
-	writeFile(t, agent, "connections/catalog.md",
-		[]byte("---\ntype: mcp\ntransport: streamable-http\nurl: https://example.com/mcp\n---\n\nGuidance.\n"), 0o644)
+	writeFile(t, agent, "mcp/catalog.md",
+		[]byte("---\ntype: streamable-http\nurl: https://example.com/mcp\n---\n\nGuidance.\n"), 0o644)
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"connection", "status", agent}, nil, &stdout, &stderr)
+	code := run([]string{"mcp", "status", agent}, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("status exit %d: %s", code, stderr.String())
 	}
@@ -1852,17 +1882,17 @@ func TestConnectionStatusReportsConfiguredAndMalformed(t *testing.T) {
 
 	// A second, malformed connection must be reported with its authored
 	// path and make the result nonzero, without suppressing the first.
-	writeFile(t, agent, "connections/broken.md", []byte("no frontmatter\n"), 0o644)
+	writeFile(t, agent, "mcp/broken.md", []byte("no frontmatter\n"), 0o644)
 	stdout.Reset()
 	stderr.Reset()
-	code = run([]string{"connection", "status", agent}, nil, &stdout, &stderr)
+	code = run([]string{"mcp", "status", agent}, nil, &stdout, &stderr)
 	if code == 0 {
 		t.Fatal("a malformed connection must make status nonzero")
 	}
 	if !strings.Contains(stdout.String(), "catalog") {
 		t.Fatalf("the healthy connection must still be reported: %s", stdout.String())
 	}
-	if !strings.Contains(stderr.String(), "connections/broken.md") || !strings.Contains(stderr.String(), "connection.frontmatter.missing") {
+	if !strings.Contains(stderr.String(), "mcp/broken.md") || !strings.Contains(stderr.String(), "mcp.frontmatter.missing") {
 		t.Fatalf("expected an authored-path diagnostic for the malformed connection: %s", stderr.String())
 	}
 }
@@ -1871,13 +1901,13 @@ func TestConnectionStatusReportsConfiguredAndMalformed(t *testing.T) {
 // one connection and fails when it does not exist.
 func TestConnectionStatusByName(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
-	writeFile(t, agent, "connections/catalog.md",
-		[]byte("---\ntype: mcp\ntransport: streamable-http\nurl: https://example.com/mcp\n---\n"), 0o644)
-	writeFile(t, agent, "connections/search.md",
-		[]byte("---\ntype: mcp\ntransport: streamable-http\nurl: https://search.example.com/mcp\n---\n"), 0o644)
+	writeFile(t, agent, "mcp/catalog.md",
+		[]byte("---\ntype: streamable-http\nurl: https://example.com/mcp\n---\n"), 0o644)
+	writeFile(t, agent, "mcp/search.md",
+		[]byte("---\ntype: streamable-http\nurl: https://search.example.com/mcp\n---\n"), 0o644)
 
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"connection", "status", agent, "catalog"}, nil, &stdout, &stderr); code != 0 {
+	if code := run([]string{"mcp", "status", agent, "catalog"}, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("status exit %d: %s", code, stderr.String())
 	}
 	if strings.Contains(stdout.String(), "search") {
@@ -1886,7 +1916,7 @@ func TestConnectionStatusByName(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	if code := run([]string{"connection", "status", agent, "missing"}, nil, &stdout, &stderr); code == 0 {
+	if code := run([]string{"mcp", "status", agent, "missing"}, nil, &stdout, &stderr); code == 0 {
 		t.Fatal("a nonexistent name must fail")
 	}
 }
@@ -1896,19 +1926,19 @@ func TestConnectionStatusByName(t *testing.T) {
 // missing.
 func TestConnectionRemoveDeletesExactFileAndErrorsOnAbsent(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
-	writeFile(t, agent, "connections/catalog.md",
-		[]byte("---\ntype: mcp\ntransport: streamable-http\nurl: https://example.com/mcp\n---\n"), 0o644)
-	writeFile(t, agent, "connections/search.md",
-		[]byte("---\ntype: mcp\ntransport: streamable-http\nurl: https://search.example.com/mcp\n---\n"), 0o644)
+	writeFile(t, agent, "mcp/catalog.md",
+		[]byte("---\ntype: streamable-http\nurl: https://example.com/mcp\n---\n"), 0o644)
+	writeFile(t, agent, "mcp/search.md",
+		[]byte("---\ntype: streamable-http\nurl: https://search.example.com/mcp\n---\n"), 0o644)
 
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"connection", "remove", agent, "catalog"}, nil, &stdout, &stderr); code != 0 {
+	if code := run([]string{"mcp", "remove", agent, "catalog"}, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("remove exit %d: %s", code, stderr.String())
 	}
-	if _, err := os.Stat(filepath.Join(agent, "connections", "catalog.md")); !os.IsNotExist(err) {
-		t.Fatal("expected connections/catalog.md to be removed")
+	if _, err := os.Stat(filepath.Join(agent, "mcp", "catalog.md")); !os.IsNotExist(err) {
+		t.Fatal("expected mcp/catalog.md to be removed")
 	}
-	if _, err := os.Stat(filepath.Join(agent, "connections", "search.md")); err != nil {
+	if _, err := os.Stat(filepath.Join(agent, "mcp", "search.md")); err != nil {
 		t.Fatal("remove must delete exactly the named file, not its siblings")
 	}
 	if !strings.Contains(stdout.String(), "run tenon apply") {
@@ -1917,7 +1947,7 @@ func TestConnectionRemoveDeletesExactFileAndErrorsOnAbsent(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	if code := run([]string{"connection", "remove", agent, "catalog"}, nil, &stdout, &stderr); code == 0 {
+	if code := run([]string{"mcp", "remove", agent, "catalog"}, nil, &stdout, &stderr); code == 0 {
 		t.Fatal("removing an absent connection must fail")
 	}
 }
@@ -1929,7 +1959,7 @@ func TestConnectionFullJourneyAddApplyClaude(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
 
 	var addOut, addErr bytes.Buffer
-	if code := run([]string{"connection", "add", agent, "catalog",
+	if code := run([]string{"mcp", "add", agent, "catalog",
 		"--url", "https://example.com/mcp", "--context", "Use for the catalog."}, nil, &addOut, &addErr); code != 0 {
 		t.Fatalf("add exit: %s", addErr.String())
 	}
@@ -1961,7 +1991,7 @@ func TestConnectionFullJourneyAddApplyClaude(t *testing.T) {
 // the same connection diagnostics as apply, without mutating the workspace.
 func TestConnectionValidateApplyParityOnConnectionError(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
-	writeFile(t, agent, "connections/catalog.md", []byte("no frontmatter\n"), 0o644)
+	writeFile(t, agent, "mcp/catalog.md", []byte("no frontmatter\n"), 0o644)
 
 	var validateOut, applyOut, stderr bytes.Buffer
 	validateCode := run([]string{"validate", agent, "--harness", "claude", "--diagnostics", "jsonl"}, nil, &validateOut, &stderr)
@@ -1974,8 +2004,8 @@ func TestConnectionValidateApplyParityOnConnectionError(t *testing.T) {
 			validateOut.String(), applyOut.String())
 	}
 	validateDiags := parseDiagLines(t, validateOut.String())
-	if len(filterDiags(validateDiags, "connection.frontmatter.missing")) == 0 {
-		t.Fatalf("expected connection.frontmatter.missing, got %q", validateOut.String())
+	if len(filterDiags(validateDiags, "mcp.frontmatter.missing")) == 0 {
+		t.Fatalf("expected mcp.frontmatter.missing, got %q", validateOut.String())
 	}
 	if _, err := os.Stat(filepath.Join(agent, "CLAUDE.md")); !os.IsNotExist(err) {
 		t.Fatal("a failing apply must not mutate the workspace")
@@ -1998,13 +2028,13 @@ func TestConnectionStatusInstalledHealthyAndUnresolved(t *testing.T) {
 	}
 
 	agent := writeAgent(t, "my-agent", validInstructions)
-	writeFile(t, agent, "connections/fixture-server.md",
-		[]byte("---\ntype: mcp\npackage: demo-pkg\ncapability: mcp\n---\n"), 0o644)
-	writeFile(t, agent, "connections/nope.md",
-		[]byte("---\ntype: mcp\npackage: nope-pkg\ncapability: mcp\n---\n"), 0o644)
+	writeFile(t, agent, "mcp/fixture-server.md",
+		[]byte("---\ntype: installed\npackage: demo-pkg\ncapability: mcp\n---\n"), 0o644)
+	writeFile(t, agent, "mcp/nope.md",
+		[]byte("---\ntype: installed\npackage: nope-pkg\ncapability: mcp\n---\n"), 0o644)
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"connection", "status", agent}, nil, &stdout, &stderr)
+	code := run([]string{"mcp", "status", agent}, nil, &stdout, &stderr)
 	if code == 0 {
 		t.Fatalf("status must be nonzero when one connection is unresolved")
 	}
@@ -2017,7 +2047,7 @@ func TestConnectionStatusInstalledHealthyAndUnresolved(t *testing.T) {
 		!strings.Contains(out, "unresolved") {
 		t.Fatalf("expected the unresolvable installed connection reported unresolved: %s", out)
 	}
-	if !strings.Contains(out, "connections/nope.md") {
+	if !strings.Contains(out, "mcp/nope.md") {
 		t.Fatalf("expected the unresolved connection's status line to name its authored path: %s", out)
 	}
 	if !strings.Contains(stderr.String(), "nope:") || !strings.Contains(stderr.String(), "store.not-found") {
@@ -2032,8 +2062,8 @@ func TestConnectionStatusInstalledHealthyAndUnresolved(t *testing.T) {
 func TestConnectionValidateApplyParityOnInstalledResolutionError(t *testing.T) {
 	isolateStore(t)
 	agent := writeAgent(t, "my-agent", validInstructions)
-	writeFile(t, agent, "connections/nope.md",
-		[]byte("---\ntype: mcp\npackage: nope-pkg\ncapability: mcp\n---\n"), 0o644)
+	writeFile(t, agent, "mcp/nope.md",
+		[]byte("---\ntype: installed\npackage: nope-pkg\ncapability: mcp\n---\n"), 0o644)
 
 	var validateOut, applyOut, stderr bytes.Buffer
 	validateCode := run([]string{"validate", agent, "--harness", "claude", "--diagnostics", "jsonl"}, nil, &validateOut, &stderr)
@@ -2046,8 +2076,8 @@ func TestConnectionValidateApplyParityOnInstalledResolutionError(t *testing.T) {
 			validateOut.String(), applyOut.String())
 	}
 	diags := parseDiagLines(t, validateOut.String())
-	if len(filterDiags(diags, "connection.package.unresolved")) == 0 {
-		t.Fatalf("expected connection.package.unresolved, got %q", validateOut.String())
+	if len(filterDiags(diags, "mcp.package.unresolved")) == 0 {
+		t.Fatalf("expected mcp.package.unresolved, got %q", validateOut.String())
 	}
 	if _, err := os.Stat(filepath.Join(agent, ".mcp.json")); !os.IsNotExist(err) {
 		t.Fatal("a failing apply must not mutate the workspace")
@@ -2074,8 +2104,8 @@ func TestInstalledConnectionFakeAmbientValueNeverLeaks(t *testing.T) {
 	}
 
 	agent := writeAgent(t, "my-agent", validInstructions)
-	writeFile(t, agent, "connections/demo.md",
-		[]byte("---\ntype: mcp\npackage: demo-pkg\ncapability: mcp\n---\n"), 0o644)
+	writeFile(t, agent, "mcp/demo.md",
+		[]byte("---\ntype: installed\npackage: demo-pkg\ncapability: mcp\n---\n"), 0o644)
 
 	t.Setenv("DEMO_TOKEN", fakeValue)
 
@@ -2212,11 +2242,11 @@ func TestConnectionCommandsProveInstructionsFreeRootByManifest(t *testing.T) {
 	mintManifest()
 
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"connection", "add", agent, "catalog",
+	if code := run([]string{"mcp", "add", agent, "catalog",
 		"--url", "https://example.com/mcp", "--manifest", manifestPath}, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("add on a manifest-proven root exit %d: %s", code, stderr.String())
 	}
-	path := filepath.Join(agent, "connections", "catalog.md")
+	path := filepath.Join(agent, "mcp", "catalog.md")
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("add must have written the connection: %v", err)
 	}
@@ -2226,7 +2256,7 @@ func TestConnectionCommandsProveInstructionsFreeRootByManifest(t *testing.T) {
 	mintManifest()
 	stdout.Reset()
 	stderr.Reset()
-	if code := run([]string{"connection", "status", agent, "--manifest", manifestPath}, nil, &stdout, &stderr); code != 0 {
+	if code := run([]string{"mcp", "status", agent, "--manifest", manifestPath}, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("status on a manifest-proven root exit %d: %s", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "catalog: target=remote") {
@@ -2235,7 +2265,7 @@ func TestConnectionCommandsProveInstructionsFreeRootByManifest(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	if code := run([]string{"connection", "remove", agent, "catalog", "--manifest", manifestPath}, nil, &stdout, &stderr); code != 0 {
+	if code := run([]string{"mcp", "remove", agent, "catalog", "--manifest", manifestPath}, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("remove on a manifest-proven root exit %d: %s", code, stderr.String())
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
@@ -2252,15 +2282,15 @@ func TestConnectionCommandsRefuseUnprovenRoot(t *testing.T) {
 	withFakeResolver(t, "2.1.240", nil)
 
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"connection", "add", agent, "catalog", "--url", "https://example.com/mcp"}, nil, &stdout, &stderr); code == 0 {
+	if code := run([]string{"mcp", "add", agent, "catalog", "--url", "https://example.com/mcp"}, nil, &stdout, &stderr); code == 0 {
 		t.Fatal("expected failure: an instructions-free root with no manifest is unproven")
 	}
-	if _, err := os.Stat(filepath.Join(agent, "connections")); !os.IsNotExist(err) {
-		t.Fatal("a refused add must not create connections/")
+	if _, err := os.Stat(filepath.Join(agent, "mcp")); !os.IsNotExist(err) {
+		t.Fatal("a refused add must not create mcp/")
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if code := run([]string{"connection", "status", agent}, nil, &stdout, &stderr); code == 0 {
+	if code := run([]string{"mcp", "status", agent}, nil, &stdout, &stderr); code == 0 {
 		t.Fatal("expected failure: an instructions-free root with no manifest is unproven")
 	}
 
@@ -2284,7 +2314,7 @@ func TestConnectionCommandsRefuseUnprovenRoot(t *testing.T) {
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if code := run([]string{"connection", "status", agent, "--manifest", manifestPath}, nil, &stdout, &stderr); code == 0 {
+	if code := run([]string{"mcp", "status", agent, "--manifest", manifestPath}, nil, &stdout, &stderr); code == 0 {
 		t.Fatal("expected failure: a stale manifest does not prove the root")
 	}
 	if !strings.Contains(stderr.String(), "fingerprint") {

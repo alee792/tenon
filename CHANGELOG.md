@@ -9,6 +9,30 @@ The first release, v0.1.0, ships the core described in
 
 ### Added
 
+- Standalone MCP connections move from `connections/` to `mcp/`, re-shaped to
+  the Agent Plugins 1.0 `mcp.json` server-entry vocabulary (issue #49): a
+  remote connection now declares `type: streamable-http` (replacing
+  `type: mcp` + `transport: streamable-http`) with an optional `headers` map,
+  whose values may end with exactly one `${VAR}` environment-variable
+  reference (never resolved by tenon, and never `${PLUGIN_ROOT}`/
+  `${PLUGIN_DATA}`); an installed connection now declares `type: installed`.
+  `type: sse` fails as a deprecated transport, and `type: stdio` fails as not
+  yet supported in authored files (repo-relative stdio is issue #50). The
+  credential-free-only restriction on remote targets is dropped — an
+  OAuth-requiring endpoint is fine to declare, since the harness alone
+  discovers and performs authentication. A leftover `connections/` directory
+  fails closed with a migration diagnostic (`mcp.migration.connections-dir`)
+  naming `mcp/`, rather than being silently ignored. Declared headers render
+  verbatim into Claude's `.mcp.json`; Codex, whose generated configuration
+  has no header support, warns and omits them
+  (`mcp.header.not-honored`). The CLI verb renames from `connection` to
+  `mcp`: `tenon mcp add|status|remove` replace `tenon connection
+  add|status|remove`, and `add` gained a repeatable `--header 'Name: Value'`
+  flag. Diagnostic identifiers rename from `connection.*` to `mcp.*`
+  (`connection.entry.invalid` → `mcp.entry.invalid`, and so on), plus new
+  identifiers `mcp.transport.invalid`, `mcp.header.invalid`, and
+  `mcp.migration.connections-dir`.
+
 - `tenon stage` never emits a Go tool tree that verifies but cannot serve
   (issue #14): the staged apply record now names the closure root relative
   to the workspace, and `tenon mcp serve` honors it when present, so a

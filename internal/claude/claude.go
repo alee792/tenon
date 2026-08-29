@@ -193,7 +193,7 @@ func acceptedConnections(p *agentproject.Project, diags *diagnostics.List) []age
 	var out []agentproject.Connection
 	for _, c := range p.Connections {
 		if claudeReservedConnectionNames[c.Name] {
-			diags.Errorf("connection.name.reserved", c.SourcePath,
+			diags.Errorf("mcp.name.reserved", c.SourcePath,
 				"the connection name %q is reserved by the selected harness (claude)'s native project surface", c.Name)
 			continue
 		}
@@ -206,14 +206,14 @@ func acceptedConnections(p *agentproject.Project, diags *diagnostics.List) []age
 // the tenon-owned managed stdio server, launched from the resolved tenon
 // executable against the absolute agent source and workspace, every accepted
 // plugin server, every accepted remote connection as a native http entry
-// with no headers field, and every accepted installed connection that
-// resolved cleanly as a native stdio entry from its launch descriptor. An
-// installed connection absent from resolved already carries a
-// connection.package.* error on diags and contributes no entry. It is
-// model-facing configuration, so it carries no fingerprint, version, or
-// other setup metadata beyond the paths the servers themselves need. Keys
-// are ordered by encoding/json's sorted map marshalling, so identical input
-// always renders identical bytes.
+// carrying its declared headers verbatim (Claude expands ${VAR} references
+// itself), and every accepted installed connection that resolved cleanly as
+// a native stdio entry from its launch descriptor. An installed connection
+// absent from resolved already carries a mcp.package.* error on diags and
+// contributes no entry. It is model-facing configuration, so it carries no
+// fingerprint, version, or other setup metadata beyond the paths the servers
+// themselves need. Keys are ordered by encoding/json's sorted map
+// marshalling, so identical input always renders identical bytes.
 func mcpConfig(executable, source, workspace string, servers []agentproject.ResolvedServer, connections []agentproject.Connection, resolved map[string]*integration.LaunchDescriptor) []byte {
 	entries := map[string]any{"managed": map[string]any{
 		"type":    "stdio",
@@ -228,11 +228,15 @@ func mcpConfig(executable, source, workspace string, servers []agentproject.Reso
 		case agentproject.ConnectionKindInstalled:
 			desc, ok := resolved[c.Name]
 			if !ok {
-				continue // already reported as connection.package.unresolved/mismatch
+				continue // already reported as mcp.package.unresolved/mismatch
 			}
 			entries[c.Name] = installedServerEntry(desc)
 		default:
-			entries[c.Name] = map[string]any{"type": "http", "url": c.URL}
+			entry := map[string]any{"type": "http", "url": c.URL}
+			if len(c.Headers) > 0 {
+				entry["headers"] = c.Headers
+			}
+			entries[c.Name] = entry
 		}
 	}
 	// A fixed map of strings, string slices, and string maps always encodes.

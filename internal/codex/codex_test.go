@@ -149,13 +149,54 @@ func TestRemoteHeadersWarnForCodex(t *testing.T) {
 	}
 }
 
+// TestConnectionHeadersWarnForCodex proves a remote connection's declared
+// headers, which the generated Codex configuration does not carry, are
+// reported rather than silently dropped, while the url entry itself still
+// renders (issue #49).
+func TestConnectionHeadersWarnForCodex(t *testing.T) {
+	p := &agentproject.Project{
+		Root:         "/src/my-agent",
+		Name:         "my-agent",
+		Instructions: &agentproject.Instructions{Body: "Body text.\n"},
+		Connections: []agentproject.Connection{
+			{
+				Name:       "catalog",
+				URL:        "https://example.com/mcp",
+				Headers:    map[string]string{"Authorization": "Bearer ${ACME_TOKEN}"},
+				SourcePath: "mcp/catalog.md",
+			},
+		},
+	}
+	diags := &diagnostics.List{}
+	files := Driver{}.Generate(p, apply.Target{Workspace: "/ws", Executable: "/bin/tenon"}, diags)
+
+	found := false
+	for _, d := range diags.All() {
+		if d.ID == "mcp.header.not-honored" && d.Severity == diagnostics.Warning &&
+			d.Path == "mcp/catalog.md" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected mcp.header.not-honored warning, got %v", diags.All())
+	}
+	for _, f := range files {
+		if f.Path == ".codex/config.toml" {
+			if !strings.Contains(string(f.Content), "[mcp_servers.catalog]") ||
+				strings.Contains(string(f.Content), "ACME_TOKEN") {
+				t.Fatalf("connection must render without headers: %s", f.Content)
+			}
+		}
+	}
+}
+
 func projectWithConnection(name, url, context string) *agentproject.Project {
 	return &agentproject.Project{
 		Root:         "/src/my-agent",
 		Name:         "my-agent",
 		Instructions: &agentproject.Instructions{Body: "Body text.\n"},
 		Connections: []agentproject.Connection{
-			{Name: name, URL: url, Context: context, SourcePath: "connections/" + name + ".md"},
+			{Name: name, URL: url, Context: context, SourcePath: "mcp/" + name + ".md"},
 		},
 	}
 }
@@ -299,7 +340,7 @@ func projectWithInstalledConnection(name, pkg, capability string) *agentproject.
 		Root: "/src/my-agent",
 		Name: "my-agent",
 		Connections: []agentproject.Connection{
-			{Kind: agentproject.ConnectionKindInstalled, Name: name, Package: pkg, Capability: capability, SourcePath: "connections/" + name + ".md"},
+			{Kind: agentproject.ConnectionKindInstalled, Name: name, Package: pkg, Capability: capability, SourcePath: "mcp/" + name + ".md"},
 		},
 	}
 }
@@ -349,7 +390,7 @@ func TestInstalledConnectionRendersNativeCommandEntry(t *testing.T) {
 
 // TestInstalledConnectionServerNameMismatchFailsForCodex proves a connection
 // whose filename differs from the capability's declared native server name
-// fails with connection.package.mismatch.
+// fails with mcp.package.mismatch.
 func TestInstalledConnectionServerNameMismatchFailsForCodex(t *testing.T) {
 	base := installCodexFixture(t, "demo-pkg", "actual-name")
 	p := projectWithInstalledConnection("demo", "demo-pkg", "mcp")
@@ -361,11 +402,11 @@ func TestInstalledConnectionServerNameMismatchFailsForCodex(t *testing.T) {
 
 	found := false
 	for _, d := range diags.All() {
-		if d.ID == "connection.package.mismatch" {
+		if d.ID == "mcp.package.mismatch" {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("expected connection.package.mismatch, got %v", diags.All())
+		t.Fatalf("expected mcp.package.mismatch, got %v", diags.All())
 	}
 }

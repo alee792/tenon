@@ -1,6 +1,6 @@
 # Native GitHub MCP
 
-An agent requests GitHub through the generic `connections/github.md` installed
+An agent requests GitHub through the generic `mcp/github.md` installed
 target. The file selects the operator-installed official
 `github/github-mcp-server` package and its `github` capability; tenon maps that
 selection into native Claude Code or Codex project configuration. There is no
@@ -33,12 +33,12 @@ and required environment *name* with `value=not-read`. `verify` is the offline
 status check for every cached byte. Neither command starts the package or reads
 the PAT.
 
-Add the connection to the exact agent root. `tenon connection add` does not
+Add the connection to the exact agent root. `tenon mcp add` does not
 author installed targets yet (see the specification's Known limitations), so
 write the file directly and check it offline:
 
 ```sh
-tenon connection status ./my-agent github
+tenon mcp status ./my-agent github
 ```
 
 The connection is ordinary versioned source:
@@ -46,7 +46,7 @@ The connection is ordinary versioned source:
 ```text
 my-agent/
   instructions.md
-  connections/
+  mcp/
     github.md
 ```
 
@@ -54,7 +54,7 @@ For example:
 
 ```md
 ---
-type: mcp
+type: installed
 package: github-mcp-server
 capability: github
 ---
@@ -96,7 +96,7 @@ codex
 Claude owns its one-time project MCP server approval. Codex first owns project
 trust, then native server and per-tool approval. Inspect the generated project
 and installed package before accepting those prompts. Tenon does not grant trust
-because `connections/github.md` exists. After approval, ask the harness to use
+because `mcp/github.md` exists. After approval, ask the harness to use
 the live discovered GitHub tools; tenon does not freeze their names or schemas.
 
 Native Git and `gh` authentication are separate, operator-owned setup. The MCP
@@ -172,7 +172,7 @@ tenon integration remove github-mcp-server
 
 There is no separate integration-package `status` command: `inspect` reports
 selected package state and `verify` proves the complete installed closure
-offline. `tenon connection status ./my-agent github` separately reports the
+offline. `tenon mcp status ./my-agent github` separately reports the
 authored selection and its offline resolution health. Disablement removes the
 package from future resolution without deleting metadata. Removal retires the
 selected record and retains immutable shared cache bytes. Reinstalling the same
@@ -198,7 +198,7 @@ to resolve the current package again.
 Remove the package in this order so a workspace never retains an apparently
 current stale entry:
 
-1. run `tenon connection remove AGENT github` for every consuming agent source;
+1. run `tenon mcp remove AGENT github` for every consuming agent source;
 2. reapply every local workspace so its generated native GitHub entry is
    removed, and rebuild staged outputs/images without the connection;
 3. run `tenon integration remove github-mcp-server`; and
@@ -211,7 +211,7 @@ remove or disable it.
 
 Connection discovery and package resolution during apply and stage are offline
 and verify current package state; other apply responsibilities retain their
-documented behavior. An agent without `connections/github.md` neither resolves
+documented behavior. An agent without `mcp/github.md` neither resolves
 nor stages this package. Tenon-owned scheduled, channel, and continuation
 process opens re-resolve current package state before opening a native child.
 Plain direct Claude or Codex launches do not; their generated configuration

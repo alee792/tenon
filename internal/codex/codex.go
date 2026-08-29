@@ -32,6 +32,12 @@ func (Driver) Generate(p *agentproject.Project, target apply.Target, diags *diag
 				"declared headers for server %q are not emitted into Codex project configuration, which tenon generates without header support; the server may fail to authenticate", s.Name)
 		}
 	}
+	for _, c := range p.Connections {
+		if c.Kind != agentproject.ConnectionKindInstalled && len(c.Headers) > 0 {
+			diags.Warnf("mcp.header.not-honored", c.SourcePath,
+				"declared headers for connection %q are not emitted into Codex project configuration, which tenon generates without header support; the server may fail to authenticate", c.Name)
+		}
+	}
 	resolvedConnections := agentproject.ResolveInstalledConnections(p.Connections, target.IntegrationStore, target.TenonVersion, diags)
 	config := mcpConfig(target.Executable, p.Root, target.Workspace, target.Model, resolved, p.Connections, resolvedConnections)
 	if len(config) > generated.MaxMCPConfigBytes {
@@ -99,7 +105,7 @@ func (Driver) Generate(p *agentproject.Project, target apply.Target, diags *diag
 // command/args/cwd/env entry from its launch descriptor, with its required
 // ambient names forwarded by name only through env_vars. An installed
 // connection absent from resolvedConnections already carries a
-// connection.package.* error on diags and contributes no entry. The managed
+// mcp.package.* error on diags and contributes no entry. The managed
 // server alone is required and pre-approved, because tenon validates and
 // audits every call that crosses its own boundary; every other generated
 // entry — including every connection, which is startup-optional — is
@@ -158,7 +164,7 @@ func mcpConfig(executable, source, workspace, model string, servers []agentproje
 		case agentproject.ConnectionKindInstalled:
 			desc, ok := resolvedConnections[c.Name]
 			if !ok {
-				continue // already reported as connection.package.unresolved/mismatch
+				continue // already reported as mcp.package.unresolved/mismatch
 			}
 			b.WriteString("\n[mcp_servers." + c.Name + "]\n")
 			b.WriteString("command = " + generated.TOMLString(desc.Executable) + "\n")
