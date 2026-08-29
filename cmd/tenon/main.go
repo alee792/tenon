@@ -1329,8 +1329,10 @@ func runMCPAdd(args []string, stdout, stderr io.Writer) int {
 	}
 	for _, s := range p.PluginServers {
 		if s.Name == name {
-			fmt.Fprintf(stderr, "tenon mcp add: the connection name %q collides with the accepted plugin MCP server declared at %s\n", name, s.SourcePath)
-			return 1
+			// Author-wins composition (ADR 0026, issue #53): the authored
+			// server will shadow the plugin's, so warn and proceed rather
+			// than refusing what apply accepts.
+			fmt.Fprintf(stderr, "tenon mcp add: warning: the name %q shadows the plugin MCP server declared at %s; the authored server will take precedence\n", name, s.SourcePath)
 		}
 	}
 	if err := agentproject.ValidateConnectionURL(*urlFlag); err != nil {

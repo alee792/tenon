@@ -21,8 +21,9 @@ package agentproject
 // no-op: authors must move the content to mcp/ and re-shape its frontmatter.
 //
 // Composition policy (ADR 0026, issue #53) splits by relationship.
-// Plugin<->plugin server-name collisions are unchanged: fail-closed peers,
-// handled entirely in pluginmcp.go's mergePluginServers. Author<->plugin
+// Plugin<->plugin server-name collisions are unchanged: ADR 0010's
+// first-wins-with-warning, handled entirely in pluginmcp.go's
+// mergePluginServers. Author<->plugin
 // becomes a hierarchy: an mcp/<name>.md declaring a server (remote, stdio,
 // or installed) whose name matches an accepted plugin server now wins,
 // with a warning ("mcp.name.shadowed") naming both sources; the plugin's
@@ -430,7 +431,7 @@ func checkStdioBudget(connections []Connection, diags *diagnostics.List) {
 func checkLegacyConnectionsDir(root string, diags *diagnostics.List) {
 	if info, err := os.Lstat(filepath.Join(root, "connections")); err == nil && (info.IsDir() || info.Mode()&os.ModeSymlink != 0) {
 		diags.Errorf("mcp.migration.connections-dir", "connections",
-			"the connections/ directory is no longer read; move its contents to mcp/ and re-shape each file's frontmatter to the current vocabulary (type: streamable-http or type: installed)")
+			"the connections/ directory is no longer read; move its contents to mcp/ and re-shape each file's frontmatter to the current vocabulary (type: streamable-http, type: stdio, or type: installed)")
 	}
 }
 

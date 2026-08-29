@@ -310,10 +310,9 @@ func runPluginStatus(args []string, stdout, stderr io.Writer) int {
 			continue
 		}
 		// Verify checks the tree's digest, not its provenance: a cache
-		// entry's recorded source is compared here, explicitly, against the
-		// declared reference (the agentproject.PluginCache interface Load
-		// resolves through carries no source parameter to do this check at
-		// Load time itself — see the interface note in plugincache.go).
+		// entry's recorded source is compared here, explicitly, against
+		// the declared reference — redundantly with Cache.Resolve's own
+		// source check, which also runs at Load time.
 		if state, stateErr := cache.State(ref.Rev); stateErr == nil && state != nil && state.Source != ref.Source {
 			fmt.Fprintf(stdout, "%s: source %s rev %s: unresolved: the cached tree for this rev was fetched from a different source (%s); re-run tenon plugin fetch\n",
 				ref.Name, ref.Source, ref.Rev, diagnostics.Bound(state.Source, 256))

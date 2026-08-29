@@ -56,8 +56,9 @@ The first release, v0.1.0, ships the core described in
   itself is still never read or copied), and a value carrying a literal
   prefix before its `${VAR}` reference cannot be represented that way and is
   reported and omitted (`mcp.env.not-honored`). New diagnostic identifiers:
-  `mcp.command.invalid`, `mcp.cwd.invalid`, `mcp.args.invalid`,
-  `mcp.env.invalid`, `mcp.env.not-honored`, and `mcp.stdio.bounds.exceeded`.
+  `mcp.command.invalid`, `mcp.command.not-executable`, `mcp.cwd.invalid`,
+  `mcp.args.invalid`, `mcp.env.invalid`, `mcp.env.not-honored`, and
+  `mcp.stdio.bounds.exceeded`.
 
 - Plugin acquisition by pointer and pin (issue #52, ADR 0026 § plugin
   acquisition): `plugins/<name>.md` may now declare a plugin by reference
