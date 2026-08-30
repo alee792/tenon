@@ -1450,6 +1450,24 @@ func sortedNames(seen map[string]bool) []string {
 	return out
 }
 
+// pluginCacheNote renders the `mcp status` cache-dependency wart legibly
+// (issue #58, product-spec known limitation): a server whose plugin root is
+// inside the agent tree — a vendored plugin, or a reference whose pinned
+// content is materialized beside it — is fully self-contained, but a server
+// declared by a cache-resolved plugins/<name>.md reference renders
+// PLUGIN_ROOT (and any plugin-relative command) against the operator's local
+// plugin cache in a plain apply, and pruning that cache entry silently
+// breaks the already-applied workspace until `tenon plugin fetch` repairs
+// it. A staged tree therefore never carries this marker: staging
+// materializes the reference content into the tree, where it loads as a
+// materialized reference with no cache in reach at all.
+func pluginCacheNote(vendored bool) string {
+	if vendored {
+		return ""
+	}
+	return " cache-dependent=true"
+}
+
 // printRequiredEnv prints one "requires ambient env" line naming every
 // entry in names, when non-empty. Values are never read or printed (only
 // names), matching `tenon integration inspect`'s convention.
@@ -1553,7 +1571,8 @@ func runMCPStatus(args []string, stdout, stderr io.Writer) int {
 				continue
 			}
 			found = true
-			fmt.Fprintf(stdout, "%s: target=plugin plugin=%s transport=%s (%s)\n", s.Name, s.Plugin, s.Transport, s.SourcePath)
+			fmt.Fprintf(stdout, "%s: target=plugin plugin=%s transport=%s%s (%s)\n",
+				s.Name, s.Plugin, s.Transport, pluginCacheNote(s.Vendored), s.SourcePath)
 			if s.Transport == agentproject.TransportStdio {
 				printRequiredEnv(stdout, requiredPluginEnvNames(s))
 			}
@@ -1564,8 +1583,8 @@ func runMCPStatus(args []string, stdout, stderr io.Writer) int {
 				continue
 			}
 			found = true
-			fmt.Fprintf(stdout, "%s: target=plugin plugin=%s transport=%s shadowed-by=%s (%s)\n",
-				sh.Server.Name, sh.Server.Plugin, sh.Server.Transport, sh.ShadowedBy, sh.Server.SourcePath)
+			fmt.Fprintf(stdout, "%s: target=plugin plugin=%s transport=%s%s shadowed-by=%s (%s)\n",
+				sh.Server.Name, sh.Server.Plugin, sh.Server.Transport, pluginCacheNote(sh.Server.Vendored), sh.ShadowedBy, sh.Server.SourcePath)
 		}
 
 		for _, m := range surface.Masked {

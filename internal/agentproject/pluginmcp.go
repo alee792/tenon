@@ -100,23 +100,27 @@ type PluginServer struct {
 	// URL and Headers are the remote values, copied literally.
 	URL     string
 	Headers map[string]string
-	// Vendored reports whether this server was loaded from a real vendored
-	// plugins/<Plugin>/ directory under the agent root, as opposed to a
-	// plugin reference's resolved cache tree (ADR 0026 "plugin acquisition
-	// by pointer and pin"). Only a vendored plugin's root and any
-	// plugin-relative stdio command move when the agent source is staged to
-	// a different absolute location (Blocker 2, post-review): a cache tree
-	// lives at a fixed, non-staged location regardless of where the agent
-	// source itself is staged, so ResolveServers only re-anchors PluginRoot
-	// and RelCommand when Vendored is true.
+	// Vendored reports whether this server's plugin root is a
+	// plugins/<Plugin>/ directory inside the agent root — an authored
+	// vendored plugin, or a plugin reference whose pinned content is
+	// materialized beside it (issue #58) — as opposed to a plugin
+	// reference resolved against the operator's plugin cache (ADR 0026
+	// "plugin acquisition by pointer and pin"). Only an in-tree plugin's
+	// root and any plugin-relative stdio command move when the agent source
+	// is staged to a different absolute location (Blocker 2, post-review):
+	// a cache tree lives at a fixed, non-staged location regardless of
+	// where the agent source itself is staged, so ResolveServers only
+	// re-anchors PluginRoot and RelCommand when Vendored is true.
 	Vendored bool
 	// RelCommand is the plugin-root-relative slash path of a plugin-relative
-	// ("./...") stdio command, set only when Vendored is true and Command
-	// was declared that way; empty for a bare PATH-resolved command name and
-	// for every non-vendored server. ResolveServers joins it against the
-	// staging-time plugin root instead of trusting Command's Load-time
-	// absolute value, exactly like Connection.Command for authored stdio
-	// connections.
+	// ("./...") stdio command, recorded for every such command whatever the
+	// plugin's provenance, and empty for a bare PATH-resolved command name.
+	// ResolveServers consults it only for a Vendored server, joining it
+	// against the render-time plugin root instead of trusting Command's
+	// Load-time absolute value, exactly like Connection.Command for authored
+	// stdio connections — which is what lets staging re-anchor a
+	// cache-resolved reference's command by marking its servers Vendored
+	// (see internal/stage.reAnchorReferencedServers).
 	RelCommand string
 }
 

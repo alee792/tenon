@@ -41,6 +41,13 @@ type Project struct {
 	// lexically within each plugin's mcp.json. Their argument, environment,
 	// and working-directory values are still unexpanded.
 	PluginServers []PluginServer
+	// PluginReferences are every successfully resolved plugins/<name>.md
+	// reference (ADR 0026 "plugin acquisition by pointer and pin"), sorted by
+	// name. Staging (issue #58) uses this to materialize each reference's
+	// resolved cache tree into the staged filesystem under
+	// plugins/<name>/, re-anchored exactly like a vendored plugin; an
+	// ordinary apply does not consult it and keeps pointing at the cache.
+	PluginReferences []PluginReference
 	// Subagents are the validated immediate subagents/ directories, sorted
 	// by name.
 	Subagents []Subagent
@@ -170,9 +177,10 @@ func loadWithProof(dir, expectedFingerprint string, allowUnproven bool) (*Projec
 
 	skillBudget := &skillSetBudget{}
 	skills, skillInputs := loadSkills(root, skillBudget, diags)
-	pluginSkills, pluginServers, skippedPluginServers, pluginInputs := loadPlugins(root, skillBudget, diags)
+	pluginSkills, pluginServers, skippedPluginServers, pluginInputs, pluginReferences := loadPlugins(root, skillBudget, diags)
 	mergedSkills, pluginSkillInputs := mergeSkills(skills, pluginSkills, diags)
 	p.Skills = mergedSkills
+	p.PluginReferences = pluginReferences
 
 	subagents, subagentInputs := loadSubagents(root, diags)
 	p.Subagents = subagents

@@ -751,7 +751,7 @@ func TestStageGoClosureCarriesNoBuildMachinePath(t *testing.T) {
 		t.Fatal("the fixture's own agent and executable directories must yield at least one dangerous needle to check against; the test proves nothing otherwise")
 	}
 	scanDiags := &diagnostics.List{}
-	if err := rejectBuildMachinePaths(out, "", componentNeedles, joinedNeedles, scanDiags); err != nil {
+	if err := rejectBuildMachinePaths(out, "", nil, componentNeedles, joinedNeedles, scanDiags); err != nil {
 		t.Fatal(err)
 	}
 	if scanDiags.HasErrors() {
@@ -797,7 +797,7 @@ func TestRejectBuildMachinePathsFiresOnALeak(t *testing.T) {
 		t.Fatal(err)
 	}
 	diags := &diagnostics.List{}
-	if err := rejectBuildMachinePaths(clean, "", needles, nil, diags); err != nil {
+	if err := rejectBuildMachinePaths(clean, "", nil, needles, nil, diags); err != nil {
 		t.Fatalf("scanning a clean tree: %v", err)
 	}
 	if diags.HasErrors() {
@@ -810,7 +810,7 @@ func TestRejectBuildMachinePathsFiresOnALeak(t *testing.T) {
 		t.Fatal(err)
 	}
 	diags = &diagnostics.List{}
-	if err := rejectBuildMachinePaths(leaking, "", needles, nil, diags); err != nil {
+	if err := rejectBuildMachinePaths(leaking, "", nil, needles, nil, diags); err != nil {
 		t.Fatalf("scanning a leaking tree: %v", err)
 	}
 	found := false
@@ -846,7 +846,7 @@ func TestRejectBuildMachinePathsIgnoresBareComponentsInABinary(t *testing.T) {
 		t.Fatal(err)
 	}
 	diags := &diagnostics.List{}
-	if err := rejectBuildMachinePaths(textDir, "", componentNeedles, nil, diags); err != nil {
+	if err := rejectBuildMachinePaths(textDir, "", nil, componentNeedles, nil, diags); err != nil {
 		t.Fatalf("scanning text: %v", err)
 	}
 	if !diags.HasErrors() {
@@ -862,7 +862,7 @@ func TestRejectBuildMachinePathsIgnoresBareComponentsInABinary(t *testing.T) {
 		t.Fatal(err)
 	}
 	diags = &diagnostics.List{}
-	if err := rejectBuildMachinePaths(binDir, "", componentNeedles, nil, diags); err != nil {
+	if err := rejectBuildMachinePaths(binDir, "", nil, componentNeedles, nil, diags); err != nil {
 		t.Fatalf("scanning a binary: %v", err)
 	}
 	if diags.HasErrors() {
@@ -894,7 +894,7 @@ func TestRejectBuildMachinePathsFiresOnAJoinedLeakInABinary(t *testing.T) {
 				t.Fatal(err)
 			}
 			diags := &diagnostics.List{}
-			if err := rejectBuildMachinePaths(dir, "", nil, joinedNeedles, diags); err != nil {
+			if err := rejectBuildMachinePaths(dir, "", nil, nil, joinedNeedles, diags); err != nil {
 				t.Fatalf("scanning: %v", err)
 			}
 			found := false
@@ -940,7 +940,7 @@ func TestRejectBuildMachinePathsRoutesByProvenanceNotContentType(t *testing.T) {
 
 	componentNeedles := [][]byte{[]byte("github.com"), []byte("someowner")}
 	diags := &diagnostics.List{}
-	if err := rejectBuildMachinePaths(root, closureRootFinal, componentNeedles, nil, diags); err != nil {
+	if err := rejectBuildMachinePaths(root, closureRootFinal, nil, componentNeedles, nil, diags); err != nil {
 		t.Fatal(err)
 	}
 

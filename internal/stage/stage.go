@@ -213,7 +213,13 @@ func Stage(ctx context.Context, opts Options) (*Result, *diagnostics.List, error
 
 	// Step: generate the native integration for the final paths, writing the
 	// physical files under <tmp>/workspace while embedding /opt and /workspace.
-	genErr := generateIntegration(p, opts.Driver, finalAgentSource, closureRootFinal, tmp, diags)
+	// renderProject carries every plugin-reference server re-anchored as
+	// Vendored (see reAnchorReferencedServers) so the rendered configuration
+	// points PLUGIN_ROOT and any plugin-relative command inside the staged
+	// tree rather than at the operator's cache.
+	renderProject := *p
+	renderProject.PluginServers = reAnchorReferencedServers(p.PluginServers, p.PluginReferences)
+	genErr := generateIntegration(&renderProject, opts.Driver, finalAgentSource, closureRootFinal, tmp, diags)
 	if genErr != nil {
 		return nil, diags, genErr
 	}
@@ -240,6 +246,106 @@ func Stage(ctx context.Context, opts Options) (*Result, *diagnostics.List, error
 	if err := copySource(p.Root, physical(tmp, finalAgentSource)); err != nil {
 		return nil, diags, err
 	}
+
+	// Step: materialize every resolved plugin reference's cached tree into
+	// the staged filesystem at plugins/<name>/ (issue #58): copySource above
+	// carries the plugins/<name>.md reference file itself (harmless
+	// provenance) but not the plugin content it resolves to, which lives in
+	// the operator's plugin cache rather than the agent source tree. Each
+	// reference is re-resolved against the cache here — immediately before
+	// copying, not trusting the root Load captured earlier — so a cache
+	// pruned or tampered with between Load and staging fails the stage
+	// closed with the same diagnostic Load itself would raise, rather than
+	// copying stale, missing, or corrupted bytes. The copy reuses copyTree:
+	// regular files only, executable bits preserved, any symlink rejected
+	// (defensive; the cache's own Fetch already refuses to store one). Each
+	// materialized directory's final path is collected for the build-machine
+	// path scan below, which must treat these arbitrary third-party bytes as
+	// carried-in payload rather than tenon-rendered text.
+	//
+	// The re-verification and the copy do not run under one lock over the
+	// cache — tenon holds no such lock — so a cache entry mutated in the
+	// narrow window between them is not prevented. It is caught instead: the
+	// staged agent source is re-loaded and fingerprint-checked below, before
+	// anything is published, so a tree carrying bytes other than the ones
+	// Load fingerprinted fails the stage closed rather than reaching an
+	// output directory.
+	//
+	// A reference that already arrived materialized (its content sits beside
+	// it in the authored tree, so Load resolved it from there rather than
+	// from the cache) needs nothing here: copySource already carried those
+	// bytes, and they stay ordinary authored source for the scan.
+	var materializedPlugins []string
+	for _, ref := range p.PluginReferences {
+		if ref.Materialized {
+			continue
+		}
+		root, err := agentproject.ResolvePluginReferenceRoot(ref)
+		if err != nil {
+			diags.Errorf("plugin.reference.unresolved", ref.SourcePath, "%s", diagnostics.Bound(err.Error(), 512))
+			continue
+		}
+		final := finalAgentSource + "/plugins/" + ref.Name
+		if err := copyTree(root, physical(tmp, final)); err != nil {
+			return nil, diags, fmt.Errorf("staging the resolved plugin reference %q: %w", ref.Name, err)
+		}
+		materializedPlugins = append(materializedPlugins, strings.TrimPrefix(final, "/"))
+	}
+	if diags.HasErrors() {
+		return nil, diags, nil
+	}
+
+	// Step: prove the staged agent source reproduces the fingerprint the
+	// artifact manifest is about to record, by re-loading it exactly as the
+	// container will (issue #58 review). This is the production-side proof of
+	// the whole materialization: the staged tree is the first place a
+	// materialized reference is ever loaded as one, and its components must
+	// fingerprint identically to the cache-resolved load this stage was
+	// planned from. It also closes the unlocked window above — a cache entry
+	// mutated between its re-verification and the copy lands here as a
+	// mismatch, before publication, rather than as a tree that verifies only
+	// at container open.
+	//
+	// The re-load is deterministic whatever the process-global plugin cache
+	// holds: every reference in the staged tree now has its content beside
+	// it, and materialized content wins over the cache without consulting it
+	// (agentproject's materialized-reference precedence), so a real CLI stage
+	// with a configured cache and this same stage run offline read the same
+	// bytes. The cost is one extra project load per stage, over a tree that
+	// is already hot in the page cache.
+	stagedSource := physical(tmp, finalAgentSource)
+	restaged, restagedDiags, err := agentproject.Load(stagedSource)
+	switch {
+	case err != nil:
+		diags.Errorf("stage.tree.fingerprint-mismatch", strings.TrimPrefix(finalAgentSource, "/"),
+			"the staged agent source could not be re-loaded to prove it reproduces the recorded fingerprint: %s",
+			diagnostics.Bound(err.Error(), 256))
+		return nil, diags, nil
+	case restaged == nil || restagedDiags.HasErrors():
+		detail := "no diagnostics were reported"
+		if all := restagedDiags.All(); len(all) > 0 {
+			detail = diagnostics.Bound(all[0].String(), 256)
+		}
+		diags.Errorf("stage.tree.fingerprint-mismatch", strings.TrimPrefix(finalAgentSource, "/"),
+			"the staged agent source no longer validates on its own: %s", detail)
+		return nil, diags, nil
+	case restaged.Fingerprint != p.Fingerprint:
+		diags.Errorf("stage.tree.fingerprint-mismatch", strings.TrimPrefix(finalAgentSource, "/"),
+			"the staged agent source fingerprints to %s, not the %s this stage was planned from; staging fails closed rather than publish a tree whose content is not the content that was loaded",
+			restaged.Fingerprint, p.Fingerprint)
+		return nil, diags, nil
+	}
+	// The plugin cache base is deliberately not added as a needle to the
+	// build-machine-path scan below: a plugin reference's cache tree path is
+	// keyed by its pinned rev, and that same rev legitimately appears as
+	// plain text in the authored plugins/<name>.md reference file (the
+	// "rev:" field) — a real value, not a leak. Every reference server was
+	// re-anchored as Vendored above,
+	// so PLUGIN_ROOT and any plugin-relative command already render under
+	// the staged path rather than the cache's; the negative property that no
+	// staged file embeds the cache *base* directory is proven directly by
+	// the staging tests instead (issue #58), which is a check this
+	// component/rev-shaped needle set cannot make safely.
 
 	// Step: carry the tool execution closure into /opt/tenon/runtimes.
 	runtimeInfo := RuntimeInfo{Bundled: false, Minimized: false}
@@ -319,7 +425,7 @@ func Stage(ctx context.Context, opts Options) (*Result, *diagnostics.List, error
 	// data is checked only for the fuller joined-path forms instead, since
 	// bare-component matching against it produces false positives no
 	// author-chosen path can dodge (see buildMachineJoinedNeedles).
-	if err := rejectBuildMachinePaths(tmp, closureRootFinal,
+	if err := rejectBuildMachinePaths(tmp, closureRootFinal, materializedPlugins,
 		buildMachineNeedles(p.Root, tmp, prepRoots),
 		buildMachineJoinedNeedles(p.Root, tmp, prepRoots),
 		diags); err != nil {
@@ -639,10 +745,22 @@ func looksBinary(content []byte) bool {
 // so a carried-in tree is joined-matched wholesale regardless of whether
 // any one file inside it is text or binary. closureRootFinal is the
 // closure's own final canonical root (finalRuntimes+"/tools"), or "" for a
-// tool-free agent.
-func carriedPayload(rel, closureRootFinal string) bool {
+// tool-free agent. materializedPlugins are the staged tree roots (relative,
+// slash-separated) this stage materialized a plugin reference's pinned
+// content into: third-party bytes copied in from the plugin cache, in the
+// same class as the interpreter tree — a plugin's own README naming a
+// directory the build machine happens to share is a coincidence, not a leak
+// (issue #58 review). Only the directories this stage copied are exempt; a
+// vendored plugin directory the author committed is authored source and
+// stays component-matched.
+func carriedPayload(rel, closureRootFinal string, materializedPlugins []string) bool {
 	if rel == strings.TrimPrefix(finalTenonBin, "/") {
 		return true
+	}
+	for _, root := range materializedPlugins {
+		if rel == root || strings.HasPrefix(rel, root+"/") {
+			return true
+		}
 	}
 	if closureRootFinal == "" {
 		return false
@@ -706,7 +824,7 @@ func carriedPayload(rel, closureRootFinal string) bool {
 // binary content after all. Every match is reported as a diagnostic naming
 // the offending staged path and the exact leaked text, so a caller sees
 // every leak in one run rather than stopping at the first.
-func rejectBuildMachinePaths(root, closureRootFinal string, componentNeedles, joinedNeedles [][]byte, diags *diagnostics.List) error {
+func rejectBuildMachinePaths(root, closureRootFinal string, materializedPlugins []string, componentNeedles, joinedNeedles [][]byte, diags *diagnostics.List) error {
 	if len(componentNeedles) == 0 && len(joinedNeedles) == 0 {
 		return nil
 	}
@@ -735,7 +853,7 @@ func rejectBuildMachinePaths(root, closureRootFinal string, componentNeedles, jo
 		}
 
 		needles := joinedNeedles
-		if !carriedPayload(relSlash, closureRootFinal) {
+		if !carriedPayload(relSlash, closureRootFinal, materializedPlugins) {
 			needles = componentNeedles
 			if looksBinary(content) {
 				needles = joinedNeedles

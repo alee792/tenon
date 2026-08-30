@@ -216,6 +216,11 @@ func TestPluginFetchStatusUpdateHappyPath(t *testing.T) {
 	if !strings.Contains(stdout.String(), "resolved") {
 		t.Fatalf("expected a resolved status line, got: %s", stdout.String())
 	}
+	// The cache-dependency wart (issue #58) must be named legibly rather than
+	// left implicit in the reference's synthetic source path.
+	if !strings.Contains(stdout.String(), "pruning it breaks the workspace") {
+		t.Fatalf("expected plugin status to name the plain-apply cache dependency, got: %s", stdout.String())
+	}
 
 	stdout.Reset()
 	stderr.Reset()

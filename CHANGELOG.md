@@ -81,12 +81,13 @@ The first release, v0.1.0, ships the core described in
   and `mcp.json` validation a vendored `plugins/<name>/` directory uses, and
   its resolved bytes join the project fingerprint on the same terms as
   vendored bytes; the reference file's own bytes always join the
-  fingerprint too. A reference and a vendored directory sharing a name fail
-  the project before any workspace mutation
-  (`plugin.entry.collision`). Vendoring a complete directory beneath
+  fingerprint too. (A reference and a directory sharing a name failed the
+  project as `plugin.entry.collision` when this slice landed; issue #58,
+  below, replaced that rule with materialized references and retired the
+  identifier.) Vendoring a complete directory beneath
   `plugins/<name>/` remains fully supported and requires none of this. New
   diagnostic identifiers: `plugin.entry.invalid` (extended to cover
-  malformed reference filenames), `plugin.entry.collision`,
+  malformed reference filenames),
   `plugin.reference.invalid`, `plugin.reference.frontmatter.missing`,
   `plugin.reference.frontmatter.invalid`,
   `plugin.reference.frontmatter.unknown-field`,
@@ -146,6 +147,44 @@ The first release, v0.1.0, ships the core described in
   did declare the overridden server but lost a plugin-to-plugin naming
   collision (ADR 0010, unchanged) now names the winning plugin explicitly
   instead of reporting a generic dangling override.
+
+- A plugin reference's resolved content is materialized into the staged
+  tree, and the loader learned to read it back (issue #58, ADR 0026 §
+  plugin acquisition, now accepted): `tenon stage` copies each
+  `plugins/<name>.md` reference's resolved cache tree — re-resolved and
+  digest-re-verified immediately before the copy, so a cache pruned or
+  tampered with between load and staging fails the stage closed — into the
+  staged filesystem at `plugins/<name>/`, and the generated configuration
+  anchors `PLUGIN_ROOT` and any plugin-relative command inside the staged
+  tree instead of at the operator's cache. A reference file with a
+  directory of the same name beside it is now a *materialized reference*
+  rather than a collision: the directory is that reference's pinned
+  content, it takes precedence over the plugin cache, and its components
+  load through the identical path a cache-resolved reference uses, under
+  the same synthetic authored root — so the fingerprint is byte-identical
+  whether the content came from the cache at build time or from the tree
+  afterward, which is what lets a staged tree re-load, verify, and start.
+  A materialized reference needs no plugin cache and no network at all,
+  which is exactly the container's situation. There is no `git` in the
+  tree to re-check the pin against those bytes: the fingerprint is their
+  integrity check, so any change to them is caught by `tenon stage verify`
+  and by drift detection, and a plain load trusts them as it trusts all
+  other authored source. `plugin.entry.collision` is retired with the rule
+  it reported. `tenon mcp status` marks a cache-resolved reference's
+  servers `cache-dependent=true` (a vendored or materialized plugin's
+  servers carry no marker), and `tenon plugin status` reports each
+  reference as `resolved cache-dependent=true` or `materialized
+  cache-dependent=false`, with the prose caveat printed once after the
+  listing rather than on every row. A plain `tenon apply` still points a
+  cache-resolved reference at the operator's cache by design. Staging now
+  re-loads the staged agent source and proves it reproduces the fingerprint
+  the artifact manifest is about to record, before writing that manifest and
+  before publishing: a tree whose bytes are not the bytes that were loaded —
+  a plugin cache entry mutated in the unlocked window between staging's
+  re-verification of a reference and its copy, say — fails the stage closed
+  with the new `stage.tree.fingerprint-mismatch` diagnostic and no output
+  directory, rather than publishing a tree that only fails later at
+  container open.
 
 - `tenon stage` never emits a Go tool tree that verifies but cannot serve
   (issue #14): the staged apply record now names the closure root relative
@@ -323,8 +362,10 @@ for the full list. Notably:
   (issue #38), not a project's locked dependencies.
 - A remote MCP server's behavior is not pinned by the source fingerprint: a
   hosted endpoint's tool catalog can change under an unchanged fingerprint.
-- `tenon stage` does not yet carry a fetched plugin reference's resolved
-  bytes into the staged tree (issue #58); vendor a plugin a container needs.
+- A plain `tenon apply` renders a cache-resolved plugin reference's servers
+  against the operator's plugin cache, so pruning the cache breaks an
+  already-applied workspace until the next `tenon plugin fetch` (issue #58).
+  `tenon stage` is unaffected: it materializes the content into the tree.
 - A supplied manifest is verified at `tenon run`'s session start, not
   re-verified per turn within that session (`schedule run` re-verifies
   each occurrence).
