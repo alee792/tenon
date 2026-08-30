@@ -1,0 +1,104 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>evolve — pairwise judge</title>
+<style>
+  :root {
+    --bg: #fbfaf8; --card: #fff; --ink: #1c1b19; --muted: #6a675f;
+    --line: #e3e0d8; --accent: #534ab7; --tie: #8a867c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#17161a; --card:#201f24; --ink:#eceae4; --muted:#9c988e; --line:#333039; --accent:#afa9ec; --tie:#7d7a72; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.6 ui-sans-serif,system-ui,-apple-system,sans-serif; }
+  header { padding:16px 24px; border-bottom:1px solid var(--line); display:flex; gap:16px; align-items:baseline; flex-wrap:wrap; }
+  h1 { font-size:15px; font-weight:500; margin:0; }
+  .muted { color:var(--muted); font-size:13px; }
+  .bar { height:3px; background:var(--line); border-radius:2px; overflow:hidden; flex:1 1 160px; min-width:120px; }
+  .bar > i { display:block; height:100%; background:var(--accent); transition:width .2s; }
+  main { padding:24px; max-width:1200px; margin:0 auto; }
+  .task { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px 16px; margin-bottom:20px; }
+  .pair { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  @media (max-width:820px) { .pair { grid-template-columns:1fr; } }
+  .side { background:var(--card); border:1px solid var(--line); border-radius:10px; display:flex; flex-direction:column; overflow:hidden; }
+  .side h2 { font-size:12px; font-weight:500; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); margin:0; padding:10px 16px; border-bottom:1px solid var(--line); }
+  .side pre { margin:0; padding:16px; white-space:pre-wrap; word-wrap:break-word; font:13px/1.65 ui-monospace,SFMono-Regular,Menlo,monospace; max-height:52vh; overflow:auto; }
+  .actions { display:flex; gap:12px; justify-content:center; margin-top:22px; flex-wrap:wrap; }
+  button { font:inherit; padding:10px 22px; border-radius:8px; border:1px solid var(--line); background:var(--card); color:var(--ink); cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  button.tie { color:var(--tie); }
+  button.ghost { border-color:transparent; color:var(--muted); }
+  kbd { font:12px ui-monospace,monospace; border:1px solid var(--line); border-bottom-width:2px; border-radius:4px; padding:1px 5px; color:var(--muted); }
+  .empty { text-align:center; padding:80px 24px; color:var(--muted); }
+</style>
+<header>
+  <h1>Pairwise judge</h1>
+  <span class="muted" id="meta">connecting…</span>
+  <span class="bar"><i id="bar" style="width:0"></i></span>
+  <span class="muted"><kbd>←</kbd> A &nbsp; <kbd>→</kbd> B &nbsp; <kbd>space</kbd> tie</span>
+</header>
+<main id="root"><div class="empty">Waiting for a generation to finish running…</div></main>
+<script>
+const root = document.getElementById('root');
+const meta = document.getElementById('meta');
+const bar  = document.getElementById('bar');
+let current = null, busy = false;
+
+function esc(s){ return s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+async function poll(){
+  try {
+    const s = await (await fetch('/api/state')).json();
+    if (s.waiting) {
+      meta.textContent = 'waiting for a generation';
+      if (current !== null) { current = null; root.innerHTML = '<div class="empty">Waiting for a generation to finish running…</div>'; }
+      return;
+    }
+    meta.textContent = `generation ${s.generation} · ${s.done} of ${s.total} comparisons`;
+    bar.style.width = (s.total ? (s.done / s.total) * 100 : 0) + '%';
+    if (!s.pair) {
+      current = null;
+      root.innerHTML = '<div class="empty">Generation judged. Scores returned to evolve — it is proposing the next one.</div>';
+      return;
+    }
+    if (current === s.pair.id) return;
+    current = s.pair.id;
+    root.innerHTML = `
+      <div class="task"><span class="muted">task</span><br>${esc(s.task || '(task text unavailable)')}</div>
+      <div class="pair">
+        <section class="side"><h2>A</h2><pre>${esc(s.pair.a)}</pre></section>
+        <section class="side"><h2>B</h2><pre>${esc(s.pair.b)}</pre></section>
+      </div>
+      <div class="actions">
+        <button onclick="vote('a')">A is better</button>
+        <button class="tie" onclick="vote('tie')">Tie</button>
+        <button onclick="vote('b')">B is better</button>
+        <button class="ghost" onclick="undo()">Undo last</button>
+      </div>`;
+  } catch (e) {
+    meta.textContent = 'judge server unreachable';
+  }
+}
+
+async function vote(winner){
+  if (!current || busy) return;
+  busy = true;
+  await fetch('/api/verdict', {method:'POST', headers:{'Content-Type':'application/json'},
+                               body: JSON.stringify({id: current, winner})});
+  current = null; busy = false; poll();
+}
+
+async function undo(){
+  busy = true;
+  await fetch('/api/undo', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+  current = null; busy = false; poll();
+}
+
+addEventListener('keydown', e => {
+  if (e.key === 'ArrowLeft') vote('a');
+  else if (e.key === 'ArrowRight') vote('b');
+  else if (e.key === ' ') { e.preventDefault(); vote('tie'); }
+});
+
+poll(); setInterval(poll, 900);
+</script>

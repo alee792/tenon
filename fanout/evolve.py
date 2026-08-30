@@ -271,6 +271,7 @@ class Config:
     rng_seed: int
     keep_worktrees: bool
     reevaluate: str
+    model: str
 
     def to_json(self) -> dict:
         payload = {k: v for k, v in self.__dict__.items()}
@@ -378,6 +379,7 @@ def load_config(path: Path) -> Config:
         rng_seed=int(raw.get("rng_seed", 1)),
         keep_worktrees=bool(raw.get("keep_worktrees", False)),
         reevaluate=reevaluate,
+        model=str(raw.get("model", "")),
     )
 
 
@@ -672,6 +674,7 @@ class Search:
                     "name": f"{g.short}-t{t}r{r}",
                     "task": task,
                     "mutate": f"{sys.executable} {Path(__file__).resolve()} _inject {g.path}",
+                    **({"manifest": self.manifest_for(g)} if self.cfg.model else {}),
                 }
                 for g, t, task, r in trials
             ],
@@ -771,6 +774,33 @@ class Search:
                 }
             )
             self.log(f"  {genome.short}  score {genome.score:.4f}  sd {genome.stdev:.4f}  [{genome.operator}]")
+
+    def manifest_for(self, genome: Genome) -> str:
+        """One manifest per genome, so the model can be pinned across a moving
+        population.
+
+        A manifest binds an expected source fingerprint, and every mutation
+        changes that fingerprint — so a single shared manifest would fail
+        verification on every candidate but the seed. Writing one per genome is
+        the same trick tenon documents for comparing harnesses, turned around:
+        many genomes crossed with one pin set instead of one commit crossed
+        with many."""
+        out = self.root / "manifests"
+        out.mkdir(exist_ok=True)
+        path = out / f"{genome.short}.json"
+        if not path.exists():
+            proc = subprocess.run(
+                [
+                    self.cfg.tenon, "manifest", "write", str(genome.path),
+                    "--harness", self.cfg.harness, "--model", self.cfg.model,
+                    "--output", str(path),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if proc.returncode != 0:
+                raise EvolveError(f"tenon manifest write failed for {genome.short}: {proc.stderr.strip()[:200]}")
+        return str(path)
 
     def reclaim(self, generation: int) -> None:
         """A generation is population x tasks x repeats full checkouts. Once it
