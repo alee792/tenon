@@ -1,0 +1,24 @@
+{
+  "run": "prompt-sweep",
+  "repo": ".",
+  "base": "HEAD",
+  "agent": "agent",
+  "harness": "claude",
+  "task": "Fix the failing test and explain the fix in one paragraph.",
+  "concurrency": 3,
+  "timeout": "900s",
+  "turn_timeout": "600s",
+  "variants": [
+    {
+      "name": "baseline"
+    },
+    {
+      "name": "terse",
+      "mutate": "printf '\\nPrefer the smallest correct diff. Answer in one paragraph.\\n' >> instructions.md"
+    },
+    {
+      "name": "test-first",
+      "mutate": "printf '\\nWrite the failing test first, then make it pass.\\n' >> instructions.md"
+    }
+  ]
+}

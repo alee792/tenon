@@ -1,0 +1,27 @@
+{
+  "run": "instructions-climb",
+  "strategy": "hill-climb",
+  "repo": ".",
+  "agent": "agent",
+  "harness": "claude",
+  "tasks": [
+    "Fix the failing test in internal/apply.",
+    "Add a table-driven test for the duration parser."
+  ],
+  "repeats": 2,
+  "score": "sh fanout/examples/score-tests.sh",
+  "generations": 6,
+  "population": 4,
+  "patience": 2,
+  "max_evaluations": 60,
+  "concurrency": 4,
+  "timeout": "900s",
+  "rng_seed": 1,
+  "operators": [
+    {
+      "name": "edit",
+      "weight": 1,
+      "command": "sh fanout/examples/operators/edit-llm.sh"
+    }
+  ]
+}
