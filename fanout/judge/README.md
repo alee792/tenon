@@ -32,10 +32,44 @@ the server reads every variant of that generation off disk, runs the whole
 round robin in the browser, and answers all the blocked clients from the
 result. No change to evolve was needed.
 
+## The two screens
+
+**Judge** shows one comparison at a time. `←` picks A, `→` picks B, `space` is
+a tie, `g` reveals the gene behind each answer — the `instructions.md` that
+produced it. That stays hidden by default: reading it before you decide biases
+the comparison toward the instructions rather than the output, which is not
+what you are trying to measure.
+
+**Review** is where a finished generation goes. It carries each generation's
+leaderboard, the answer and the gene for any genome you click, and the lineage
+showing which parent and which operator produced it. An **All generations** tab
+puts every genome on one scale.
+
+When the next generation finishes running, a banner offers to start judging it
+and a desktop notification fires if you have granted permission — but the
+search waits on you either way, so you can stay on the review screen as long as
+you like.
+
 ## What it scores
 
-Win rate over the comparisons an entry took part in, ties counting half — the
-Copeland score, which is about all the resolution five candidates support.
+Bradley-Terry maximum likelihood: a latent strength per genome such that
+P(i beats j) = p_i / (p_i + p_j), solved by Zermelo's iteration with one
+virtual draw against a phantom opponent so an undefeated or winless entry
+still gets a finite strength. Fitness is the fitted probability of beating a
+uniformly drawn opponent, on [0, 1].
+
+A raw win rate would be simpler and worse: it treats every comparison as
+equally informative, so beating the weakest entry counts the same as beating
+the strongest, and it has no answer at all when the comparison graph is
+incomplete. `test_scoring.py` pins the difference — two genomes with identical
+1-1 records score 0.669 and 0.358 when their opponents differed in strength.
+
+**The fit is global, across every round.** A generation's own scores are
+normalised inside its own field, so they do not compare across generations: a
+genome that went 5/5 against weak siblings and 1/5 against strong ones has not
+changed, its opposition has. The incumbent appears in consecutive rounds, and
+that shared node is exactly what makes one fit over all comparisons
+identifiable — which is the point of anchoring in the first place.
 
 Two details that matter:
 

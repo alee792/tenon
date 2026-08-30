@@ -1,24 +1,29 @@
 {
   "run": "paprika",
-  "strategy": "hill-climb",
+  "strategy": "genetic",
   "repo": ".",
   "agent": "agent",
   "harness": "claude",
   "model": "claude-haiku-4-5-20251001",
-
-  "tasks": ["Explain what this repository does to a new contributor, in under 120 words."],
+  "tasks": [
+    "Explain what this repository does to a new contributor, in under 120 words."
+  ],
   "repeats": 1,
-
   "score": "python3 fanout/judge/score-pairwise.py",
   "operators": [
-    { "name": "edit", "weight": 1, "command": "sh fanout/judge/mutate-instructions.sh" }
+    {
+      "name": "edit",
+      "weight": 1,
+      "command": "sh \"$EVOLVE_CWD/fanout/judge/mutate-instructions.sh\""
+    }
   ],
-
   "generations": 2,
-  "population": 5,
+  "population": 2,
   "reevaluate": "incumbent",
-
   "concurrency": 5,
   "timeout": "600s",
-  "rng_seed": 1
+  "rng_seed": 1,
+  "offspring": 5,
+  "crossover_rate": 0,
+  "tournament": 2
 }

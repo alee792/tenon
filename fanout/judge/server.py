@@ -61,8 +61,24 @@ class Round:
             events = variant / "events.jsonl"
             if not events.exists():
                 continue
-            self.entries.append({"key": name, "short": name.split("-t")[0], "text": read_text(events)})
+            self.entries.append(
+                {
+                    "key": name,
+                    "short": name.split("-t")[0],
+                    "text": read_text(events),
+                    "instructions": "",
+                }
+            )
         self.entries.sort(key=lambda e: e["key"])
+        paths = genome_paths(self.run_root)
+        for entry in self.entries:
+            entry["instructions"] = read_instructions(paths.get(entry["short"], ""))
+        # Verdicts are a person's time. Reload any already given for this
+        # generation so a restarted server resumes mid-round instead of
+        # throwing the work away.
+        saved = self.run_root / "judge" / f"verdicts-gen-{self.generation}.json"
+        if saved.is_file():
+            self.verdicts = json.loads(saved.read_text())
         # Full round robin. With k=5 that is ten comparisons per generation,
         # which a person can actually finish.
         self.pairs = [
@@ -80,30 +96,126 @@ class Round:
                 return pair
         return None
 
-    def scores(self) -> dict:
-        """Win rate over the comparisons each entry took part in. A tie counts
-        half. With a full round robin this is the Copeland score, which is all
-        the resolution five candidates can support."""
-        wins = {e["key"]: 0.0 for e in self.entries}
-        played = {e["key"]: 0 for e in self.entries}
+    def tally(self) -> tuple:
+        """Wins and pair counts. A tie is half a win to each side."""
+        keys = [e["key"] for e in self.entries]
+        index = {k: i for i, k in enumerate(keys)}
+        n = len(keys)
+        wins = [0.0] * n
+        counts = [[0] * n for _ in range(n)]
         for pair in self.pairs:
             verdict = self.verdicts.get(pair["id"])
             if verdict is None:
                 continue
-            played[pair["a"]] += 1
-            played[pair["b"]] += 1
+            a, b = index[pair["a"]], index[pair["b"]]
+            counts[a][b] += 1
+            counts[b][a] += 1
             if verdict == "a":
-                wins[pair["a"]] += 1
+                wins[a] += 1
             elif verdict == "b":
-                wins[pair["b"]] += 1
+                wins[b] += 1
             else:
-                wins[pair["a"]] += 0.5
-                wins[pair["b"]] += 0.5
-        # An entry nobody could compare — generation 0 holds only the seed —
-        # gets the coin-flip prior rather than a zero. Scoring it zero would
-        # mean the seed is beaten by anything at all, and the first question
-        # this search has to answer is whether evolution beat the seed.
-        return {k: (wins[k] / played[k] if played[k] else 0.5) for k in wins}
+                wins[a] += 0.5
+                wins[b] += 0.5
+        return keys, wins, counts
+
+    def strengths(self, iterations: int = 500, tol: float = 1e-10) -> list:
+        """Bradley-Terry maximum likelihood: fit a latent strength per entry
+        such that P(i beats j) = p_i / (p_i + p_j).
+
+        This is what turns ordinal verdicts into cardinal scores. A raw win
+        rate treats every comparison as equally informative, so beating the
+        weakest entry counts the same as beating the strongest, and it has no
+        answer at all when the comparison graph is incomplete. Fitting
+        strengths uses who beat whom.
+
+        Solved by Zermelo's iteration, with one virtual draw against a
+        unit-strength phantom opponent so an undefeated or winless entry still
+        gets a finite strength instead of running off to zero or infinity."""
+        keys, wins, counts = self.tally()
+        n = len(keys)
+        if n == 0:
+            return []
+        p = [1.0] * n
+        for _ in range(iterations):
+            updated = []
+            for i in range(n):
+                denominator = 1.0 / (p[i] + 1.0)  # the phantom
+                for j in range(n):
+                    if j != i and counts[i][j]:
+                        denominator += counts[i][j] / (p[i] + p[j])
+                updated.append((wins[i] + 0.5) / denominator)
+            total = sum(updated) or 1.0
+            updated = [x * n / total for x in updated]
+            delta = max(abs(a - b) for a, b in zip(updated, p))
+            p = updated
+            if delta < tol:
+                break
+        return p
+
+    def scores(self) -> dict:
+        """Cardinal fitness on [0, 1]: the fitted probability that an entry
+        beats a uniformly drawn opponent from its own round. Directly
+        comparable to the 0.5 coin-flip prior an unjudged entry receives."""
+        keys, _, _ = self.tally()
+        if not keys:
+            return {}
+        if len(keys) == 1:
+            # Nothing to compare against — generation 0 holds only the seed.
+            # The coin flip is the honest answer; a zero would mean the seed is
+            # beaten by anything at all.
+            return {keys[0]: 0.5}
+        p = self.strengths()
+        out = {}
+        for i, key in enumerate(keys):
+            others = [p[j] for j in range(len(keys)) if j != i]
+            out[key] = sum(p[i] / (p[i] + q) for q in others) / len(others)
+        return out
+
+    def board(self) -> list:
+        """The generation's scoreboard, strongest first."""
+        keys, wins, counts = self.tally()
+        scores = self.scores()
+        p = self.strengths() if len(keys) > 1 else [1.0] * len(keys)
+        rows = [
+            {
+                "entry": key,
+                "genome": key.split("-t")[0],
+                "score": round(scores.get(key, 0.0), 4),
+                "strength": round(p[i], 4),
+                "wins": wins[i],
+                "played": sum(counts[i]),
+            }
+            for i, key in enumerate(keys)
+        ]
+        rows.sort(key=lambda r: r["score"], reverse=True)
+        return rows
+
+
+def genome_paths(run_root: Path) -> dict:
+    """Map each genome's short id to where its files live, from the lineage the
+    search writes as it goes."""
+    out = {}
+    path = run_root / "lineage.jsonl"
+    if not path.is_file():
+        return out
+    for line in path.read_text().splitlines():
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if entry.get("genome") and entry.get("path"):
+            out[entry["genome"].split(":")[-1][:8]] = entry["path"]
+    return out
+
+
+def read_instructions(genome_path: str) -> str:
+    """The gene the search is actually editing, so a reviewer can see what
+    changed rather than only what it produced."""
+    if not genome_path:
+        return ""
+    f = Path(genome_path) / "instructions.md"
+    return f.read_text(errors="replace") if f.is_file() else ""
 
 
 def read_text(events: Path) -> str:
@@ -120,6 +232,47 @@ def read_text(events: Path) -> str:
         if event.get("type") == "agent.output.delta":
             parts.append(event.get("delta", ""))
     return "".join(parts).strip() or "(this variant produced no output)"
+
+
+def fit(nodes: list, comparisons: list) -> dict:
+    """Bradley-Terry over an arbitrary comparison list. `comparisons` is
+    (winner, loser, weight) triples; a tie contributes half to each side."""
+    index = {k: i for i, k in enumerate(nodes)}
+    n = len(nodes)
+    if n == 0:
+        return {}
+    if n == 1:
+        return {nodes[0]: 0.5}
+    wins = [0.0] * n
+    counts = [[0.0] * n for _ in range(n)]
+    for a, b, weight in comparisons:
+        i, j = index[a], index[b]
+        wins[i] += weight
+        counts[i][j] += 1
+        counts[j][i] += 1
+    p = [1.0] * n
+    for _ in range(500):
+        updated = []
+        for i in range(n):
+            denominator = 1.0 / (p[i] + 1.0)
+            for j in range(n):
+                if j != i and counts[i][j]:
+                    denominator += counts[i][j] / (p[i] + p[j])
+            updated.append((wins[i] + 0.5) / denominator)
+        total = sum(updated) or 1.0
+        updated = [x * n / total for x in updated]
+        delta = max(abs(a - b) for a, b in zip(updated, p))
+        p = updated
+        if delta < 1e-10:
+            break
+    out = {}
+    for i, key in enumerate(nodes):
+        others = [p[j] for j in range(n) if j != i]
+        out[key] = {
+            "score": sum(p[i] / (p[i] + q) for q in others) / len(others),
+            "strength": p[i],
+        }
+    return out
 
 
 class Judge:
@@ -148,21 +301,154 @@ class Judge:
         with self.ready:
             while not rnd.done:
                 self.ready.wait(timeout=1.0)
-            return rnd.scores().get(entry_key, 0.0)
+            if entry_key not in {e["key"] for e in rnd.entries}:
+                raise KeyError(f"{entry_key} is not in generation {rnd.generation}'s round")
+            genome = entry_key.split("-t")[0]
+            overall = self.global_fit()
+            if genome in overall:
+                return overall[genome]["score"]
+            return rnd.scores().get(entry_key, 0.5)
 
     def verdict(self, pair_id: str, winner: str) -> None:
         with self.ready:
             for rnd in self.rounds.values():
                 if any(p["id"] == pair_id for p in rnd.pairs):
                     rnd.verdicts[pair_id] = winner
+                    self.save_verdicts(rnd)
+                    if rnd.done:
+                        self.persist(rnd)
                     break
             self.ready.notify_all()
+
+    def save_verdicts(self, rnd: Round) -> None:
+        out = rnd.run_root / "judge"
+        out.mkdir(exist_ok=True)
+        (out / f"verdicts-gen-{rnd.generation}.json").write_text(json.dumps(rnd.verdicts, indent=2) + "\n")
+
+    def persist(self, rnd: Round) -> None:
+        """Write the generation's scoreboard beside the search's own state, so
+        the judging survives the server and can be read after the fact."""
+        out = rnd.run_root / "judge"
+        out.mkdir(exist_ok=True)
+        (out / f"gen-{rnd.generation}.json").write_text(
+            json.dumps(
+                {
+                    "generation": rnd.generation,
+                    "task": rnd.task,
+                    "comparisons": len(rnd.pairs),
+                    "board": rnd.board(),
+                },
+                indent=2,
+            )
+            + "\n"
+        )
+
+    def global_fit(self) -> dict:
+        """One fit over every comparison ever made, keyed by genome rather than
+        by round entry.
+
+        Per-round scores are normalised inside their own field, so they are not
+        comparable across generations: a genome that went 5/5 against weak
+        siblings and 1/5 against strong ones has not changed, its opposition
+        has. The incumbent appears in consecutive rounds, and that shared node
+        is exactly what makes a single fit across all of them identifiable —
+        which is the point of anchoring in the first place."""
+        nodes, comparisons = [], []
+        seen = set()
+        for rnd in self.rounds.values():
+            by_key = {e["key"]: e["key"].split("-t")[0] for e in rnd.entries}
+            for key, genome in by_key.items():
+                if genome not in seen:
+                    seen.add(genome)
+                    nodes.append(genome)
+            for pair in rnd.pairs:
+                verdict = rnd.verdicts.get(pair["id"])
+                if verdict is None:
+                    continue
+                a, b = by_key[pair["a"]], by_key[pair["b"]]
+                if verdict == "a":
+                    comparisons.append((a, b, 1.0))
+                elif verdict == "b":
+                    comparisons.append((b, a, 1.0))
+                else:
+                    comparisons.append((a, b, 0.5))
+                    comparisons.append((b, a, 0.5))
+        return fit(nodes, comparisons)
+
+    def summary(self) -> dict:
+        """Everything the review screen shows: each generation's board and
+        outputs, the lineage the search recorded, and the one global fit."""
+        with self.lock:
+            rounds = sorted(self.rounds.values(), key=lambda r: r.generation)
+        if not rounds:
+            return {"run": "", "finished": False, "pending": None, "generations": [], "overall": []}
+        root = rounds[0].run_root
+        lineage = {}
+        path = root / "lineage.jsonl"
+        if path.is_file():
+            for line in path.read_text().splitlines():
+                entry = json.loads(line)
+                if entry.get("genome"):
+                    short = entry["genome"].split(":")[-1][:8]
+                    lineage[short] = {
+                        "parents": [p.split(":")[-1][:8] for p in entry.get("parents", [])],
+                        "operator": entry.get("operator", ""),
+                        "path": entry.get("path", ""),
+                        "generation": entry.get("generation"),
+                    }
+        overall = self.global_fit()
+        pending = next((r for r in rounds if not r.done), None)
+        return {
+            "run": root.name,
+            "finished": (root / "best.json").is_file(),
+            "pending": None if pending is None else {
+                "generation": pending.generation,
+                "done": len(pending.verdicts),
+                "total": len(pending.pairs),
+            },
+            "overall": [
+                {"genome": g, "score": v["score"], "strength": v["strength"],
+                 "generations": sorted({r.generation for r in rounds
+                                        if any(e["key"].startswith(g) for e in r.entries)})}
+                for g, v in sorted(overall.items(), key=lambda kv: -kv[1]["score"])
+            ],
+            "generations": [
+                {
+                    "generation": r.generation,
+                    "task": r.task,
+                    "done": r.done,
+                    "judged": len(r.verdicts),
+                    "comparisons": len(r.pairs),
+                    "board": r.board(),
+                    "entries": [
+                        {
+                            "genome": e["key"].split("-t")[0],
+                            "text": e["text"],
+                            "instructions": e.get("instructions", ""),
+                            "operator": lineage.get(e["key"].split("-t")[0], {}).get("operator", ""),
+                            "parents": lineage.get(e["key"].split("-t")[0], {}).get("parents", []),
+                        }
+                        for e in r.entries
+                    ],
+                }
+                for r in rounds
+            ],
+        }
+
+    def boards(self) -> list:
+        with self.lock:
+            return [
+                {"generation": r.generation, "done": r.done, "board": r.board()}
+                for r in sorted(self.rounds.values(), key=lambda r: r.generation)
+                if r.verdicts or r.done
+            ]
 
     def undo(self) -> None:
         with self.ready:
             for rnd in self.rounds.values():
                 if rnd.verdicts:
                     rnd.verdicts.pop(list(rnd.verdicts)[-1], None)
+                    self.save_verdicts(rnd)
             self.ready.notify_all()
 
 
@@ -190,6 +476,12 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if self.path == "/api/summary":
+            self.send_json(JUDGE.summary())
+            return
+        if self.path == "/api/scores":
+            self.send_json({"generations": JUDGE.boards()})
+            return
         if self.path == "/api/state":
             rnd = JUDGE.active()
             if rnd is None:
@@ -212,6 +504,11 @@ class Handler(BaseHTTPRequestHandler):
                         # which lineage produced which answer.
                         "a": by_key[pair["a"]]["text"],
                         "b": by_key[pair["b"]]["text"],
+                        # The gene behind each answer, for a reader who wants
+                        # to know why they differ. The UI keeps it hidden until
+                        # asked, so the default comparison stays on the output.
+                        "a_gene": by_key[pair["a"]]["instructions"],
+                        "b_gene": by_key[pair["b"]]["instructions"],
                     },
                 }
             )

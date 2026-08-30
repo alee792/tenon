@@ -161,6 +161,17 @@ def lay_out(parents: list, plan: dict, target: Path) -> None:
             copy_gene(entry, target / entry.name)
 
 
+def write_json(path: Path, payload: dict) -> None:
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    tmp.replace(path)
+
+
+def tuple_of(value):
+    """random.getstate round-trips through JSON as nested lists."""
+    return tuple(tuple_of(v) if isinstance(v, list) else v for v in value)
+
+
 def hook(command: str, payload: dict, what: str) -> dict:
     """Run a policy hook: one JSON object in on stdin, one JSON object out on
     stdout. Policy lives in these commands; evolve keeps the mechanism."""
@@ -259,6 +270,7 @@ class Config:
     combine_policy: str
     generations: int
     population: int
+    offspring: int
     crossover_rate: float
     mutation_rate: float
     tournament: int
@@ -344,9 +356,21 @@ def load_config(path: Path) -> Config:
     if reevaluate not in ("incumbent", "population", "none"):
         raise EvolveError("reevaluate must be incumbent, population, or none")
 
-    population = int(raw.get("population", 4))
-    if population < 1:
-        raise EvolveError("population must be at least 1")
+    # (mu + lambda): `population` is mu, the survivors carried forward, and
+    # `offspring` is lambda, how many candidates each generation proposes.
+    # They were one knob, which made "keep the best two, breed five from them"
+    # inexpressible.
+    if strategy == "hill-climb":
+        # A hill climb has one incumbent by definition, so mu is pinned and the
+        # older meaning of `population` — how many neighbours to try — carries
+        # over as lambda.
+        population = 1
+        offspring = int(raw.get("offspring", raw.get("population", 4)))
+    else:
+        population = int(raw.get("population", 4))
+        offspring = int(raw.get("offspring", population))
+    if population < 1 or offspring < 1:
+        raise EvolveError("population and offspring must both be at least 1")
 
     return Config(
         run=raw.get("run") or f"search-{time.strftime('%Y%m%d-%H%M%S')}",
@@ -367,6 +391,7 @@ def load_config(path: Path) -> Config:
         combine_policy=raw.get("combine", "uniform"),
         generations=int(raw.get("generations", 5)),
         population=population,
+        offspring=offspring,
         crossover_rate=float(raw.get("crossover_rate", 0.5)),
         mutation_rate=float(raw.get("mutation_rate", 1.0)),
         tournament=int(raw.get("tournament", 2)),
@@ -389,9 +414,10 @@ def load_config(path: Path) -> Config:
 
 
 class Search:
-    def __init__(self, cfg: Config, dry_run: bool):
+    def __init__(self, cfg: Config, dry_run: bool, resume: bool = False):
         self.cfg = cfg
         self.dry_run = dry_run
+        self.resume = resume
         self.root = cfg.state_dir / cfg.run
         self.genomes_dir = self.root / "genomes"
         self.lineage_path = self.root / "lineage.jsonl"
@@ -488,6 +514,10 @@ class Search:
                 "EVOLVE_OPERATOR": operator["name"],
                 "EVOLVE_PARENT_REPORT": str(report),
                 "EVOLVE_GENES": ",".join(sorted(genes(path))),
+                # An operator's working directory is the genome it edits, so a
+                # relative command path in the spec would resolve against the
+                # genome rather than the project. This is the anchor to use.
+                "EVOLVE_CWD": os.getcwd(),
             },
         )
         if proc.returncode != 0:
@@ -538,7 +568,7 @@ class Search:
         and any tags to put on the child. A single parent reproduces asexually,
         two or more recombine, so one policy expresses both who breeds and how
         often crossover happens."""
-        count = self.cfg.population
+        count = self.cfg.offspring
         if self.cfg.pair_policy != "tournament":
             out = hook(
                 self.cfg.pair_policy,
@@ -713,6 +743,21 @@ class Search:
         if collected.returncode != 0:
             raise EvolveError(f"fanout collect failed: {collected.stderr.strip()[:200]}")
         records = {r["variant"]: r for r in json.loads(collected.stdout)}
+        # A variant that never ran silently shrinks the generation — a judged
+        # round loses an entry, and a comparison-based score loses its anchor.
+        # Say so rather than scoring a smaller field as if it were the one asked
+        # for.
+        broken = [
+            f"{name} ({records[name].get('status', 'missing')})"
+            for name in (f"{g.short}-t{t}r{r}" for g, t, task, r in trials)
+            if name not in records or records[name].get("status") != "done"
+        ]
+        if broken:
+            self.log(f"  WARNING: {len(broken)} of {len(trials)} runs did not complete: {', '.join(broken[:4])}")
+            for name in broken[:4]:
+                detail = records.get(name.split(" ")[0], {}).get("detail", "")
+                if detail:
+                    self.log(f"    {detail.splitlines()[0][:160]}")
 
         reports = self.root / "reports"
         reports.mkdir(exist_ok=True)
@@ -789,15 +834,26 @@ class Search:
         out.mkdir(exist_ok=True)
         path = out / f"{genome.short}.json"
         if not path.exists():
+            # A manifest records the agent name from its directory's basename,
+            # and apply checks it. The genome directory is named after a
+            # fingerprint, so writing the manifest there and applying it to the
+            # agent path inside a worktree drifts on the name and fails closed.
+            # Stage the genome under the name the worktree will see.
+            staged = out / genome.short / Path(self.cfg.agent).name
+            if staged.exists():
+                shutil.rmtree(staged)
+            staged.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(genome.path, staged, symlinks=True)
             proc = subprocess.run(
                 [
-                    self.cfg.tenon, "manifest", "write", str(genome.path),
+                    self.cfg.tenon, "manifest", "write", str(staged),
                     "--harness", self.cfg.harness, "--model", self.cfg.model,
                     "--output", str(path),
                 ],
                 capture_output=True,
                 text=True,
             )
+            shutil.rmtree(staged.parent, ignore_errors=True)
             if proc.returncode != 0:
                 raise EvolveError(f"tenon manifest write failed for {genome.short}: {proc.stderr.strip()[:200]}")
         return str(path)
@@ -843,8 +899,14 @@ class Search:
             env={**os.environ, "EVOLVE_WORKSPACE": record.get("workspace", "")},
         )
         if proc.returncode != 0:
-            self.log(f"  score command exited {proc.returncode} for {genome.short}; counting as 0")
-            return 0.0
+            # A scorer that fails is an infrastructure failure, not evidence
+            # about the genome. Counting it as zero turns a judge outage into
+            # "every candidate is terrible" and quietly corrupts the search; a
+            # scorer that genuinely means zero returns it with exit 0.
+            raise EvolveError(
+                f"the score command exited {proc.returncode} for {genome.short}: "
+                f"{proc.stderr.strip()[:200]}"
+            )
         for line in reversed(proc.stdout.strip().splitlines()):
             try:
                 obj = json.loads(line)
@@ -864,7 +926,7 @@ class Search:
         and keeps one slot per distinct genome so the default cannot collapse
         into copies of itself. A hook may return the same genome twice, which
         is how an island reset seeds one island from another's best."""
-        keep = 1 if self.cfg.strategy == "hill-climb" else self.cfg.population
+        keep = self.cfg.population
         if self.cfg.select_policy == "elitist":
             pool = sorted(
                 population + candidates,
@@ -905,12 +967,80 @@ class Search:
             survivors.append(Member(self.known[gid], dict(tags)))
         return survivors
 
+    # -- checkpoint --------------------------------------------------------
+
+    def checkpoint(self, generation: int, population: list) -> None:
+        """Record everything needed to resume after this generation.
+
+        Generations are expensive — harness runs, and a person's attention in
+        the judged case — so finishing one and being unable to build on it is
+        the worst failure this tool has. The genomes and their scores are
+        already durable in lineage.jsonl; what is not is which slots survived,
+        what they were tagged with, and where the RNG had got to."""
+        write_json(
+            self.root / "checkpoint.json",
+            {
+                "schema_version": SCHEMA_VERSION,
+                "generation": generation,
+                "evaluations": self.evaluations,
+                "population": [{"genome": m.genome.gid, "tags": m.tags} for m in population],
+                "observed": self.observed,
+                "rng_state": json.loads(json.dumps(self.rng.getstate())),
+            },
+        )
+
+    def restore(self) -> tuple:
+        """Rebuild a search from its own record: lineage.jsonl carries every
+        genome ever admitted and what it scored, checkpoint.json carries the
+        population that survived."""
+        if not self.lineage_path.is_file():
+            raise EvolveError(f"{self.root} has no lineage to resume from")
+        for line in self.lineage_path.read_text().splitlines():
+            entry = json.loads(line)
+            if entry.get("status") not in ("scored", "rescored") or not entry.get("genome"):
+                continue
+            gid = entry["genome"]
+            genome = self.known.get(gid) or Genome(
+                gid=gid,
+                path=Path(entry["path"]),
+                generation=entry["generation"],
+                parents=entry.get("parents", []),
+                operator=entry.get("operator", ""),
+            )
+            genome.scores = entry.get("scores", [])
+            genome.score = entry.get("score")
+            genome.stdev = entry.get("stdev")
+            report = self.root / "reports" / f"{genome.short}.json"
+            if report.is_file():
+                genome.report = str(report)
+            self.known[gid] = genome
+        if not self.known:
+            raise EvolveError(f"{self.root} records no scored genome to resume from")
+
+        saved = self.root / "checkpoint.json"
+        if not saved.is_file():
+            raise EvolveError(f"{self.root} has no checkpoint; it never finished a generation")
+        state = json.loads(saved.read_text())
+        missing = [e["genome"] for e in state["population"] if e["genome"] not in self.known]
+        if missing:
+            raise EvolveError(f"the checkpoint names genomes the lineage does not carry: {missing[0]}")
+        population = [Member(self.known[e["genome"]], dict(e.get("tags") or {})) for e in state["population"]]
+        self.evaluations = int(state.get("evaluations", 0))
+        self.observed = state.get("observed", {})
+        if state.get("rng_state"):
+            self.rng.setstate(tuple_of(state["rng_state"]))
+        return population, int(state["generation"]) + 1
+
     # -- the loop ----------------------------------------------------------
 
     def go(self) -> int:
-        if self.root.exists():
-            raise EvolveError(f"run {self.cfg.run!r} already exists at {self.root}")
-        self.genomes_dir.mkdir(parents=True)
+        if self.root.exists() and not self.resume:
+            raise EvolveError(
+                f"run {self.cfg.run!r} already exists at {self.root} (pass --resume to continue it)"
+            )
+        if self.resume and not self.root.exists():
+            raise EvolveError(f"nothing to resume: {self.root} does not exist")
+        self.genomes_dir.mkdir(parents=True, exist_ok=True)
         (self.root / "search.json").write_text(json.dumps(self.cfg.to_json(), indent=2, sort_keys=True) + "\n")
 
         if self.dry_run:
@@ -919,21 +1049,32 @@ class Search:
 
         scratch = self.root / "scratch"
         scratch.mkdir(exist_ok=True)
-        work = scratch / "seed"
-        materialize(self.cfg.seed, work)
-        seed = self.admit(work, 0, [], "seed")
-        if seed is None:
-            raise EvolveError("the seed genome did not pass tenon validate; fix it before searching")
+        stale = 0
 
-        self.log(f"generation 0 — seed {seed.short}")
+        if self.resume:
+            population, first_generation = self.restore()
+            best = max(population, key=lambda m: m.genome.score if m.genome.score is not None else -1e18)
+            self.log(
+                f"resumed at generation {first_generation} — {len(self.known)} genomes known, "
+                f"{len(population)} carried forward, incumbent {best.genome.short} at {best.genome.score:.4f}"
+            )
+        else:
+            work = scratch / "seed"
+            materialize(self.cfg.seed, work)
+            seed = self.admit(work, 0, [], "seed")
+            if seed is None:
+                raise EvolveError("the seed genome did not pass tenon validate; fix it before searching")
+            self.log(f"generation 0 — seed {seed.short}")
+            first_generation = 1
+
         try:
-            first = Member(seed, {})
-            self.evaluate(0, [first])
-            population = [first]
-            best = first
-            stale = 0
+            if not self.resume:
+                population = [Member(seed, {})]
+                self.evaluate(0, population)
+                best = population[0]
+                self.checkpoint(0, population)
 
-            for generation in range(1, self.cfg.generations + 1):
+            for generation in range(first_generation, self.cfg.generations + 1):
                 self.log(f"generation {generation} — incumbent {best.genome.short} at {best.genome.score:.4f}")
                 candidates = self.propose(generation, population)
                 if not candidates:
@@ -961,15 +1102,26 @@ class Search:
                 # way it likes, and an island policy groups by island.
                 leader = max(population, key=lambda m: m.genome.score if m.genome.score is not None else -1e18)
                 if leader.genome.gid != best.genome.gid and (leader.genome.score or 0.0) > (best.genome.score or 0.0):
-                    gain = leader.genome.score - best.genome.score
+                    displaced = best
+                    gain = leader.genome.score - displaced.genome.score
                     best, stale = leader, 0
                     self.log(f"  new incumbent {best.genome.short} at {best.genome.score:.4f} (+{gain:.4f})")
-                    if best.genome.stdev and gain < best.genome.stdev:
-                        self.log("  note: the gain is smaller than this genome's own spread — treat it as noise")
+                    # A genome with one sample has a spread of zero, so judging
+                    # the gain only against the winner's own spread would never
+                    # fire on a fresh candidate — which is exactly the case
+                    # worth warning about. The displaced incumbent has been
+                    # measured more than once; use the wider of the two.
+                    spread = max(displaced.genome.stdev or 0.0, leader.genome.stdev or 0.0)
+                    if spread and gain < spread:
+                        self.log(
+                            f"  note: the gain ({gain:.4f}) is smaller than the spread already seen "
+                            f"({spread:.4f}) — treat it as noise"
+                        )
                 else:
                     best = leader if leader.genome.gid == best.genome.gid else best
                     stale += 1
                     self.log(f"  no improvement ({stale} generation(s) stale)")
+                self.checkpoint(generation, population)
                 if self.cfg.target is not None and best.genome.score >= self.cfg.target:
                     self.log(f"target {self.cfg.target} reached")
                     break
@@ -1017,7 +1169,7 @@ class Budget(Exception):
 
 def cmd_run(args) -> int:
     cfg = load_config(Path(args.spec).expanduser())
-    return Search(cfg, args.dry_run).go()
+    return Search(cfg, args.dry_run, args.resume).go()
 
 
 def cmd_inject(args) -> int:
@@ -1097,6 +1249,12 @@ def build_parser() -> argparse.ArgumentParser:
     run = sub.add_parser("run", help="run the search")
     run.add_argument("--spec", required=True)
     run.add_argument("--dry-run", action="store_true", help="print the resolved config and exit")
+    run.add_argument(
+        "--resume",
+        action="store_true",
+        help="continue an existing run from its last checkpointed generation, "
+        "reusing every genome it already scored",
+    )
     run.set_defaults(func=cmd_run)
 
     lineage = sub.add_parser("lineage", help="every genome ever proposed, with its fate")

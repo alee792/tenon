@@ -25,17 +25,17 @@
     {
       "name": "edit",
       "weight": 5,
-      "command": "sh fanout/examples/operators/edit-llm.sh"
+      "command": "sh \"$EVOLVE_CWD\"/fanout/examples/operators/edit-llm.sh"
     },
     {
       "name": "grow",
       "weight": 3,
-      "command": "sh fanout/examples/operators/grow-skill.sh"
+      "command": "sh \"$EVOLVE_CWD\"/fanout/examples/operators/grow-skill.sh"
     },
     {
       "name": "prune",
       "weight": 2,
-      "command": "python3 fanout/examples/operators/prune-gene.py"
+      "command": "python3 \"$EVOLVE_CWD\"/fanout/examples/operators/prune-gene.py"
     }
   ]
 }

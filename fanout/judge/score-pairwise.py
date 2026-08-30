@@ -18,6 +18,13 @@ PORT = os.environ.get("EVOLVE_JUDGE_PORT", "8917")
 
 def main() -> int:
     trial = sys.stdin.read()
+    # A variant whose dispatch never completed has no output to compare, so it
+    # is scored zero here rather than silently going missing from the round.
+    record = json.loads(trial).get("record", {})
+    if record.get("status") != "done":
+        print(f"variant did not complete ({record.get('status') or 'unknown'}); scoring 0", file=sys.stderr)
+        print(json.dumps({"score": 0.0}))
+        return 0
     request = urllib.request.Request(
         f"http://127.0.0.1:{PORT}/score",
         data=trial.encode(),

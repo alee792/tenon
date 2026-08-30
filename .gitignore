@@ -3,3 +3,6 @@ dist/
 
 # Local tenon build artifact (see examples/*/README.md: `go build -o ./tenon`)
 /tenon
+
+# Python bytecode from the judge and policy scripts
+__pycache__/

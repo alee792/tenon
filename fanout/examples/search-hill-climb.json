@@ -21,7 +21,7 @@
     {
       "name": "edit",
       "weight": 1,
-      "command": "sh fanout/examples/operators/edit-llm.sh"
+      "command": "sh \"$EVOLVE_CWD\"/fanout/examples/operators/edit-llm.sh"
     }
   ]
 }

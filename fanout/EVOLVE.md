@@ -213,6 +213,31 @@ generation, reseeding it from the strongest. Between them that is the whole
 model. MAP-Elites is the same shape: tag the niche in `score`, keep the best
 per niche in `select`.
 
+## Resuming a search
+
+A generation costs harness runs, and in the judged case a person's attention,
+so finishing one and being unable to build on it is the worst failure this
+tool has. Every generation is checkpointed:
+
+```bash
+python3 fanout/evolve.py run --spec search.json --resume
+```
+
+`--resume` rebuilds the search from its own record — `lineage.jsonl` carries
+every genome ever admitted and what it scored, `checkpoint.json` carries the
+slots that survived, their tags, the evaluation count and the RNG state — and
+continues from the generation after the last one completed. Nothing already
+scored is run again.
+
+The spec is re-read on resume, so this is also how you branch: judge one
+generation, then resume the same run with a different operator mix, a wider
+`offspring`, or a different `model`, all built on the judged winners rather
+than starting over.
+
+Judged verdicts are durable too. The judge writes each comparison to
+`<state>/<run>/judge/verdicts-gen-N.json` as it is given, so a restarted
+server resumes mid-round instead of discarding the work.
+
 ## Noise and re-evaluation
 
 Elitist selection on a noisy score keeps whichever genome drew luckiest and
@@ -284,7 +309,7 @@ When you want finer, it is a policy question, not an evolve change — write a
 
 | | hill-climb | genetic |
 | --- | --- | --- |
-| Population | 1 incumbent, `population` neighbors per step | `population` survivors |
+| Population | 1 incumbent (mu is pinned), `offspring` neighbours per step | `population` survivors (mu), `offspring` candidates (lambda) |
 | Good when | one axis is being tuned — the wording of `instructions.md`, one skill's body | genes are separable — several skills or tools that can be mixed |
 | Cost per generation | `population × tasks × repeats` runs | same |
 | Failure mode | local optimum; add `rng_seed` restarts or widen the mutation | the population collapses onto one lineage; swap in a diversity-aware `select` |
