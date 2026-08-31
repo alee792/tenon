@@ -560,3 +560,54 @@ G1's coherence check consumes the catalog, not drift.
 would be a lie — it would list a tool whose schema does not parse. The catalog is
 only meaningful for a source that gates, so it rides on the gate rather than
 being obtainable without it.
+
+### G19. The three subjects, and what drift does not report
+
+The clarifying frame: each command binds the source to a different subject.
+
+| | Subject | Question |
+| --- | --- | --- |
+| `check` | source alone | is this definition sound, and what is it? |
+| `drift` | source x workspace | does the applied output still match? |
+| `lock` | source x environment | what machine state does this run against? |
+
+`lock write` reads the source (fingerprint, which runtimes are needed) and probes
+the machine (harness executable version, deno/uv/go/python versions, integration
+package identities). It never touches a workspace and has no `--workspace` flag.
+So lock is to the environment what drift is to the workspace: both bind a source
+fingerprint to something outside the source that could move underneath it.
+
+**Drift does not report catalog drift.** It classifies tenon-owned PATHS as
+unchanged / modified / missing / stale. Deleting
+`.claude/skills/review/SKILL.md` from a workspace reports `missing:
+.claude/skills/review/SKILL.md` — a lost skill described as a lost file. Drift
+never says "the review skill is gone." The event is detected; the vocabulary is
+wrong for the question. A `drift --catalog` reporting in capability terms is a
+coherent extension (the generated files ARE the compiled surface) but does not
+exist. Noting, not proposing.
+
+**`check` is a linter that also issues a certificate.** The linter framing is
+right as far as it goes, but check also mints identity: per ADR 0025 the
+fingerprint is only emitted for a project that loads and whose tools prepare.
+That is what makes a scored run attributable later, and it is why the
+fingerprint is not merely a hash of the directory.
+
+### G20. Why `--catalog` is opt-in (it is a versioning choice, not a cost one)
+
+The resolution work is already paid for: gate-proven means plugin skills are
+merged under precedence and tool schemas are parsed before any fingerprint is
+emitted. Emitting the catalog costs serialization, not computation.
+
+So the flag is about who parses, not what runs. Two real reasons to leave it off:
+
+- A loop gating thousands of candidates. evolve's `gate()` reads exactly two
+  fields, `id` and `fingerprint`, and discards the rest; a full inventory per
+  candidate is parse overhead for data it throws away.
+- Contract stability. The validate success line is documented as a final,
+  distinct object; fattening it by default changes what every existing consumer
+  parses.
+
+If tenon were greenfield, catalog-by-default is probably right — the work is
+already done and it is what the ADR 0024 legibility leg needs. Opt-in is the
+compatible path there, and flipping a default later is a far easier ADR than
+widening a contract now and walking it back.
