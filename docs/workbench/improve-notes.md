@@ -352,3 +352,60 @@ more sophisticated alternatives, with the rename duplicate as the known limit.
 the run state. If renames turn out to be common, identity can be reconstructed
 retroactively from logs already written, instead of re-running the search. Buys
 the option without buying the machinery.
+
+### G14. CLI consolidation proposal (tenon-side, needs an ADR)
+
+Empirical finding that reframes G13: `tenon fingerprint show --diagnostics jsonl`
+already gates (exit 1 on an invalid project) AND already emits a per-file
+inventory — `{path, hash, executable}` per authored file, then the fingerprint.
+The "list what is in the source" job is half-built, and it lives in
+`fingerprint show`, not `manifest`.
+
+So there are not three overlapping read commands. There is one question asked at
+three depths, split across three names:
+
+| Today | Inputs | Adds |
+| --- | --- | --- |
+| `fingerprint show` | source | gate + file inventory + fingerprint |
+| `validate` | source + `--harness` | harness-specific validity |
+| `drift` | source + `--harness` + `--workspace` | applied-target diff |
+
+Each is the previous plus one input — a ladder the CLI currently makes an author
+climb by switching commands. Tenet 2 is "one ladder, no cliffs".
+
+**Proposed:**
+
+    tenon check AGENT                                    gate -> file inventory + fingerprint
+    tenon check AGENT --harness claude                   + harness validity
+    tenon check AGENT --harness claude --workspace DIR   + applied-target diff
+                      [--catalog]    component-level inventory instead of file-level
+                      [--lock PATH]  + pin verification
+
+Depth follows the inputs supplied — the same pattern `--manifest` already uses,
+where supplying it widens the check. Alternative name: `inspect` (reads better
+for "give me facts") but collides with `integration inspect`.
+
+**Rename `manifest` to `lock`.** It is a lockfile: it pins a runtime closure, is
+supplied at application, and verifies fail-closed naming the drifted pin.
+Everyone knows what a lockfile is and nobody expects one to list components.
+`--manifest PATH` -> `--lock PATH`; `manifest.json` -> `tenon.lock.json`. This
+also retires the G13 naming problem: nothing called "manifest" misleads anymore,
+and the thing that lists contents is `--catalog`.
+
+**Do not** give the catalog its own command (e.g. `tenon manifest AGENT` meaning
+the contents listing). Same load, same gate, same source — a separate command
+re-splits what this consolidation merges.
+
+Caveats:
+
+- `lock` has one impurity: `Verify` deliberately ignores the model field (the
+  harness owns model selection). A lockfile with an unverified field is false
+  advertising — verify it, drop it, or mark it advisory.
+- A flag-widened check can be under-run: forgetting `--harness` yields a weaker
+  answer that still exits 0. The output must name what it actually checked.
+
+Breaking change to a documented surface, so it needs an ADR — but tenon is
+pre-release, which is the cheapest this will ever be.
+
+Consumer impact in this repo: fanout calls `fingerprint show`, evolve calls
+`validate` and `manifest write`. All three move; all three are ours.
