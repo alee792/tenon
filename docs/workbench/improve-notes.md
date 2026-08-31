@@ -755,3 +755,37 @@ directory**, so "the agent source and the workspace are independent"
 (product-spec.md:352) is taught by demonstration rather than assertion. An
 improvement loop must never reuse the source as its workspace, and the docs
 should never show a shape it cannot copy.
+
+### G25. Answers verified against the binary
+
+**`run` does NOT apply implicitly.** Tested (this was the cold reader's #3
+unanswered question):
+
+    tenon run ./agent --harness claude --workspace ./ws --input jsonl
+    tenon run: dispatch: the workspace ./ws carries no claude apply record;
+               run tenon apply
+
+`apply` writes `.tenon/apply-claude.json` beside `CLAUDE.md`, `.mcp.json` and
+`.claude/skills/`; that record is what `run` requires and what `drift` reads.
+
+Keep this behavior. Tenet 5 makes apply a deliberate act, and a `run` that
+applied silently would overwrite a workspace someone is mid-debug on. The error
+already names the fix, so the cost is one failed command, once. Document it in
+`run`'s help so it is not discovered by failure.
+
+**Pins are fully optional.** Verified: `tenon apply ./agent --harness claude
+--workspace ./ws` with no pins writes the workspace normally. Pins matter only
+when "this ran against exactly that toolchain" must be checkable. Setting an
+agent up needs `apply` and nothing else.
+
+**Config: env var, not a file.** Supersedes the `tenon.toml` half of G23. Use
+`TENON_HARNESS` (and `TENON_WORKSPACE` only if it earns it). A config file
+format must be designed, documented, versioned, and resolved upward through
+directories — machinery for a problem one variable solves (tenet 1). A file
+stays an easy later addition; a file shipped early is hard to remove.
+
+**Why `pins` and not `manifest`, restated for the ADR:** `internal/manifest`'s
+own doc says "It IDENTIFIES and PINS; it never lists components." Everywhere
+else in software a manifest IS a list of contents. The one word guaranteed to
+make a reader expect an inventory names the file that categorically refuses to
+be one — which is exactly the wrong expectation this project keeps producing.
