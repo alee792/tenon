@@ -966,3 +966,57 @@ So provide both:
 This yields the comprehensive surface without the failure mode where editing a
 skill breaks verification. The manifest wanted here exists — as a view, not as a
 file anyone maintains.
+
+### G32. What an improvement loop must consume
+
+**Load-bearing — the loop is WRONG without these:**
+
+1. A gate verdict paired with an identity, from one call. A fingerprint for
+   something that does not load certifies nothing; the pair is the attribution
+   key for every score that follows.
+2. An honest outcome taxonomy: *discard the mutation* must be distinguishable
+   from *retry it*. Conflated, the leaderboard measures infrastructure noise and
+   nothing downstream can detect it.
+3. Machine-readable failures — stable ids plus authored path, so a mutator
+   self-corrects against an identifier rather than prose. This is what lets a
+   small model drive the loop.
+4. The run's event stream. The transcript is what the scorer scores; without it
+   there is no fitness signal.
+
+**Efficiency and trust — works without these, but wastes budget or lies:**
+
+5. The catalog: coherence-check a crossover child before spending a session, and
+   diff capability against the parent so a gain attaches to a named change.
+6. Drift twice — before the run (the workspace really is the fingerprinted
+   config) and after (the agent did not edit its own configuration mid-run).
+7. Pin verification per EXPERIMENT, not per candidate: did the toolchain move
+   between generations, invalidating cross-generation comparison. An epoch
+   boundary, not a candidate property.
+
+**Not needed:** file inventory (the loop made the mutation), prose output,
+`explain` (for the human reading logs), `schema` (pins the parse, does not feed
+the search).
+
+Items 1 and 2 determine whether the experiment is VALID; 5-7 whether it is
+efficient and honest; the rest is convenience.
+
+### G33. Outcome belongs in the body; exit codes are the projection
+
+Supersedes the "specified exit-code contract" framing in G21/G22, which put the
+loop's correctness in a footnote.
+
+Exit codes and a response body answer different questions. A body says what
+happened and where. An exit code survives the case where nothing was printed —
+OOM, signal, death before output. Keep both, but invert the authority:
+
+    {"outcome":"gate_failed","phase":"check","diagnostics":[{"id":"tool.schema.invalid","path":"tools/x.ts"}]}
+    {"outcome":"ok","phase":"check","fingerprint":"sha256:..."}
+    {"outcome":"dispatch_failed","phase":"run","retryable":true}
+
+`exit 2` can be skimmed past; `"outcome":"gate_failed"` with `"retryable":false`
+cannot be misread as a bad score. The distinction that decides whether an
+experiment is valid becomes a field a consumer must read to get anything, rather
+than a line at the bottom of the help.
+
+Exit codes remain, derived mechanically from `outcome`, as the shell affordance
+and the last-resort signal.
