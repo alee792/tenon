@@ -881,3 +881,44 @@ separate command the correct shape rather than a smarter apply:
 Removes exactly what that harness's record lists, then drops the record. The
 precise inverse of apply, no new concepts, and it supplies the uninstall story —
 which does not exist today in any form.
+
+### G29. Landing on the manifest, and what actually needs rewriting
+
+**Decided: no "true manifest".** The file keeps its exact current
+responsibility — pins the runtime closure, never lists components — and is
+renamed `manifest` -> `pins` so it stops implying an inventory it will never
+carry. The inventory comes from `check --emit catalog`. The instinct that the
+word should mean a list of contents is honored by removing the word, not by
+changing the file's job (G27 gives the verification argument).
+
+**`clean` with no `--harness` resets everything** — every record in `.tenon/`,
+then the directory itself. `--harness H` narrows it to one projection, for the
+deliberate dual-harness workspace of G28.
+
+**No north star amendment is needed.** Its own rule reserves that for a change
+that mints a new author-facing concept, adds a subsystem or dependency, moves a
+named boundary, or bets on an unvalidated future:
+
+- New concept? `pins` renames an existing one; `catalog` implements the
+  capability surface ADR 0024 already put in the measure; `clean` is apply's
+  inverse. `catalog` as a named output is the closest call and wants a glossary
+  entry plus an ADR, not an amendment.
+- New subsystem or dependency? None.
+- Moves a named boundary? No, deliberately — a composite `iterate` in tenon
+  WOULD have (orchestration, refused by north star #2), which is why it lives in
+  tenon-improve instead (G23).
+- Bets on an unvalidated future? All three candidates were dropped: no substrate
+  abstraction (G6), no NEAT-style ids (G12 revision), no config file (G25).
+
+The redesign is surface, not identity.
+
+**What does need rewriting:**
+
+- `docs/glossary.md` — manifest -> pins; add catalog; the improvement-loop entry
+  stays as-is (G8 claims it).
+- `docs/product-spec.md` — the Agent manifest section, and the apply / validate /
+  drift descriptions.
+- ADRs referencing the manifest by name, and the `--diagnostics` flag.
+- One new ADR: the CLI consolidation (check absorbs validate and fingerprint
+  show; pins written by the gate; clean added; explain and schema added; exit
+  codes specified).
