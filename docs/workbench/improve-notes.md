@@ -665,3 +665,79 @@ gate), and renames `--diagnostics` to `--format` since it governs all output.
 **Rejected from the proposal:** `drift` -> `diff` (drift names the condition
 being checked for; `diff` invites "against what?"), `integration` -> `pkg`, and
 `stage` -> `stage build`. Churn without payoff.
+
+### G22. Cold onboarding test of the proposed surface
+
+An agent given only the proposed help text, asked to sequence one improvement-loop
+iteration and audit the friction. Findings, worst first.
+
+**The loop needs 6 invocations, 5 subcommands** — not the 3 assumed. Beyond
+check/apply/run it needs:
+
+- `env verify` against the PREVIOUS candidate's pins. Pins bind to a source
+  fingerprint, and mutation changes the fingerprint, so pins cannot certify that
+  the environment held still BETWEEN candidates. Without this, an environment
+  move silently makes scores before and after incomparable.
+- `drift` TWICE. Before the run, to prove the workspace is exactly the compiled
+  config (otherwise the score is not attributable). After the run, to catch the
+  agent self-modifying owned files mid-run — the output would then come from
+  something that is no longer the fingerprinted configuration.
+
+**Loop correctness lives entirely in the exit codes, which are one unlabeled
+line.** Exit 2 = discard the mutation; exit 5 = retry it, never score it.
+Conflating them scores infrastructure flakes as bad mutations. A reader who
+skims and writes `set -e` corrupts the experiment. The most important contract
+in the help is the least prominent thing in it.
+
+**Gap introduced by "inventory fields present only when ok".** On a cold read a
+candidate that FAILS check therefore has no fingerprint — so rejected mutations
+cannot be attributed by tenon's own identifier, and rejected mutations are data.
+Either emit an identity for failed candidates or say plainly that the loop must
+hash them itself.
+
+**No output field names are documented anywhere.** Every jq expression the tester
+wrote was fabricated. That is the whole integration surface. `tenon schema` is
+proposed but the help never says what NAMEs exist.
+
+**`id` means three things on one page:** `--emit id` (source fingerprint),
+`explain ID` (diagnostic code), `--input-id` (schedule input). Rename at least
+one.
+
+**Two ambiguities to fix regardless:**
+
+- `apply --workspace` defaults to PATH, so the safest-looking invocation compiles
+  the source into the source directory — and `--discard-local` then overwrites
+  there. Bad default for anyone who has not yet learned what "owned" means.
+- Exit 3 "workspace drift" and exit 4 "pin/environment drift" are both called
+  drift, and the `drift` command can return either. One discards a candidate;
+  the other invalidates the whole experiment.
+
+**Friction:** of ~20 flag tokens per iteration, 3 carry information (candidate
+path, input file, timeouts). `--harness` is typed 4x and is a property of the
+experiment, not the invocation. Six concepts are mandatory before iteration one
+(source vs workspace, file ownership, fingerprint, pin sets, the exit taxonomy,
+the input turn format) and the help presents them as peers with no "start here".
+
+**Verdict: too much — but because of concept count, not flag count.**
+
+### G23. The composite belongs in tenon-improve, not tenon
+
+The cold test proposed `tenon iterate PATH --input FILE` doing check -> apply ->
+pre-drift -> run -> post-drift, emitting one attributed record with a
+`phase_failed` field. Before/after: 6 invocations and ~20 flag tokens become 1
+and 3; concepts required before the first iteration drop from six to two.
+
+The objection that a composite hides the proved/ran boundary is answered by
+`phase_failed` — the boundary moves into the output instead of the command
+structure, which is better, since the loop branches on it programmatically
+anyway.
+
+But it does not belong in tenon: sequencing compile and dispatch is
+orchestration, which the north star refuses. **That composite is precisely the
+adapter module G6 already calls for in tenon-improve.** tenon keeps five sharp
+commands; tenon-improve ships the one-call cycle on top. Neither grows the wrong
+responsibility, and a loop author never learns tenon's surface at all.
+
+Belongs in tenon instead: a `tenon.toml` resolved upward from PATH carrying
+`harness`, `format`, and `workspace` defaults (serves every user, not just
+loops), and `--format jsonl` implied when stdout is not a TTY.
