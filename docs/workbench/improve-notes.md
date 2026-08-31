@@ -311,3 +311,44 @@ policy hook, not core machinery.
 
 Limit, same as NEAT's: innovation numbers are per-run. Component ids would be
 too; cross-search comparison still goes through the fingerprint.
+
+### G13. The catalog workflow already exists, split across three commands
+
+A natural guess is that `manifest` should emit a component catalog and
+`validate` should diff it against the applied target. Both halves have homes
+already, just not those:
+
+| Command | Inputs | Answers |
+| --- | --- | --- |
+| `validate` | source only | is this definition well-formed? -> fingerprint or diagnostics |
+| `drift` | source x workspace | does the applied target still match? -> unchanged / modified / missing / stale |
+| `manifest` | closure | what environment does this run in? -> harness, runtime, package pins |
+
+`cmd/tenon/drift.go` already regenerates every tenon-owned file in memory on
+apply's own generation path and classifies each owned path — that is the
+additive/subtractive diff against the applied target. The missing piece is only
+the catalog itself, which is derived from source and therefore belongs with
+`validate` (G9).
+
+**Naming finding for tenon.** Everywhere else in software a manifest IS a list
+of contents (shipping, package, Android, K8s). Tenon's manifest is the one that
+explicitly never lists contents, so the word actively misleads — anyone guessing
+from the name guesses wrong. `closure`, `pins`, or `lock` would say what it
+does. Recording as an observation, not a proposal; renaming a documented
+author-facing artifact needs its own justification.
+
+### G12 revision: ship path-as-id, keep NEAT as a noted alternative
+
+NEAT-style component ids are too much machinery for now. Path as ID is already
+implemented, so it is zero work, and the failure mode is survivable at this
+scale: a rename costs one redundant component and one wasted evaluation, not a
+corrupted search. Whether renames matter at all is unknown until real mutators
+are observed.
+
+Ship path-as-id. Note NEAT-style inherited ids and agentic classification as
+more sophisticated alternatives, with the rename duplicate as the known limit.
+
+**Cheap insurance, do now:** record each component's content hash per genome in
+the run state. If renames turn out to be common, identity can be reconstructed
+retroactively from logs already written, instead of re-running the search. Buys
+the option without buying the machinery.
