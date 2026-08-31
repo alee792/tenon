@@ -82,6 +82,17 @@ def test_scores_stay_inside_the_unit_interval():
     assert all(0.0 <= r["score"] <= 1.0 for r in round_of(keys, verdicts).board())
 
 
+def test_the_global_fit_has_one_shape():
+    """A single-node fit is the generation-0 case, and callers index every
+    result the same way — so it cannot quietly return a bare number."""
+    for nodes, comparisons in ([["only"], []], [["a", "b"], [("a", "b", 1.0)]]):
+        out = server.fit(nodes, comparisons)
+        for key, value in out.items():
+            assert isinstance(value, dict), f"{key} came back as {type(value).__name__}"
+            assert "score" in value and "strength" in value
+    assert server.fit(["only"], [])["only"]["score"] == 0.5
+
+
 def test_verdicts_survive_a_server_restart():
     """Verdicts are a person's attention. Losing them to a process restart is
     the worst thing this server can do, and it has done it once."""

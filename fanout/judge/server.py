@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from itertools import combinations
@@ -245,7 +247,9 @@ def fit(nodes: list, comparisons: list) -> dict:
     if n == 0:
         return {}
     if n == 1:
-        return {nodes[0]: 0.5}
+        # Same shape as every other return: one entry with nothing to compare
+        # against takes the coin flip, but callers still index it as a record.
+        return {nodes[0]: {"score": 0.5, "strength": 1.0}}
     wins = [0.0] * n
     counts = [[0.0] * n for _ in range(n)]
     for a, b, weight in comparisons:
@@ -283,6 +287,52 @@ class Judge:
         self.lock = threading.Lock()
         self.ready = threading.Condition(self.lock)
         self.rounds: dict = {}
+        # Set only when the server was started with --spec. Without it the
+        # server is read-only and cannot start anything.
+        self.spec: Path | None = None
+        self.evolve: Path | None = None
+        self.child = None
+        self.child_log: Path | None = None
+
+    def can_advance(self) -> bool:
+        return self.spec is not None
+
+    def running(self) -> bool:
+        return self.child is not None and self.child.poll() is None
+
+    def advance(self, run_root: Path) -> dict:
+        """Ask the search for one more generation.
+
+        The command is fixed at startup and the request carries no arguments,
+        so a page cannot ask this server to run something of its choosing."""
+        if not self.can_advance():
+            return {"error": "this judge was started without --spec, so it cannot run the search"}
+        if self.running():
+            return {"error": "a generation is already running"}
+        checkpoint = run_root / "checkpoint.json"
+        if not checkpoint.is_file():
+            return {"error": "the run has no checkpoint to resume from"}
+        nxt = int(json.loads(checkpoint.read_text())["generation"]) + 1
+        self.child_log = run_root / f"generation-{nxt}.log"
+        handle = self.child_log.open("ab")
+        self.child = subprocess.Popen(
+            [sys.executable, str(self.evolve), "run", "--spec", str(self.spec),
+             "--resume", "--generations", str(nxt)],
+            cwd=str(self.evolve.parent.parent),
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+        )
+        return {"started": nxt}
+
+    def child_state(self) -> dict:
+        if self.child is None:
+            return {"running": False, "exited": None, "tail": ""}
+        code = self.child.poll()
+        tail = ""
+        if self.child_log and self.child_log.is_file():
+            tail = "\n".join(self.child_log.read_text(errors="replace").splitlines()[-4:])
+        return {"running": code is None, "exited": code, "tail": tail}
 
     def round_for(self, run_root: Path, generation: int, task_index: int, task: str) -> Round:
         key = (str(run_root), generation, task_index)
@@ -384,7 +434,8 @@ class Judge:
         with self.lock:
             rounds = sorted(self.rounds.values(), key=lambda r: r.generation)
         if not rounds:
-            return {"run": "", "finished": False, "pending": None, "generations": [], "overall": []}
+            return {"run": "", "finished": False, "pending": None, "generations": [],
+                    "overall": [], "can_advance": self.can_advance(), "child": self.child_state()}
         root = rounds[0].run_root
         lineage = {}
         path = root / "lineage.jsonl"
@@ -404,6 +455,8 @@ class Judge:
         return {
             "run": root.name,
             "finished": (root / "best.json").is_file(),
+            "can_advance": self.can_advance(),
+            "child": self.child_state(),
             "pending": None if pending is None else {
                 "generation": pending.generation,
                 "done": len(pending.verdicts),
@@ -415,6 +468,8 @@ class Judge:
                                         if any(e["key"].startswith(g) for e in r.entries)})}
                 for g, v in sorted(overall.items(), key=lambda kv: -kv[1]["score"])
             ],
+            # A round with no pairs — generation 0 holds only the seed — has
+            # nothing to show, and a tab leading to nothing is noise.
             "generations": [
                 {
                     "generation": r.generation,
@@ -435,6 +490,7 @@ class Judge:
                     ],
                 }
                 for r in rounds
+                if r.pairs
             ],
         }
 
@@ -551,6 +607,13 @@ class Handler(BaseHTTPRequestHandler):
             JUDGE.verdict(payload.get("id", ""), payload.get("winner", "tie"))
             self.send_json({"ok": True})
             return
+        if self.path == "/api/advance":
+            rounds = sorted(JUDGE.rounds.values(), key=lambda r: r.generation)
+            if not rounds:
+                self.send_json({"error": "no run is loaded"}, 400)
+                return
+            self.send_json(JUDGE.advance(rounds[0].run_root))
+            return
         if self.path == "/api/undo":
             JUDGE.undo()
             self.send_json({"ok": True})
@@ -575,9 +638,21 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> int:
     parser = argparse.ArgumentParser(prog="judge", description="Human pairwise judge for an evolve search.")
     parser.add_argument("--port", type=int, default=8917)
+    parser.add_argument(
+        "--spec",
+        help="an evolve spec; supplying it lets the page ask for one more generation",
+    )
     args = parser.parse_args()
+    if args.spec:
+        JUDGE.spec = Path(args.spec).expanduser().resolve()
+        JUDGE.evolve = HERE.parent / "evolve.py"
+        if not JUDGE.spec.is_file():
+            print(f"judge: no spec at {JUDGE.spec}")
+            return 2
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     print(f"judge listening on http://127.0.0.1:{args.port}")
+    if JUDGE.spec:
+        print(f"judge: can run further generations from {JUDGE.spec}")
     print("open that page, then start the search in another terminal")
     try:
         server.serve_forever()

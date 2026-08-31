@@ -1169,6 +1169,8 @@ class Budget(Exception):
 
 def cmd_run(args) -> int:
     cfg = load_config(Path(args.spec).expanduser())
+    if args.generations:
+        cfg.generations = args.generations
     return Search(cfg, args.dry_run, args.resume).go()
 
 
@@ -1249,6 +1251,11 @@ def build_parser() -> argparse.ArgumentParser:
     run = sub.add_parser("run", help="run the search")
     run.add_argument("--spec", required=True)
     run.add_argument("--dry-run", action="store_true", help="print the resolved config and exit")
+    run.add_argument(
+        "--generations",
+        type=int,
+        help="override the spec's generation count, which is how a resume asks for one more",
+    )
     run.add_argument(
         "--resume",
         action="store_true",

@@ -95,6 +95,7 @@
   .split { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
   @media (max-width:820px) { .split { grid-template-columns:1fr; } }
   .empty { text-align:center; padding:58px 20px; color:var(--faint); font-size:13px; }
+  .mono-s { font:11px ui-monospace,SFMono-Regular,Menlo,monospace; }
   .pill { display:inline-block; padding:0 7px; border-radius:999px; background:var(--surface-2);
           border:1px solid var(--line); font-size:10.5px; color:var(--muted); margin-left:6px;
           vertical-align:1px; }
@@ -367,22 +368,34 @@ function renderReview(force){
   // Redraw only when something actually changed. Repainting on every poll
   // steals the scroll position and invalidates whatever the reader is
   // mid-click on.
-  const key = JSON.stringify([tab, openGenome, s.finished, s.pending,
+  const key = JSON.stringify([tab, openGenome, s.finished, s.pending, s.can_advance,
+                              s.child && [s.child.running, s.child.tail],
                               s.generations.map(g => [g.generation, g.judged])]);
   if (!force && key === drawn) return;
   drawn = key;
   const gen = s.generations.find(g => g.generation === tab) || s.generations[0];
   const judged = s.generations.reduce((n, g) => n + g.judged, 0);
 
+  const running = s.child && s.child.running;
+  const nextGen = (s.generations[s.generations.length - 1]?.generation ?? 0) + 1;
   const banner = s.pending && s.pending.done < s.pending.total ? `
     <div class="card banner">
       <span><b>Generation ${s.pending.generation}</b> is ready —
         ${s.pending.total - s.pending.done} comparisons left.</span>
       <button class="primary" onclick="go('judge')">Start judging</button>
       <span class="faint">or stay here; the search waits on you either way.</span>
-    </div>` : s.finished ? `
-    <div class="card banner"><span>Search complete. Nothing was promoted — review the winner
-      and copy it across yourself if it holds up.</span></div>` : '';
+    </div>` : running ? `
+    <div class="card banner">
+      <span><b>Generation ${nextGen}</b> is running — proposing candidates and running each in its
+        own checkout. It will appear here to judge when it lands.</span>
+      ${s.child.tail ? `<span class="faint mono-s">${esc(s.child.tail.split('\n').pop())}</span>` : ''}
+    </div>` : `
+    <div class="card banner">
+      <span>Everything judged so far.${s.finished ? ' Nothing was promoted — review the winner and copy it across yourself if it holds up.' : ''}</span>
+      ${s.can_advance
+        ? `<button class="primary" onclick="advance()">Run generation ${nextGen}</button>`
+        : `<span class="faint">Start the judge with <code>--spec</code> to run further generations from here.</span>`}
+    </div>`;
 
   const entry = gen.entries.find(e => e.genome === openGenome);
   const detail = !entry ? `<div class="card empty" style="padding:38px 24px">
@@ -432,6 +445,14 @@ function renderReview(force){
             <td class="gene">${e.parents.length ? e.parents.join(', ') : '—'}</td>
             <td>${esc(e.operator || 'seed')}</td></tr>`).join('')}
       </table></div>`}`;
+}
+
+async function advance(){
+  const out = await (await fetch('/api/advance', {method:'POST',
+    headers:{'Content-Type':'application/json'}, body:'{}'})).json();
+  if (out.error) { alert(out.error); return; }
+  drawn = null;
+  tick();
 }
 
 function setTab(t){ tab = t; openGenome = null; writeHash(); renderReview(true); }
