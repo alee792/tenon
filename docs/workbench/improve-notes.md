@@ -741,3 +741,17 @@ responsibility, and a loop author never learns tenon's surface at all.
 Belongs in tenon instead: a `tenon.toml` resolved upward from PATH carrying
 `harness`, `format`, and `workspace` defaults (serves every user, not just
 loops), and `--format jsonl` implied when stdout is not a TTY.
+
+### G24. apply's workspace default — keep it, but stop teaching it
+
+`apply --workspace` defaulting to PATH compiles the source into the source
+directory, which G22 flagged as a bad default for a newcomer. It is not worth
+removing: the five-minute measure depends on it (`tenon apply . --harness claude
+&& claude` from an empty directory).
+
+The fix is in the examples, not the flag. The quickstart keeps the default;
+**every example after the quickstart applies to a distinct workspace
+directory**, so "the agent source and the workspace are independent"
+(product-spec.md:352) is taught by demonstration rather than assertion. An
+improvement loop must never reuse the source as its workspace, and the docs
+should never show a shape it cannot copy.
