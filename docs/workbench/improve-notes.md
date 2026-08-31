@@ -508,3 +508,55 @@ Two changes beyond the rename:
 
 Open: `lock write` keeps its verb on the assumption a standalone `lock verify`
 may want to exist. If `write` stays the only verb, `tenon lock AGENT` is simpler.
+
+### G18. G14 revised — drift keeps its own command
+
+G14 folded `fingerprint show`, `validate` and `drift` into one `check` on the
+grounds that each adds one input. That over-unified. The argument that kills it:
+`apply` also validates first, and nobody would merge `apply` into `validate`.
+"X does Y's work internally" is not a reason to merge commands — it mistakes
+*more inputs* for *the same question*.
+
+Sorted by what the answer is about:
+
+| | Subject | Answer |
+| --- | --- | --- |
+| fingerprint | source | an identity |
+| validate | source | a verdict |
+| catalog | source | a report |
+| drift | source x workspace | a comparison |
+| lock | environment | a verdict on a different subject |
+
+The first three are one load, one gate, three projections of one result — those
+merge. `drift` changes subject and deserves its name.
+
+    tenon check AGENT [--harness <claude|codex>] [--catalog] [--lock PATH]
+    tenon drift AGENT --workspace DIR --harness <claude|codex> [--lock PATH]
+    tenon lock write AGENT --harness <claude|codex> [--output PATH] [--verify PATH] [--model VALUE]
+
+Still 2 -> 1, which was the real redundancy. Amend G17's help text accordingly:
+`check` loses `-workspace`, and its closing paragraph drops the workspace clause.
+
+**Nothing in check or drift touches runtime.** `--harness` on the source check
+asks whether the source can compile to that harness's native configuration —
+static; no harness is launched. The workspace comparison reads files apply
+already wrote. And the model is never checked anywhere: `Verify` ignores it and
+the harness owns model selection, so there is no rung for it at all.
+
+**Two different diffs, two different customers.** This was under-explained in
+G15:
+
+- `drift` diffs source against an applied workspace, at FILE level (unchanged /
+  modified / missing / stale per owned path). Question: did someone tamper with
+  or stale out the applied output? Operator-facing.
+- A catalog diff is REVISION against REVISION — `catalog(A)` vs `catalog(B)` —
+  at capability level. Question: what did this revision add or remove from what
+  the agent can do? Author- and loop-facing, and exactly the ADR 0024 leg. No
+  workspace is involved.
+
+G1's coherence check consumes the catalog, not drift.
+
+**Why `--catalog` stays a flag rather than its own command:** an ungated catalog
+would be a lie — it would list a tool whose schema does not parse. The catalog is
+only meaningful for a source that gates, so it rides on the gate rather than
+being obtainable without it.
