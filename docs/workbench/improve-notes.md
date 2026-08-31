@@ -832,3 +832,52 @@ streams the harness's events back out, enforces `--timeout` and
 `--turn-timeout`, and stamps every dispatch event with the source fingerprint.
 It runs no model loop of its own — that is the harness's job. It is what makes
 an agent scriptable with no human at a terminal.
+
+### G27. Fusing pins and catalog: the argument is verification, not cost
+
+Supersedes the rate-of-change argument in G26, which was weak — regenerating a
+document is cheap, and observing change is the point.
+
+The real objection: the pins file is **verified fail-closed**. Supply it and
+tenon refuses to proceed on drift. Put the catalog in the same document and
+there are only two options, both bad:
+
+- Verify the catalog too, and editing a skill fails verification. The file
+  becomes a lock on your own source; an agent could never be edited without
+  regenerating it first.
+- Do not verify it, and one file carries an enforced claim and a description
+  with nothing marking which half is which.
+
+The goal behind the question — if something changed, observe it — is already
+served by diffing `catalog(A)` against `catalog(B)` (G18). Change is observable
+without living in the document whose job is to fail closed.
+
+### G28. `tenon clean` — yes, but not for staleness
+
+**Apply already prunes.** Verified: delete a skill from the source, re-apply,
+and apply reports `removed .claude/skills/summarize/SKILL.md` and drops the
+emptied directory. The apply record does this job (G26).
+
+**The real gap is harness removal.** Applying a second harness into one
+workspace leaves the first one's files:
+
+    tenon apply ./agent --harness codex --workspace ./ws
+      wrote .codex/config.toml
+      wrote AGENTS.md
+
+    ls -a ./ws     -> .codex .mcp.json .tenon AGENTS.md CLAUDE.md
+    ls ./ws/.tenon -> apply-claude.json apply-codex.json
+
+Both records live and `CLAUDE.md` remains owned by the claude record. Launch
+Claude Code there and it reads a stale projection for an agent now running under
+Codex.
+
+Apply is right not to clobber it: one source compiling to both harnesses is a
+designed feature, so a dual-harness workspace can be deliberate. That makes a
+separate command the correct shape rather than a smarter apply:
+
+    tenon clean PATH --harness H --workspace DIR
+
+Removes exactly what that harness's record lists, then drops the record. The
+precise inverse of apply, no new concepts, and it supplies the uninstall story —
+which does not exist today in any form.
