@@ -93,6 +93,62 @@ def test_the_global_fit_has_one_shape():
     assert server.fit(["only"], [])["only"]["score"] == 0.5
 
 
+def _judge_with_two_rounds(root):
+    """A finished generation 1 and a half-judged generation 2."""
+    import json
+
+    for gen, names in ((1, ["aaaaaaaa", "bbbbbbbb"]), (2, ["cccccccc", "dddddddd", "eeeeeeee"])):
+        for name in names:
+            d = root / "generations" / f"gen-{gen}" / "variants" / f"{name}-t0r0"
+            d.mkdir(parents=True)
+            (d / "events.jsonl").write_text(
+                json.dumps({"type": "agent.output.delta", "delta": f"answer {name}"}) + "\n"
+            )
+    (root / "judge").mkdir()
+    (root / "judge" / "verdicts-gen-1.json").write_text(json.dumps({"aaaaaaaa-t0r0|bbbbbbbb-t0r0": "a"}))
+    (root / "judge" / "verdicts-gen-2.json").write_text(json.dumps({"cccccccc-t0r0|dddddddd-t0r0": "a"}))
+
+    judge = server.Judge()
+    for gen in (1, 2):
+        rnd = server.Round(root, gen, 0)
+        judge.rounds[(str(root), gen, 0)] = rnd
+    return judge
+
+
+def test_undo_only_touches_the_round_being_judged():
+    """One undo used to walk every round and pop a verdict from each, silently
+    damaging generations that were already finished."""
+    import shutil, tempfile
+
+    root = pathlib.Path(tempfile.mkdtemp())
+    try:
+        judge = _judge_with_two_rounds(root)
+        finished = judge.rounds[(str(root), 1, 0)]
+        pending = judge.rounds[(str(root), 2, 0)]
+        assert finished.done and not pending.done
+
+        out = judge.undo()
+        assert out["undone"] and out["generation"] == 2
+        assert len(finished.verdicts) == 1, "a finished round must not lose a verdict"
+        assert len(pending.verdicts) == 0
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_reset_clears_one_generation():
+    import shutil, tempfile
+
+    root = pathlib.Path(tempfile.mkdtemp())
+    try:
+        judge = _judge_with_two_rounds(root)
+        out = judge.reset(1)
+        assert out["reset"] == 1
+        assert judge.rounds[(str(root), 1, 0)].verdicts == {}
+        assert judge.rounds[(str(root), 2, 0)].verdicts != {}, "other rounds are untouched"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_verdicts_survive_a_server_restart():
     """Verdicts are a person's attention. Losing them to a process restart is
     the worst thing this server can do, and it has done it once."""

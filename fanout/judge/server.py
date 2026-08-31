@@ -502,13 +502,42 @@ class Judge:
                 if r.verdicts or r.done
             ]
 
-    def undo(self) -> None:
+    def pending(self):
+        """The round currently being judged, if any."""
+        for rnd in sorted(self.rounds.values(), key=lambda r: r.generation):
+            if not rnd.done:
+                return rnd
+        return None
+
+    def undo(self) -> dict:
+        """Take back the last verdict in the round being judged.
+
+        Scoped to that one round on purpose: this used to walk every round and
+        pop a verdict from each, so a single undo silently damaged generations
+        that were already finished."""
         with self.ready:
-            for rnd in self.rounds.values():
-                if rnd.verdicts:
-                    rnd.verdicts.pop(list(rnd.verdicts)[-1], None)
-                    self.save_verdicts(rnd)
+            rnd = self.pending()
+            if rnd is None or not rnd.verdicts:
+                return {"undone": False}
+            pair = list(rnd.verdicts)[-1]
+            rnd.verdicts.pop(pair, None)
+            self.save_verdicts(rnd)
             self.ready.notify_all()
+            return {"undone": True, "generation": rnd.generation, "left": len(rnd.verdicts)}
+
+    def reset(self, generation: int) -> dict:
+        """Throw away a generation's verdicts and judge it again from scratch."""
+        with self.ready:
+            match = [r for r in self.rounds.values() if r.generation == generation]
+            if not match:
+                return {"error": f"generation {generation} is not loaded"}
+            rnd = match[0]
+            rnd.verdicts = {}
+            self.save_verdicts(rnd)
+            board = rnd.run_root / "judge" / f"gen-{generation}.json"
+            board.unlink(missing_ok=True)
+            self.ready.notify_all()
+            return {"reset": generation, "comparisons": len(rnd.pairs)}
 
 
 JUDGE = Judge()
@@ -615,8 +644,14 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(JUDGE.advance(rounds[0].run_root))
             return
         if self.path == "/api/undo":
-            JUDGE.undo()
-            self.send_json({"ok": True})
+            self.send_json(JUDGE.undo())
+            return
+        if self.path == "/api/reset":
+            generation = payload.get("generation")
+            if not isinstance(generation, int):
+                self.send_json({"error": "a generation number is required"}, 400)
+                return
+            self.send_json(JUDGE.reset(generation))
             return
         if self.path == "/score":
             try:
