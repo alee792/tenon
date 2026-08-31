@@ -409,3 +409,44 @@ pre-release, which is the cheapest this will ever be.
 
 Consumer impact in this repo: fanout calls `fingerprint show`, evolve calls
 `validate` and `manifest write`. All three move; all three are ours.
+
+### G15. What `--catalog` means, and why the file inventory is not enough
+
+`fingerprint show` emits a FILE inventory: `{path, hash, executable}` per
+authored file. A catalog is a CAPABILITY inventory. They diverge in three ways:
+
+- A skill is many files but one capability (`skills/review/SKILL.md` plus
+  scripts and references -> one entry).
+- Plugin skills appear in the catalog but in none of the source's files — they
+  are merged in from a vendored or pinned plugin under precedence rules.
+- Names and schemas come from file CONTENTS, not paths. `tools/shout.ts`
+  declares its own description and Zod input/output schemas;
+  `tools/reverse/tool.go` declares `Description` as a Go const. The tool's
+  identity cannot be derived from its filename.
+
+That last point is why G1's coherence check needs the catalog specifically:
+answering "does this skill reference a tool that exists" requires the tool's
+name, which lives inside the file. Grepping paths cannot do it.
+
+### G16. Why the lock cannot be verified by default
+
+Two reasons, one structural and one about cost.
+
+Structural: the product spec puts the manifest outside agent source on purpose —
+"the same source directory applies under different manifests — one commit
+crossed with many pin sets ... it lives wherever its operator or loop versions
+it." There is no canonical location to auto-discover, and giving it one would
+collapse the many-pin-sets property that evolve depends on (one manifest per
+genome).
+
+Cost: verifying pins resolves the CURRENT closure, which shells out to the
+harness for its version and to deno/uv/go/python for theirs. Mandatory
+verification would put toolchain requirements on every check and break the
+five-minute measure.
+
+**But skipping it should not be silent.** A check that exits 0 without verifying
+pins currently looks identical to one that did. Fix it in the output, not the
+default: report `pins: not verified` rather than omitting the field, and do the
+same for an absent `--harness` or `--workspace`. Then "did I check what I think
+I checked" is answerable from the output instead of from recalling one's own
+flags. This subsumes the under-run caveat in G14.
