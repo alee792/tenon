@@ -16,7 +16,8 @@ python3 fanout/judge/server.py
 python3 fanout/evolve.py run --spec fanout/examples/search-paprika.json
 ```
 
-Open <http://127.0.0.1:8917>, and judge. `←` picks A, `→` picks B, `space` is
+Open <http://127.0.0.1:8917>, and judge. The theme follows your system by default; the control
+in the header cycles light, dark and auto, and `?theme=dark` pins it in a link. `←` picks A, `→` picks B, `space` is
 a tie. The search blocks until the generation's comparisons are done, then
 takes the win rates as fitness and proposes the next generation.
 
@@ -32,13 +33,17 @@ the server reads every variant of that generation off disk, runs the whole
 round robin in the browser, and answers all the blocked clients from the
 result. No change to evolve was needed.
 
-## The two screens
+## The three screens
 
 **Judge** shows one comparison at a time. `←` picks A, `→` picks B, `space` is
 a tie, `g` reveals the gene behind each answer — the `instructions.md` that
 produced it. That stays hidden by default: reading it before you decide biases
 the comparison toward the instructions rather than the output, which is not
 what you are trying to measure.
+
+**About** is a written introduction served by the same page — how the loop works, the API it
+exposes, what swapping each injection point buys you, what tenon contributes, and how a human
+gets wired into a machine scoring contract. It carries the walkthrough screenshots.
 
 **Review** is where a finished generation goes. It carries each generation's
 leaderboard, the answer and the gene for any genome you click, and the lineage

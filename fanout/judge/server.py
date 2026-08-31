@@ -32,7 +32,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from itertools import combinations
 from pathlib import Path
 
-PAGE = (Path(__file__).parent / "ui.html").read_text()
+HERE = Path(__file__).parent
+PAGE = (HERE / "ui.html").read_text()
+ABOUT = (HERE / "about.html").read_text()
+ASSETS = HERE / "assets"
 
 
 class Round:
@@ -459,6 +462,16 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_args):
         pass
 
+    def send_html(self, body: bytes) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        # The page and its copy change while the tool is being worked on, and a
+        # stale cached copy looks exactly like a bug that has not been fixed.
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def send_json(self, payload, status=200):
         body = json.dumps(payload).encode()
         self.send_response(status)
@@ -468,21 +481,37 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path == "/":
-            body = PAGE.encode()
+        # Route on the path alone: a query string (?theme=dark) is for the page,
+        # not part of what is being addressed.
+        path = self.path.split("?", 1)[0]
+        if path == "/":
+            self.send_html(PAGE.encode())
+            return
+        if path == "/api/about":
+            self.send_html(ABOUT.encode())
+            return
+        if path.startswith("/assets/"):
+            # Only ever serve a plain filename out of the assets directory:
+            # a path from a request must not be able to walk out of it.
+            name = Path(path[len("/assets/"):]).name
+            asset = ASSETS / name
+            if not asset.is_file() or asset.parent != ASSETS:
+                self.send_json({"error": "not found"}, 404)
+                return
+            body = asset.read_bytes()
             self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Type", "image/png")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
             return
-        if self.path == "/api/summary":
+        if path == "/api/summary":
             self.send_json(JUDGE.summary())
             return
-        if self.path == "/api/scores":
+        if path == "/api/scores":
             self.send_json({"generations": JUDGE.boards()})
             return
-        if self.path == "/api/state":
+        if path == "/api/state":
             rnd = JUDGE.active()
             if rnd is None:
                 self.send_json({"waiting": True})
