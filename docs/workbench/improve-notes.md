@@ -239,3 +239,75 @@ a session. The remaining problem is only that such a mutation can never
 *succeed*: the manifests are not genes and are not announced to mutators.
 Export `EVOLVE_CARRIED` alongside `EVOLVE_GENES`. Do not build dependency
 repair — leave it to a post-combine hook.
+
+### G10. Explain the two variation mechanisms (docs TODO)
+
+The README needs this on page one; the algorithm names do not convey it.
+
+|  | recombine (crossover) | mutate (vary) |
+| --- | --- | --- |
+| Needs | 2+ parents | 1 genome |
+| Changes | *which* components a child has | *what is inside* them, or adds/removes one |
+| Granularity | whole components | anything, usually sub-file |
+| Runs | file copying | a command, usually a model call |
+| Costs | nothing | money |
+| Invents new material | **no** | **yes** |
+
+Crossover only reshuffles components already present somewhere in the pool, so
+mutation is the sole source of new material and crossover is the sole free
+operator. Per child, `propose()` gives exactly one of `crossover`,
+`crossover+<mutator>`, or `<mutator>` — never a bare copy, since copying a
+parent unchanged reproduces its fingerprint.
+
+Two consequences to state explicitly: generation 1 is all mutation (only the
+seed exists, nothing to recombine), and the depth-1 gene rule is what keeps the
+two from overlapping — crossover works strictly between components, mutation
+strictly within them.
+
+### G11. validate vs manifest — the split to respect
+
+`internal/manifest/manifest.go:1-8` states the invariant: the manifest "PINS the
+runtime closure the authored directory alone cannot express ... It IDENTIFIES
+and PINS; it **never lists components** — the authored directory stays the sole
+registry."
+
+So the line is content vs environment, not input vs output (the manifest is
+already both: `manifest write` derives one, `--manifest` consumes it):
+
+- **validate** answers "is this definition well-formed" over the authored
+  directory — components, schemas, budgets, bounds. Output: fingerprint or
+  diagnostic identifiers.
+- **manifest** answers "what environment did this run in" — harness binary
+  version, deno/uv/go/python runtime versions, integration package identities,
+  optional model. Facts the directory cannot express. Verified fail-closed,
+  naming the drifted pin.
+
+The fingerprint is the join between them.
+
+A component inventory is derivable from the directory alone, which is the test
+for "does not belong in the manifest". Hence G9's `validate --surface`.
+
+Also relevant to G5: `Verify` deliberately ignores the model field — the harness
+owns model selection and tenon never checks which model served a turn. A
+per-genome model pin is a declaration, not a guarantee.
+
+### G12. Component identity can be deterministic (no classifier)
+
+NEAT's historical markings are pure bookkeeping — a counter incremented when a
+structural change first occurs, assigned by the process making the change. No
+inference, no model. That property carries over if identity is recorded at the
+moment of the edit:
+
+1. **Mutators declare edits** — `{created, renamed, deleted}`. Exact and free.
+   The right default: put bookkeeping where the information exists rather than
+   reconstructing it later.
+2. **Fallback, still deterministic:** exact content-hash match across a
+   generation — same bytes at a new path is a rename.
+3. Everything else is a new component; accept some redundancy.
+
+An agentic classifier is only needed for renamed-and-rewritten-in-one-step,
+which is where identity is a judgment call anyway. If wanted later it is a
+policy hook, not core machinery.
+
+Limit, same as NEAT's: innovation numbers are per-run. Component ids would be
+too; cross-search comparison still goes through the fingerprint.
