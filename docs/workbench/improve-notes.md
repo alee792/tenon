@@ -922,3 +922,47 @@ The redesign is surface, not identity.
 - One new ADR: the CLI consolidation (check absorbs validate and fingerprint
   show; pins written by the gate; clean added; explain and schema added; exit
   codes specified).
+
+### G30. Emission audit — who consumes what
+
+| Emission | Real consumer |
+| --- | --- |
+| `{ok, fingerprint}` success object | the loop's gate (evolve's `gate()` reads exactly these two fields), CI |
+| `--emit id` | the loop — attribution key for every score |
+| `--emit files` | **humans only.** "the fingerprint changed and I don't know why" -> diff the inventory. No loop needs it; the loop made the mutation |
+| `--emit catalog` | the loop's coherence check (G1), revision-vs-revision diff (ADR 0024), humans reviewing a change |
+| diagnostics `{id, path, rule}` | the loop's self-correction; humans via `explain` |
+| pins file | `check --pins`, `apply --pins`, `env verify` — the only VERIFIED artifact |
+| apply record | tenon itself (drift, conflict detection). Never user-facing |
+| drift classification | operator; the loop's pre/post-run integrity check |
+| `run` event stream | the loop's scorer — the actual product of a run |
+| exit codes | the loop's branching (discard vs retry) |
+| `schema` | the loop pinning the shapes it parses |
+
+`--emit files` is the weakest: a real debugging use, no loop use. Keep, do not
+prioritize.
+
+### G31. The comprehensive view — conceding the readability argument
+
+Three separate arguments have been made for a cohesive manifest. Cost was weak
+(G27 concedes it). Verification semantics stands (G27). But **comprehensibility
+is a third argument and it is correct**: "what is this agent, completely, right
+now" is a legitimate question whose answer is currently scattered across three
+emissions and a hidden record.
+
+The synthesis: **a document you READ can be comprehensive; a document you VERIFY
+AGAINST must be minimal.** They are not the same artifact, and conflating them is
+what has made this question feel unresolved.
+
+So provide both:
+
+- `tenon check PATH --emit all` (or `--report`) — one document: identity, file
+  inventory, catalog, resolved closure, and drift state when `--workspace` is
+  supplied. Everything about the agent in one thing to read. Nothing to keep in
+  sync: regenerated on demand, never an input.
+- `pins` stays small and stable, because it is the only artifact handed back to
+  tenon as a claim that must hold.
+
+This yields the comprehensive surface without the failure mode where editing a
+skill breaks verification. The manifest wanted here exists — as a view, not as a
+file anyone maintains.
