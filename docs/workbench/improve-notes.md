@@ -789,3 +789,46 @@ own doc says "It IDENTIFIES and PINS; it never lists components." Everywhere
 else in software a manifest IS a list of contents. The one word guaranteed to
 make a reader expect an inventory names the file that categorically refuses to
 be one — which is exactly the wrong expectation this project keeps producing.
+
+### G26. The apply record earns its keep; applying into source is safe
+
+**Why `.tenon/apply-<harness>.json` cannot be replaced by diffing the workspace
+against a fresh projection.** `ClassifyOwnership`
+(`internal/apply/apply.go:414`) returns `Unowned` when a file exists with no
+record entry and `Modified` when it is recorded but its hash differs. Without
+the record those two collapse, and a `CLAUDE.md` that differs from the
+projection is ambiguous: hand-authored and predating tenon, or generated and
+since edited. Overwriting the first destroys work.
+
+Second, **stale** files. Delete a skill from the source and the new projection
+does not contain `.claude/skills/foo/` at all, so a projection-only diff has
+nothing to compare it against; the file lingers and the harness keeps loading a
+deleted skill. The record is the only thing that remembers what was there. That
+is a correctness bug, not untidiness.
+
+Knowledge cost is near zero: it lives in `.tenon/`, is never read by hand, and
+"owned" is learned from a conflict message at the moment it matters.
+
+**Applying into the source does not corrupt it.** Verified: fingerprint before
+and after an in-source apply is identical (`sha256:6ba46103...`) — generated
+files are not authored inputs.
+
+**Keep the default (workspace = PATH), and not only for the quickstart.** The
+harness reads `CLAUDE.md` from the directory it is launched in, which is why
+`tenon apply . --harness claude && claude` works at all. A workspace nested
+under the source would turn the five-minute path into apply, `cd`, launch.
+G24 still holds: every example past the quickstart uses a distinct workspace.
+
+**Against fusing pins and catalog into one "true manifest":** rate of change.
+Pins change when a toolchain is upgraded; the catalog changes when a skill is
+edited. Fused, every skill edit rewrites the environment pins and every
+toolchain bump rewrites the capability list, and neither diff stays readable.
+(North star #1 — never a second inventory — is the second argument, not the
+first.)
+
+**What `tenon run` is, for the record:** a headless harness driver. It launches
+claude or codex against an already-applied workspace, feeds bounded JSONL turns,
+streams the harness's events back out, enforces `--timeout` and
+`--turn-timeout`, and stamps every dispatch event with the source fingerprint.
+It runs no model loop of its own — that is the harness's job. It is what makes
+an agent scriptable with no human at a terminal.
