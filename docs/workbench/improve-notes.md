@@ -611,3 +611,57 @@ If tenon were greenfield, catalog-by-default is probably right — the work is
 already done and it is what the ADR 0024 legibility leg needs. Opt-in is the
 compatible path there, and flipping a default later is a far easier ADR than
 widening a contract now and walking it back.
+
+### G21. Surface proposal from a cold review (supersedes G14/G17/G18 details)
+
+Independent design pass over the functional responsibilities, told to ignore the
+current names and any ADRs. Converged with G18 on keeping the workspace
+comparison as its own verb, and went further on two points.
+
+**Writing pins becomes a flag on the gate — the ordering problem disappears.**
+
+    tenon check ./agent --harness claude --write-pins tenon.pins.json --model claude-opus-5
+
+Writing pins needs a proven fingerprint plus a resolved environment; the gate
+already produced the fingerprint. A separate `pin` command must either re-run the
+gate (so pins can be written from a gate result the user never saw, with an edit
+possibly interleaved) or accept a fingerprint by hand — which is the ordering
+burden itself. Verification is the symmetric flag, `--pins FILE`, failing closed
+on the first drifted pin. `env verify --pins FILE [PATH]` still exists for the
+no-source case: verifying a shipped image at boot, or a CI runner checking its
+own closure before cloning.
+
+**Gate-and-report is one job, not two.** The inventory's names and schemas come
+from file contents, and the gate is what parsed them — the inventory is the
+gate's own working set, serialized. Framing: "prove this source and describe the
+proven thing"; the description is warranted only by the proof. Enforce in the
+output contract: **inventory fields exist only when `ok` is true**, so no
+consumer can hold a half-proven inventory. Default `--emit` empty keeps the
+loop's success object small.
+
+Hot commands stay one word (`check`, `apply`, `diff`, `run`); the ~18 cold
+operations go behind namespaces (`env`, `stage`, `mcp`, `plugin`, `pkg`) so
+`tenon --help` stays readable.
+
+**Genuinely missing capabilities:**
+
+- `tenon explain ID` — stable diagnostic identifiers are promised, but nothing
+  turns one back into a cause and fix. Rated the highest-value addition, and it
+  is a table. The loop needs it to classify a failure as authorial (edit files)
+  or environmental (do not spend another revision).
+- `tenon schema [NAME]` — emit JSON Schema per jsonl output, so a consumer can
+  pin the shape it parses. Without it, "stable machine-readable" has no artifact.
+- A specified exit-code contract: source gate failure, workspace drift, pin
+  drift, and dispatch failure as distinct codes, so a loop branches without
+  parsing.
+- `diff` against a nonexistent workspace should classify every owned path as
+  missing rather than erroring — a safe universal preflight, and it removes any
+  need for `apply --dry-run`.
+
+Also folds `mcp status` and `plugin status` into `--emit caps` (both are filtered
+views of the same inventory and can currently report on a source that does not
+gate), and renames `--diagnostics` to `--format` since it governs all output.
+
+**Rejected from the proposal:** `drift` -> `diff` (drift names the condition
+being checked for; `diff` invites "against what?"), `integration` -> `pkg`, and
+`stage` -> `stage build`. Churn without payoff.
