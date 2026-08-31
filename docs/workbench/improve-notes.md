@@ -132,3 +132,88 @@ literature names regardless.
 - Asexual reproduction always mutates (`propose`: `if operator == "copy" or
   rng.random() < mutation_rate`), so a copy is never wasted on a duplicate.
 - Nothing is promoted automatically. A search ends by printing a diff.
+
+## Round 2
+
+### G6. Keep tenon fungible without building the abstraction
+
+Goal: tenon's shape must not over-inform the improvement API. Four disciplines
+that cost nothing now and make a substrate interface a refactor rather than a
+rewrite. Do these; do NOT build the interface yet (tenet 4).
+
+- Confine every tenon subprocess call to one adapter module. Today they are
+  scattered across `fanout.py` (4 call sites) and `evolve.py` (2).
+- Treat diagnostic identifiers as opaque tokens. Never branch search logic on a
+  specific `id` string.
+- `GENE_DIRS` / `GENE_FILES` become spec configuration, not module constants —
+  a different substrate has a different component layout.
+- Name by role, not by product: gate, identity, compile, dispatch. Not
+  `tenon_validate`.
+
+TODO (not now): a substrate interface — gate -> fingerprint, compile ->
+workspace, dispatch -> transcript.
+
+### G7. Path-keyed loci are brittle under rename
+
+A locus is the path string, so renaming `skills/review` to `skills/code-review`
+reads as one deletion plus one addition. Crossover can then hand a child BOTH
+copies: two near-duplicate components, each a full context cost, neither
+recognized as the other's descendant.
+
+This is what NEAT's historical markings solve, and `EVOLVE.md:126-129` already
+cites historical marking while the code does plain name matching.
+
+**Proposed (80%):** assign a stable component id on first sighting, inherit it
+through copy and mutation, and keep the id -> current path map in evolve's run
+state keyed by genome id. It must live OUTSIDE the genome directory — a sidecar
+inside it would perturb the fingerprint. A rename then reads as a rename.
+
+**Out of scope (100%):** semantic or embedding-based joining of components with
+different names and similar content. Record as a known limit.
+
+### G8. Naming corrections
+
+- `merge` is wrong for crossover. Merge implies union with conflict resolution;
+  crossover is selection — one parent's version wins, the other is discarded,
+  and a locus can be dropped entirely. Keep **crossover** / **recombine**.
+- `agent source` is wrong for genome. The genome carries a pin (G5), so it
+  equals tenon's **candidate** (source revision x manifest), not agent source.
+  Keep **genome**: unambiguous, and the one place the biology metaphor earns
+  its keep — content that is scored and inherited.
+
+### G9. Ask tenon for a capability-surface export (highest value)
+
+`tenon manifest write` emits pins only — `schema_version`, `agent`,
+`source_fingerprint`, `tenon_version`, `harnesses{harness_version,
+tool_runtimes}`. No inventory of what the agent can actually do. Nothing else
+in the CLI dumps one (`inspect` is integrations-only).
+
+But tenon must compute the resolved surface to compile, and
+[ADR 0024](../adr/0024-add-observation-to-the-revision-leg.md) already puts
+"its change to the capability surface legible before it runs" in the measure.
+Emitting it is arguably already owed.
+
+**Proposed:** `tenon surface show AGENT --diagnostics jsonl` -> resolved skill
+names (including plugin skills merged under precedence), tool names with
+schemas, MCP server names, subagents, schedules.
+
+Then the G1 coherence check is a set operation instead of prose grepping, and
+it serves any consumer, not just this one. It also gives a diffable answer to
+"what did this revision change about what the agent can do" — the ADR 0024 leg.
+
+This is tenon-side scope and mints a new author-facing surface, so it wants its
+own ADR per the north star's amendment rule.
+
+### G2 update: bad assembly does die cheap
+
+Confirmed against the built binary: adding `tools/wordcount.py` to an agent
+with no `pyproject.toml` / `uv.lock` is rejected before anything runs —
+
+    error: pyproject.toml: tool.dependencies.missing: python tools require
+           pyproject.toml at the agent root; none was found
+
+So a dependency-adding crossover or mutation fails the gate rather than burning
+a session. The remaining problem is only that such a mutation can never
+*succeed*: the manifests are not genes and are not announced to mutators.
+Export `EVOLVE_CARRIED` alongside `EVOLVE_GENES`. Do not build dependency
+repair — leave it to a post-combine hook.
