@@ -193,16 +193,38 @@ But tenon must compute the resolved surface to compile, and
 "its change to the capability surface legible before it runs" in the measure.
 Emitting it is arguably already owed.
 
-**Proposed:** `tenon surface show AGENT --diagnostics jsonl` -> resolved skill
-names (including plugin skills merged under precedence), tool names with
-schemas, MCP server names, subagents, schedules.
+**Superseded proposal.** An earlier draft here proposed a new
+`tenon surface show` subcommand. That adds an author-facing command where a
+field would do. Prefer:
+
+**Proposed:** a `--surface` flag on `tenon validate`. The JSONL stream already
+ends with a distinct final object carrying `{agent, fingerprint}`; under
+`--surface` that object also carries the resolved inventory — skill names
+(including plugin skills merged under precedence), tool names with schemas,
+MCP server names, subagents, schedules.
+
+Why this shape and not an expanded manifest: direction. The manifest is an
+*input that constrains* — supplied with `--manifest`, verified against reality,
+pinning what the directory cannot express. A surface is an *output derived from*
+the directory; it adds no information and nothing can disagree with it. Fusing
+them makes one file half-authored and half-derived, so a consumer cannot tell
+which fields it supplies and which tenon fills, and verification loses meaning
+for the derived half. It would also drag a small, stable pinning contract into
+churning whenever the authoring convention gains a component type. The
+fingerprint already covers the derived part: if the surface changed, the
+fingerprint changed.
+
+Why not a new subcommand: zero new commands and schemas (tenet 1); validate
+already derives rather than verifies, so the direction is right; and it lands on
+the call the consumer already makes — evolve's `gate()` parses exactly this
+stream today, so coherence checking costs one flag, not one more process.
 
 Then the G1 coherence check is a set operation instead of prose grepping, and
-it serves any consumer, not just this one. It also gives a diffable answer to
-"what did this revision change about what the agent can do" — the ADR 0024 leg.
+it serves any consumer. It also gives a diffable answer to "what did this
+revision change about what the agent can do" — the ADR 0024 leg.
 
-This is tenon-side scope and mints a new author-facing surface, so it wants its
-own ADR per the north star's amendment rule.
+Still widens a documented output contract, so it wants an ADR — a smaller one
+than a new command would need.
 
 ### G2 update: bad assembly does die cheap
 
