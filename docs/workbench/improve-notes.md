@@ -450,3 +450,61 @@ default: report `pins: not verified` rather than omitting the field, and do the
 same for an absent `--harness` or `--workspace`. Then "did I check what I think
 I checked" is answerable from the output instead of from recalling one's own
 flags. This subsumes the under-run caveat in G14.
+
+### G17. Proposed help text for `check` and `lock` (G14 detail)
+
+House style, from the existing flags: lowercase, terse, no trailing period,
+parenthetical qualifiers.
+
+Global usage lines — three replaced by one, plus the rename:
+
+    tenon check AGENT [--harness <claude|codex>] [--workspace DIR] [--lock PATH] [--catalog] [--diagnostics <prose|jsonl>]
+    tenon lock write AGENT --harness <claude|codex> [--output PATH] [--verify PATH] [--model VALUE]
+
+`tenon check --help`:
+
+    Usage of check:
+      -catalog
+            report the resolved capability inventory: skills, tools with schemas,
+            MCP servers, subagents, schedules
+      -diagnostics string
+            diagnostic rendering: prose or jsonl (default "prose")
+      -harness string
+            also check the source compiles for a target harness: claude or codex
+      -lock string
+            also verify a supplied lock against the current runtime closure
+      -workspace string
+            also compare an applied workspace against a fresh generation (requires -harness)
+
+    With no flags, check gates the source and reports its file inventory and
+    fingerprint. Each flag adds one further check; the result names every check
+    that did not run.
+
+The "also" prefix on every optional flag makes the ladder readable from the help
+itself — nobody has to learn separately that drift is validate plus a workspace.
+The closing paragraph is the G16 fix: it commits the output to naming what it
+skipped, so a bare `check` cannot be mistaken for a full one.
+
+`tenon lock write --help`:
+
+    Usage of lock write:
+      -harness string
+            harness whose executable version to pin: claude or codex
+      -model string
+            optional model to record for the selected harness (advisory: operator-supplied,
+            never resolved automatically, and never verified — the harness owns model selection)
+      -output string
+            output path (defaults to stdout)
+      -verify string
+            optional existing lock to verify against the current closure before writing
+
+Two changes beyond the rename:
+
+- `--manifest` becomes `--verify`. `lock write --lock PATH` reads like an output
+  path when it is an input to check first.
+- `-model` gains "and never verified". The current text says "never resolved
+  automatically", which implies the operator supplies it but leaves the reader
+  to assume it is then checked. `Verify` ignores the field entirely.
+
+Open: `lock write` keeps its verb on the assumption a standalone `lock verify`
+may want to exist. If `write` stays the only verb, `tenon lock AGENT` is simpler.
