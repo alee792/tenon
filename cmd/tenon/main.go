@@ -47,6 +47,7 @@ const usage = `usage:
   tenon apply AGENT --harness <claude|codex> [--workspace DIR] [--pins FILE] [--diagnostics <prose|jsonl>] [--discard-local]
   tenon check AGENT [--harness <claude|codex>] [--emit files,catalog] [--pins FILE] [--write-pins FILE] [--model VALUE] [--diagnostics <prose|jsonl>]
   tenon drift AGENT --workspace DIR --harness <claude|codex> [--pins FILE] [--diagnostics <prose|jsonl>]
+  tenon clean --workspace DIR [--harness <claude|codex>] [--force] [--diagnostics <prose|jsonl>]
   tenon mcp serve AGENT --harness <claude|codex> [--workspace DIR] [--pins FILE]
   tenon run AGENT --workspace DIR --harness <claude|codex> [--conversation ID] [--input jsonl] [--pins FILE] [--timeout DUR] [--turn-timeout DUR]
   tenon schedule trigger AGENT NAME --workspace DIR --harness <claude|codex> --input-id ID [--pins FILE] [--turn-timeout DUR] [--timeout DUR]
@@ -87,6 +88,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runCheck(args[1:], stdout, stderr)
 	case "drift":
 		return runDrift(args[1:], stdout, stderr)
+	case "clean":
+		return runClean(args[1:], stdout, stderr)
 	case "mcp":
 		return runMCP(args[1:], stdin, stdout, stderr)
 	case "run":
