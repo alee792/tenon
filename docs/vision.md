@@ -9,7 +9,7 @@ through thin vendor adapters and without replacing their model loops or
 interfaces.
 
 The author we serve understands files, directories, and common AI concepts —
-instructions, skills, tools — and should never need to learn manifests,
+instructions, skills, tools — and should never need to learn pin sets,
 registration, or harness configuration. Today that person's agent lives as
 vendor-specific configuration scattered through a workspace: hard to read,
 hard to review, and bound to one harness. tenon exists so the agent itself is
@@ -19,7 +19,7 @@ The author is not always a person, and neither consumer outranks the other.
 An improvement loop — an agent or an optimizer revising an agent's own
 files — needs exactly what the human author needs: a legible diff,
 validation before anything runs, and a reproducible runtime. An optional
-agent manifest pins what the folder alone cannot express — harness version,
+pin set pins what the folder alone cannot express — harness version,
 model, tenon version, installed-package identities — so observations made
 outside tenon can be joined back to the exact configuration that produced
 them. Tenon is that loop's substrate, never the loop: it proves a revision is

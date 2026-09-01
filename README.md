@@ -58,14 +58,16 @@ The same directory keeps working as your needs grow — without edits:
   native harness.
 - **Run on a schedule.** `tenon schedule run` executes the Markdown cron
   files under `schedules/`.
+- **Undo it.** `tenon clean --workspace DIR` is apply's inverse: it removes
+  the files tenon recorded as its own, and nothing else.
 - **Stage for containers.** `tenon stage` prepares a complete runnable
   filesystem tree for your OCI builder — see
   [staged agent filesystems](docs/product-spec.md#staged-agent-filesystems).
-- **Automate revision.** `tenon validate . --diagnostics jsonl` emits one
-  JSON line per failure with a stable identifier, so a loop can mutate the
-  agent's files, self-correct, and apply — and every apply carries a source
-  fingerprint tying each run back to the exact configuration that produced
-  it. See
+- **Automate revision.** `tenon check . --format jsonl` emits one JSON line
+  per failure with a stable identifier, so a loop can mutate the agent's
+  files, self-correct, and apply — and the stream's closing object carries
+  the run's `outcome` and a source fingerprint tying each run back to the
+  exact configuration that produced it. See
   [the improvement-loop use case](docs/use-cases.md#give-an-improvement-loop-a-substrate).
 
 For the full set of jobs tenon serves — and the boundary of each — see

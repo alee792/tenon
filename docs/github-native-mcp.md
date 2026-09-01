@@ -8,7 +8,7 @@ provider adapter, no token in agent source, and no manual MCP JSON editing.
 
 Tenon's whole contribution here is the file, the composition around it, and the
 rendering. It never contacts GitHub — not while authoring, not during
-`validate`, not during `apply`, not during `stage`.
+`check`, not during `apply`, not during `stage`.
 
 > **Unmanaged effect boundary:** the authorization the harness obtains is
 > whatever the operator consented to in the browser, and it lives in

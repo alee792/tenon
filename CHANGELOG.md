@@ -9,6 +9,57 @@ The first release, v0.1.0, ships the core described in
 
 ### Added
 
+- `tenon check` is now the single gate over an agent project, absorbing
+  `tenon validate` and `tenon fingerprint show`
+  ([ADR 0027](docs/adr/0027-consolidate-the-read-surface.md)). Without
+  `--harness` it is a portable gate — load, bound, prove tool contracts,
+  prepare tools — that validate never offered; with `--harness` it is
+  everything apply does short of writing, so check and apply still fail
+  identically on the same source. `--emit` names the inventories the gate
+  already resolved and emits them only once it passes, always files before
+  catalog: `--emit files` is the per-file fingerprint stream
+  `fingerprint show` emitted, and `--emit catalog` is the resolved
+  capability inventory (skills including plugin-merged ones with their
+  descriptions, tools with their language, MCP servers, subagents,
+  schedules). A catalog is derived only, never accepted as input.
+
+- The supplied agent manifest is renamed to the **pin set**, and the gate
+  writes it. `--manifest PATH` becomes `--pins FILE` on `apply`, `drift`,
+  `run`, `schedule`, `mcp`, `plugin`, and `check`; the `manifest` command is
+  gone, replaced by `tenon check AGENT --harness H --write-pins FILE`, so a
+  pin set can only be minted by a project that passes the gate right now,
+  bound to the fingerprint just proven. `--model VALUE`, valid only with
+  `--write-pins`, records the operator's advisory model. With `--write-pins`
+  and no `--pins`, check loads for write, so an instructions-free
+  loop-generated directory can still mint the pin set that later proves it.
+  Diagnostic identifiers rename from `manifest.*` to `pins.*`
+  (`manifest.drift.agent` → `pins.drift.agent`, and so on) — a one-time
+  pre-release break in an otherwise stable surface. Integration *package*
+  manifests keep their `manifest.*` identifiers: that document really is a
+  list of contents.
+
+- `tenon clean --workspace DIR [--harness <claude|codex>] [--force]
+  [--format <prose|jsonl>]` is the inverse of apply: it removes the files
+  the workspace's apply record(s) own, prunes the directories emptying them
+  leaves behind, and drops the record(s) — the harness-switch and uninstall
+  stories neither apply nor drift covered. It takes no AGENT, so it works
+  when the source is gone. A file modified since its apply refuses the whole
+  clean unless `--force` is passed; a file tenon never recorded is never
+  touched either way; a workspace with no records succeeds trivially.
+
+- `--diagnostics` is renamed `--format` everywhere, since the flag governs
+  all output rendering rather than diagnostics alone; there is no deprecated
+  alias. An unset `--harness` now falls back to the `TENON_HARNESS`
+  environment variable — the explicit flag always wins, and an invalid
+  environment value is reported as coming from the environment — except in
+  `clean`, which ignores it deliberately so that a bare clean still means
+  "every harness recorded here". Every jsonl stream now ends with one
+  distinct object carrying an `outcome` field: `ok` from check, apply,
+  drift, and clean, `gate_failed` when the source itself is invalid, `drift`
+  when the workspace no longer matches a fresh apply, and `blocked` when
+  clean refuses. Check's success object keeps `agent` and `fingerprint` and
+  adds `pins_written` when `--write-pins` wrote one.
+
 - Standalone MCP connections move from `connections/` to `mcp/`, re-shaped to
   the Agent Plugins 1.0 `mcp.json` server-entry vocabulary (issue #49): a
   remote connection now declares `type: streamable-http` (replacing
