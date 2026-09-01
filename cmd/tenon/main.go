@@ -44,25 +44,24 @@ import (
 const prepareBudget = 5 * time.Minute
 
 const usage = `usage:
-  tenon apply AGENT --harness <claude|codex> [--workspace DIR] [--manifest PATH] [--diagnostics <prose|jsonl>] [--discard-local]
-  tenon check AGENT [--harness <claude|codex>] [--emit files,catalog] [--manifest PATH] [--diagnostics <prose|jsonl>]
-  tenon drift AGENT --workspace DIR --harness <claude|codex> [--manifest PATH] [--diagnostics <prose|jsonl>]
-  tenon manifest write AGENT --harness <claude|codex> [--output PATH] [--manifest PATH] [--model VALUE]
-  tenon mcp serve AGENT --harness <claude|codex> [--workspace DIR] [--manifest PATH]
-  tenon run AGENT --workspace DIR --harness <claude|codex> [--conversation ID] [--input jsonl] [--manifest PATH] [--timeout DUR] [--turn-timeout DUR]
-  tenon schedule trigger AGENT NAME --workspace DIR --harness <claude|codex> --input-id ID [--manifest PATH] [--turn-timeout DUR] [--timeout DUR]
-  tenon schedule run AGENT --workspace DIR --harness <claude|codex> [--manifest PATH] [--turn-timeout DUR] [--max-active-turns N]
+  tenon apply AGENT --harness <claude|codex> [--workspace DIR] [--pins FILE] [--diagnostics <prose|jsonl>] [--discard-local]
+  tenon check AGENT [--harness <claude|codex>] [--emit files,catalog] [--pins FILE] [--write-pins FILE] [--model VALUE] [--diagnostics <prose|jsonl>]
+  tenon drift AGENT --workspace DIR --harness <claude|codex> [--pins FILE] [--diagnostics <prose|jsonl>]
+  tenon mcp serve AGENT --harness <claude|codex> [--workspace DIR] [--pins FILE]
+  tenon run AGENT --workspace DIR --harness <claude|codex> [--conversation ID] [--input jsonl] [--pins FILE] [--timeout DUR] [--turn-timeout DUR]
+  tenon schedule trigger AGENT NAME --workspace DIR --harness <claude|codex> --input-id ID [--pins FILE] [--turn-timeout DUR] [--timeout DUR]
+  tenon schedule run AGENT --workspace DIR --harness <claude|codex> [--pins FILE] [--turn-timeout DUR] [--max-active-turns N]
   tenon stage AGENT --harness <claude|codex> --output DIR
   tenon stage verify --artifact PATH [--prefix DIR]
-  tenon mcp add AGENT NAME --url HTTPS_URL [--header 'K: V'] [--context TEXT] [--manifest PATH]
-  tenon mcp status AGENT [NAME] [--manifest PATH]
-  tenon mcp remove AGENT NAME [--manifest PATH]
+  tenon mcp add AGENT NAME --url HTTPS_URL [--header 'K: V'] [--context TEXT] [--pins FILE]
+  tenon mcp status AGENT [NAME] [--pins FILE]
+  tenon mcp remove AGENT NAME [--pins FILE]
   tenon integration install SOURCE --trust operator
   tenon integration inspect|verify|list|enable|disable|remove [ID]
   tenon integration update ID SOURCE --trust operator
-  tenon plugin fetch AGENT [NAME] [--manifest PATH]
-  tenon plugin update AGENT NAME --rev REV [--manifest PATH]
-  tenon plugin status AGENT [NAME] [--manifest PATH]
+  tenon plugin fetch AGENT [NAME] [--pins FILE]
+  tenon plugin update AGENT NAME --rev REV [--pins FILE]
+  tenon plugin status AGENT [NAME] [--pins FILE]
   tenon version
 `
 
@@ -88,8 +87,6 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runCheck(args[1:], stdout, stderr)
 	case "drift":
 		return runDrift(args[1:], stdout, stderr)
-	case "manifest":
-		return runManifest(args[1:], stdout, stderr)
 	case "mcp":
 		return runMCP(args[1:], stdin, stdout, stderr)
 	case "run":
@@ -132,7 +129,7 @@ func commonFlags(name string, args []string, stderr io.Writer, withWorkspace, wi
 	fs.SetOutput(stderr)
 	harness := fs.String("harness", "", "target harness: claude or codex")
 	mode := fs.String("diagnostics", "prose", "diagnostic rendering: prose or jsonl")
-	manifest := fs.String("manifest", "", "optional supplied agent manifest to verify")
+	manifest := fs.String("pins", "", "supplied pin set to verify against the current runtime closure; fails closed naming the first drifted pin")
 	var ws *string
 	if withWorkspace {
 		ws = fs.String("workspace", "", "workspace directory (defaults to the agent directory)")
@@ -570,7 +567,7 @@ func runRun(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	input := fs.String("input", "jsonl", "input format: jsonl")
 	timeout := fs.Duration("timeout", 2*time.Minute, "whole-process deadline")
 	turnTimeout := fs.Duration("turn-timeout", 0, "per-turn deadline (task mode; 0 disables)")
-	manifestPath := fs.String("manifest", "", "optional supplied agent manifest to verify")
+	manifestPath := fs.String("pins", "", "supplied pin set to verify against the current runtime closure; fails closed naming the first drifted pin")
 
 	positional, ok := parsePositional(fs, args)
 	if !ok || len(positional) != 1 {
@@ -696,7 +693,7 @@ func runScheduleTrigger(args []string, stdout, stderr io.Writer) int {
 	inputID := fs.String("input-id", "", "caller-owned stable occurrence id (required)")
 	turnTimeout := fs.Duration("turn-timeout", 90*time.Second, "per-turn deadline (0 disables)")
 	timeout := fs.Duration("timeout", 2*time.Minute, "whole-process deadline")
-	manifestPath := fs.String("manifest", "", "optional supplied agent manifest to verify")
+	manifestPath := fs.String("pins", "", "supplied pin set to verify against the current runtime closure; fails closed naming the first drifted pin")
 
 	positional, ok := parsePositional(fs, args)
 	if !ok || len(positional) != 2 {
@@ -826,7 +823,7 @@ func runScheduleRun(args []string, stdout, stderr io.Writer) int {
 	workspace := fs.String("workspace", "", "workspace directory (required)")
 	turnTimeout := fs.Duration("turn-timeout", 90*time.Second, "per-turn deadline (0 disables)")
 	maxActive := fs.Int("max-active-turns", schedule.DefaultMaxActive, "concurrent occurrences across distinct schedules")
-	manifestPath := fs.String("manifest", "", "optional supplied agent manifest to verify")
+	manifestPath := fs.String("pins", "", "supplied pin set to verify against the current runtime closure; fails closed naming the first drifted pin")
 
 	positional, ok := parsePositional(fs, args)
 	if !ok || len(positional) != 1 {
@@ -1001,7 +998,7 @@ func parsePositional(fs *flag.FlagSet, args []string) ([]string, bool) {
 
 // proveAgentRoot resolves agent to an absolute path and proves it an agent
 // project by either proof the specification's Instructions section names: a
-// present real regular instructions.md, or a supplied agent manifest whose
+// present real regular instructions.md, or a supplied pin set whose
 // expected source fingerprint matches the directory. expectedFingerprint
 // carries that supplied fingerprint (empty when none), exactly as
 // agentproject.LoadWithManifest takes it; the fingerprint proof necessarily
@@ -1024,7 +1021,7 @@ func proveAgentRoot(agent, cmdName, expectedFingerprint string, stderr io.Writer
 		return root, true
 	}
 	if expectedFingerprint == "" {
-		fmt.Fprintf(stderr, "tenon %s: %s is not a proven agent project; instructions.md must be present as a real regular file, or --manifest must supply a manifest whose expected source fingerprint matches the directory\n", cmdName, agent)
+		fmt.Fprintf(stderr, "tenon %s: %s is not a proven agent project; instructions.md must be present as a real regular file, or --pins must supply a pin set whose expected source fingerprint matches the directory\n", cmdName, agent)
 		return "", false
 	}
 	p, diags, err := agentproject.LoadWithManifest(agent, expectedFingerprint)
@@ -1095,7 +1092,7 @@ func runMCPAdd(args []string, stdout, stderr io.Writer) int {
 	contextFlag := fs.String("context", "", "optional model-facing usage context")
 	packageFlag := fs.String("package", "", "installed package identifier (not supported yet)")
 	capabilityFlag := fs.String("capability", "", "installed capability identifier (not supported yet)")
-	manifestPath := fs.String("manifest", "", "optional supplied agent manifest proving an instructions-free root")
+	manifestPath := fs.String("pins", "", "supplied pin set to verify against the current runtime closure; fails closed naming the first drifted pin")
 
 	positional, ok := parsePositional(fs, args)
 	if !ok || len(positional) != 2 {
@@ -1320,10 +1317,10 @@ func printRequiredEnv(stdout io.Writer, names []string) {
 func runMCPStatus(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("mcp status", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	manifestPath := fs.String("manifest", "", "optional supplied agent manifest proving an instructions-free root")
+	manifestPath := fs.String("pins", "", "supplied pin set to verify against the current runtime closure; fails closed naming the first drifted pin")
 	positional, ok := parsePositional(fs, args)
 	if !ok || len(positional) < 1 || len(positional) > 2 {
-		fmt.Fprintf(stderr, "tenon mcp status: usage: tenon mcp status AGENT [NAME] [--manifest PATH]\n")
+		fmt.Fprintf(stderr, "tenon mcp status: usage: tenon mcp status AGENT [NAME] [--pins FILE]\n")
 		return 2
 	}
 	agent := positional[0]
@@ -1477,10 +1474,10 @@ func installedConnectionHealth(store *integration.Store, c agentproject.Connecti
 func runMCPRemove(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("mcp remove", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	manifestPath := fs.String("manifest", "", "optional supplied agent manifest proving an instructions-free root")
+	manifestPath := fs.String("pins", "", "supplied pin set to verify against the current runtime closure; fails closed naming the first drifted pin")
 	positional, ok := parsePositional(fs, args)
 	if !ok || len(positional) != 2 {
-		fmt.Fprintf(stderr, "tenon mcp remove: usage: tenon mcp remove AGENT NAME [--manifest PATH]\n")
+		fmt.Fprintf(stderr, "tenon mcp remove: usage: tenon mcp remove AGENT NAME [--pins FILE]\n")
 		return 2
 	}
 	agent, name := positional[0], positional[1]

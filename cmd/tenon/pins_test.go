@@ -28,31 +28,31 @@ func withFakeResolver(t *testing.T, harnessVersion string, pkgs []manifest.Packa
 	}
 }
 
-// writeManifestFor runs `tenon manifest write` for agent with the active fake
+// writePinsFor runs `tenon check --write-pins` for agent with the active fake
 // resolver and returns the written manifest path.
-func writeManifestFor(t *testing.T, agent string) string {
+func writePinsFor(t *testing.T, agent string) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "manifest.json")
+	path := filepath.Join(t.TempDir(), "pins.json")
 	var out, errb bytes.Buffer
-	if code := run([]string{"manifest", "write", agent, "--harness", "claude", "--output", path}, nil, &out, &errb); code != 0 {
-		t.Fatalf("manifest write exit %d: %s", code, errb.String())
+	if code := run([]string{"check", agent, "--harness", "claude", "--write-pins", path}, nil, &out, &errb); code != 0 {
+		t.Fatalf("check --write-pins exit %d: %s", code, errb.String())
 	}
 	return path
 }
 
-// TestManifestWriteByteIdentical proves acceptance item 12's determinism clause:
+// TestCheckWritePinsByteIdentical proves acceptance item 12's determinism clause:
 // writing the manifest for an unchanged closure is byte-identical across runs.
-func TestManifestWriteByteIdentical(t *testing.T) {
+func TestCheckWritePinsByteIdentical(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
 	withFakeResolver(t, "2.1.240", []manifest.PackageIdentity{{ID: "gh", ManifestSHA256: "abc123"}})
 
 	a := filepath.Join(t.TempDir(), "a.json")
 	b := filepath.Join(t.TempDir(), "b.json")
 	var out, errb bytes.Buffer
-	if code := run([]string{"manifest", "write", agent, "--harness", "claude", "--output", a}, nil, &out, &errb); code != 0 {
+	if code := run([]string{"check", agent, "--harness", "claude", "--write-pins", a}, nil, &out, &errb); code != 0 {
 		t.Fatalf("first write failed: %s", errb.String())
 	}
-	if code := run([]string{"manifest", "write", agent, "--harness", "claude", "--output", b}, nil, &out, &errb); code != 0 {
+	if code := run([]string{"check", agent, "--harness", "claude", "--write-pins", b}, nil, &out, &errb); code != 0 {
 		t.Fatalf("second write failed: %s", errb.String())
 	}
 	ba, _ := os.ReadFile(a)
@@ -70,13 +70,13 @@ func TestManifestWriteByteIdentical(t *testing.T) {
 func TestApplyManifestDriftFailsClosed(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
 	withFakeResolver(t, "2.1.240", nil)
-	manifestPath := writeManifestFor(t, agent)
+	manifestPath := writePinsFor(t, agent)
 
 	// Drift the closure: a different harness version.
 	withFakeResolver(t, "9.9.9", nil)
 	workspace := t.TempDir()
 	var out, errb bytes.Buffer
-	code := run([]string{"apply", agent, "--harness", "claude", "--workspace", workspace, "--manifest", manifestPath}, nil, &out, &errb)
+	code := run([]string{"apply", agent, "--harness", "claude", "--workspace", workspace, "--pins", manifestPath}, nil, &out, &errb)
 	if code == 0 {
 		t.Fatalf("apply must fail on drift; stdout=%s stderr=%s", out.String(), errb.String())
 	}
@@ -97,11 +97,11 @@ func TestApplyManifestDriftFailsClosed(t *testing.T) {
 func TestApplyManifestMatchRecordsIdentity(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
 	withFakeResolver(t, "2.1.240", []manifest.PackageIdentity{{ID: "gh", ManifestSHA256: "abc123"}})
-	manifestPath := writeManifestFor(t, agent)
+	manifestPath := writePinsFor(t, agent)
 
 	workspace := t.TempDir()
 	var out, errb bytes.Buffer
-	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", workspace, "--manifest", manifestPath}, nil, &out, &errb); code != 0 {
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", workspace, "--pins", manifestPath}, nil, &out, &errb); code != 0 {
 		t.Fatalf("apply with matching manifest must succeed: %s", errb.String())
 	}
 	want := parsedIdentity(t, manifestPath)
@@ -141,11 +141,11 @@ func TestManifestValueNeverInGeneratedContent(t *testing.T) {
 	const conspicuousHash = "deadbeefconspicuoushash"
 	agent := writeAgent(t, "my-agent", validInstructions)
 	withFakeResolver(t, conspicuousVersion, []manifest.PackageIdentity{{ID: "conspicuous-pkg", ManifestSHA256: conspicuousHash}})
-	manifestPath := writeManifestFor(t, agent)
+	manifestPath := writePinsFor(t, agent)
 
 	workspace := t.TempDir()
 	var out, errb bytes.Buffer
-	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", workspace, "--manifest", manifestPath}, nil, &out, &errb); code != 0 {
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", workspace, "--pins", manifestPath}, nil, &out, &errb); code != 0 {
 		t.Fatalf("apply failed: %s", errb.String())
 	}
 	identity := parsedIdentity(t, manifestPath)
@@ -184,13 +184,13 @@ func TestManifestValueNeverInGeneratedContent(t *testing.T) {
 func TestCheckManifestReportsSameDriftAsApply(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
 	withFakeResolver(t, "2.1.240", nil)
-	manifestPath := writeManifestFor(t, agent)
+	manifestPath := writePinsFor(t, agent)
 
 	withFakeResolver(t, "9.9.9", nil) // drift
 	var checkOut, applyOut, errb bytes.Buffer
-	checkCode := run([]string{"check", agent, "--harness", "claude", "--manifest", manifestPath, "--diagnostics", "jsonl"}, nil, &checkOut, &errb)
+	checkCode := run([]string{"check", agent, "--harness", "claude", "--pins", manifestPath, "--diagnostics", "jsonl"}, nil, &checkOut, &errb)
 	applyWorkspace := t.TempDir()
-	applyCode := run([]string{"apply", agent, "--harness", "claude", "--workspace", applyWorkspace, "--manifest", manifestPath, "--diagnostics", "jsonl"}, nil, &applyOut, &errb)
+	applyCode := run([]string{"apply", agent, "--harness", "claude", "--workspace", applyWorkspace, "--pins", manifestPath, "--diagnostics", "jsonl"}, nil, &applyOut, &errb)
 
 	if checkCode == 0 || applyCode == 0 {
 		t.Fatalf("both must fail on drift: check=%d apply=%d", checkCode, applyCode)
@@ -198,7 +198,7 @@ func TestCheckManifestReportsSameDriftAsApply(t *testing.T) {
 	if checkDiagnostics(checkOut.String()) != applyOut.String() {
 		t.Fatalf("check and apply must report identical drift:\ncheck: %s\napply: %s", checkOut.String(), applyOut.String())
 	}
-	if !strings.Contains(checkOut.String(), "manifest.drift.harness-version") {
+	if !strings.Contains(checkOut.String(), "pins.drift.harness-version") {
 		t.Fatalf("drift diagnostic must carry the stable identifier: %s", checkOut.String())
 	}
 	if _, err := os.Stat(filepath.Join(applyWorkspace, "CLAUDE.md")); !os.IsNotExist(err) {
@@ -237,29 +237,60 @@ func recordManifest(t *testing.T, workspace string) string {
 	return record.Manifest
 }
 
-// TestManifestWriteProvesInstructionsFreeRoot proves the RSI-substrate flow: an
+// TestCheckWritePinsProvesInstructionsFreeRoot proves the RSI-substrate flow: an
 // instructions-free directory (a legitimate loop-generated candidate) can mint
-// its own proving manifest with `manifest write`, and applying with that
+// its own proving manifest with `check --write-pins`, and applying with that
 // manifest then proves the root that instructions.md would otherwise prove.
-func TestManifestWriteProvesInstructionsFreeRoot(t *testing.T) {
+func TestCheckWritePinsProvesInstructionsFreeRoot(t *testing.T) {
 	agent := writeAgent(t, "my-agent", "") // no instructions.md
 	withFakeResolver(t, "2.1.240", nil)
 
-	manifestPath := filepath.Join(t.TempDir(), "manifest.json")
+	manifestPath := filepath.Join(t.TempDir(), "pins.json")
 	var out, errb bytes.Buffer
-	if code := run([]string{"manifest", "write", agent, "--harness", "claude", "--output", manifestPath}, nil, &out, &errb); code != 0 {
+	if code := run([]string{"check", agent, "--harness", "claude", "--write-pins", manifestPath}, nil, &out, &errb); code != 0 {
 		t.Fatalf("manifest write must self-prove an instructions-free root: %s", errb.String())
 	}
 
 	workspace := t.TempDir()
 	out.Reset()
 	errb.Reset()
-	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", workspace, "--manifest", manifestPath}, nil, &out, &errb); code != 0 {
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", workspace, "--pins", manifestPath}, nil, &out, &errb); code != 0 {
 		t.Fatalf("apply with the self-proving manifest must succeed: %s", errb.String())
 	}
 	// The manifest proved the root; an instructions-free project generates an
 	// empty always-on surface, so no CLAUDE.md exists but the apply recorded.
 	if _, err := os.Stat(filepath.Join(workspace, ".tenon", "apply-claude.json")); err != nil {
 		t.Fatalf("apply record missing after manifest-proven apply: %v", err)
+	}
+}
+
+// TestCheckWritePinsUsageErrors proves the two flag preconditions the gate
+// enforces before it loads anything: resolving a closure to write is
+// harness-specific, so --write-pins requires --harness; and a model is only
+// ever recorded into a pin set being written, so --model requires
+// --write-pins. Both are usage errors (exit 2), not gate failures.
+func TestCheckWritePinsUsageErrors(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	withFakeResolver(t, "2.1.240", nil)
+	path := filepath.Join(t.TempDir(), "pins.json")
+
+	var out, errb bytes.Buffer
+	if code := run([]string{"check", agent, "--write-pins", path}, nil, &out, &errb); code != 2 {
+		t.Fatalf("--write-pins without --harness must be a usage error, got %d: %s", code, errb.String())
+	}
+	if !strings.Contains(errb.String(), "--write-pins requires --harness") {
+		t.Fatalf("the usage error must name the missing flag: %s", errb.String())
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("a refused --write-pins must write nothing")
+	}
+
+	out.Reset()
+	errb.Reset()
+	if code := run([]string{"check", agent, "--harness", "claude", "--model", "some-model"}, nil, &out, &errb); code != 2 {
+		t.Fatalf("--model without --write-pins must be a usage error, got %d: %s", code, errb.String())
+	}
+	if !strings.Contains(errb.String(), "--model requires --write-pins") {
+		t.Fatalf("the usage error must name the missing flag: %s", errb.String())
 	}
 }

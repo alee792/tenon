@@ -449,11 +449,11 @@ func TestDriftDetectsStaleRecordHashDespiteMatchingDisk(t *testing.T) {
 func TestDriftManifestPinnedModelReportsClean(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
 	withFakeResolver(t, "2.1.240", nil)
-	manifestPath := writeManifestForModel(t, agent, "claude", "claude-opus-4")
+	manifestPath := writePinsForModel(t, agent, "claude", "claude-opus-4")
 
 	ws := t.TempDir()
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--manifest", manifestPath}, nil, &stdout, &stderr); code != 0 {
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--pins", manifestPath}, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("apply exit %d: %s", code, stderr.String())
 	}
 	if _, err := os.Stat(filepath.Join(ws, ".claude", "settings.json")); err != nil {
@@ -462,7 +462,7 @@ func TestDriftManifestPinnedModelReportsClean(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	code := run([]string{"drift", agent, "--harness", "claude", "--workspace", ws, "--manifest", manifestPath}, nil, &stdout, &stderr)
+	code := run([]string{"drift", agent, "--harness", "claude", "--workspace", ws, "--pins", manifestPath}, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("drift exit %d, want 0 (clean)\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
 	}

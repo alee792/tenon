@@ -390,7 +390,7 @@ func TestCheckRejectsUnusableFlagCombinations(t *testing.T) {
 	if code := run([]string{"check", agent, "--emit", "files,bogus"}, nil, &stdout, &stderr); code != 2 {
 		t.Fatalf("an unknown --emit value must be a usage error even beside a known one, got %d", code)
 	}
-	if code := run([]string{"check", agent, "--manifest", "/nonexistent/manifest.json"}, nil, &stdout, &stderr); code != 2 {
+	if code := run([]string{"check", agent, "--pins", "/nonexistent/manifest.json"}, nil, &stdout, &stderr); code != 2 {
 		t.Fatalf("--manifest without --harness must be a usage error, got %d", code)
 	}
 	if code := run([]string{"check", agent, "--harness", "bogus"}, nil, &stdout, &stderr); code != 2 {
@@ -2595,19 +2595,19 @@ func TestConnectionCommandsProveInstructionsFreeRootByManifest(t *testing.T) {
 	agent := writeAgent(t, "my-agent", "") // no instructions.md
 	withFakeResolver(t, "2.1.240", nil)
 
-	manifestPath := filepath.Join(t.TempDir(), "manifest.json")
+	manifestPath := filepath.Join(t.TempDir(), "pins.json")
 	mintManifest := func() {
 		t.Helper()
 		var out, errb bytes.Buffer
-		if code := run([]string{"manifest", "write", agent, "--harness", "claude", "--output", manifestPath}, nil, &out, &errb); code != 0 {
-			t.Fatalf("manifest write exit %d: %s", code, errb.String())
+		if code := run([]string{"check", agent, "--harness", "claude", "--write-pins", manifestPath}, nil, &out, &errb); code != 0 {
+			t.Fatalf("check --write-pins exit %d: %s", code, errb.String())
 		}
 	}
 	mintManifest()
 
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"mcp", "add", agent, "catalog",
-		"--url", "https://example.com/mcp", "--manifest", manifestPath}, nil, &stdout, &stderr); code != 0 {
+		"--url", "https://example.com/mcp", "--pins", manifestPath}, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("add on a manifest-proven root exit %d: %s", code, stderr.String())
 	}
 	path := filepath.Join(agent, "mcp", "catalog.md")
@@ -2620,7 +2620,7 @@ func TestConnectionCommandsProveInstructionsFreeRootByManifest(t *testing.T) {
 	mintManifest()
 	stdout.Reset()
 	stderr.Reset()
-	if code := run([]string{"mcp", "status", agent, "--manifest", manifestPath}, nil, &stdout, &stderr); code != 0 {
+	if code := run([]string{"mcp", "status", agent, "--pins", manifestPath}, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("status on a manifest-proven root exit %d: %s", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "catalog: target=remote") {
@@ -2629,7 +2629,7 @@ func TestConnectionCommandsProveInstructionsFreeRootByManifest(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	if code := run([]string{"mcp", "remove", agent, "catalog", "--manifest", manifestPath}, nil, &stdout, &stderr); code != 0 {
+	if code := run([]string{"mcp", "remove", agent, "catalog", "--pins", manifestPath}, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("remove on a manifest-proven root exit %d: %s", code, stderr.String())
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
@@ -2658,11 +2658,11 @@ func TestConnectionCommandsRefuseUnprovenRoot(t *testing.T) {
 		t.Fatal("expected failure: an instructions-free root with no manifest is unproven")
 	}
 
-	manifestPath := filepath.Join(t.TempDir(), "manifest.json")
+	manifestPath := filepath.Join(t.TempDir(), "pins.json")
 	stdout.Reset()
 	stderr.Reset()
-	if code := run([]string{"manifest", "write", agent, "--harness", "claude", "--output", manifestPath}, nil, &stdout, &stderr); code != 0 {
-		t.Fatalf("manifest write exit %d: %s", code, stderr.String())
+	if code := run([]string{"check", agent, "--harness", "claude", "--write-pins", manifestPath}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("check --write-pins exit %d: %s", code, stderr.String())
 	}
 	// Change the source after the manifest pinned it: the expected fingerprint
 	// no longer matches, so the manifest proves nothing.
@@ -2678,7 +2678,7 @@ func TestConnectionCommandsRefuseUnprovenRoot(t *testing.T) {
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if code := run([]string{"mcp", "status", agent, "--manifest", manifestPath}, nil, &stdout, &stderr); code == 0 {
+	if code := run([]string{"mcp", "status", agent, "--pins", manifestPath}, nil, &stdout, &stderr); code == 0 {
 		t.Fatal("expected failure: a stale manifest does not prove the root")
 	}
 	if !strings.Contains(stderr.String(), "fingerprint") {

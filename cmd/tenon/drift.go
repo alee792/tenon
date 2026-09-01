@@ -50,7 +50,7 @@ func runDrift(args []string, stdout, stderr io.Writer) int {
 	harnessName := fs.String("harness", "", "target harness: claude or codex")
 	workspace := fs.String("workspace", "", "workspace directory (required)")
 	mode := fs.String("diagnostics", "prose", "diagnostic rendering: prose or jsonl")
-	manifestPath := fs.String("manifest", "", "optional supplied agent manifest to verify")
+	manifestPath := fs.String("pins", "", "supplied pin set to verify against the current runtime closure; fails closed naming the first drifted pin")
 
 	positional, ok := parsePositional(fs, args)
 	if !ok || len(positional) != 1 {

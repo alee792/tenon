@@ -12,6 +12,8 @@ import (
 	"github.com/alee792/tenon/internal/apply"
 	"github.com/alee792/tenon/internal/claude"
 	"github.com/alee792/tenon/internal/codex"
+	"github.com/alee792/tenon/internal/diagnostics"
+	"github.com/alee792/tenon/internal/manifest"
 	"github.com/alee792/tenon/internal/version"
 )
 
@@ -22,6 +24,9 @@ type checkResult struct {
 	Outcome     string `json:"outcome"`
 	Agent       string `json:"agent"`
 	Fingerprint string `json:"fingerprint"`
+	// PinsWritten is the path --write-pins wrote the resolved pin set to,
+	// omitted entirely when the gate wrote no pins.
+	PinsWritten string `json:"pins_written,omitempty"`
 }
 
 // gateFailedResult terminates the jsonl stream when the gate rejects the
@@ -69,18 +74,23 @@ type (
 
 // runCheck is the single gate over an agent project. Without --harness it is
 // the portable gate: load, prepare tools, report. With --harness it is
-// additionally everything apply would do short of writing — a supplied
-// manifest verified before any generation, then a generation dry-run against
+// additionally everything apply would do short of writing — a supplied pin
+// set verified before any generation, then a generation dry-run against
 // the same Target apply builds — so check and apply fail identically on the
 // same source. --emit adds the inventories the gate already resolved: the
 // per-file fingerprint contributions and the capability catalog, in that
 // order whatever order the flag names them, and only once the gate passes.
+// --write-pins resolves and writes the current closure once the gate has
+// passed, so the pin set a later run verifies is only ever minted by a
+// project that passes the gate now.
 func runCheck(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("check", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	harnessName := fs.String("harness", "", "target harness: claude or codex (omit for the portable gate)")
 	mode := fs.String("diagnostics", "prose", "diagnostic rendering: prose or jsonl")
-	manifestPath := fs.String("manifest", "", "optional supplied agent manifest to verify; requires --harness")
+	manifestPath := fs.String("pins", "", "supplied pin set to verify against the current runtime closure; fails closed naming the first drifted pin")
+	writePins := fs.String("write-pins", "", "write the resolved pin set for the current closure to FILE once the gate passes; requires --harness")
+	model := fs.String("model", "", "optional model to record in the written pin set (advisory: operator-supplied, never resolved automatically, and never verified — the harness owns model selection)")
 	emit := fs.String("emit", "", "comma-separated inventories to emit on success: files, catalog")
 
 	positional, ok := parsePositional(fs, args)
@@ -110,11 +120,22 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "tenon check: --diagnostics must be prose or jsonl")
 		return 2
 	}
-	// Manifest verification is harness-specific: the closure it pins is the
+	// Pin verification is harness-specific: the closure a pin set pins is the
 	// one generation for a named harness resolves, so there is nothing to
-	// verify against without one.
+	// verify against without one. Writing pins resolves that same closure, so
+	// it carries the same requirement.
 	if *manifestPath != "" && driver == nil {
-		fmt.Fprintln(stderr, "tenon check: --manifest requires --harness")
+		fmt.Fprintln(stderr, "tenon check: --pins requires --harness")
+		return 2
+	}
+	if *writePins != "" && driver == nil {
+		fmt.Fprintln(stderr, "tenon check: --write-pins requires --harness")
+		return 2
+	}
+	// A model is only ever recorded into a pin set being written; there is
+	// nothing for it to mean on a verify-only run.
+	if *model != "" && *writePins == "" {
+		fmt.Fprintln(stderr, "tenon check: --model requires --write-pins")
 		return 2
 	}
 	emitFiles, emitCatalog := false, false
@@ -136,12 +157,21 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "tenon check:", err)
 		return 1
 	}
-	p, diags, err := agentproject.LoadWithManifest(agent, expectedFingerprint(supplied))
+	// Writing pins without a supplied pin set loads for write, which accepts
+	// an instructions-free root: the gate mints the very pin set that later
+	// proves that root. Everything downstream is identical either way.
+	var p *agentproject.Project
+	var diags *diagnostics.List
+	if *writePins != "" && supplied == nil {
+		p, diags, err = agentproject.LoadForManifestWrite(agent)
+	} else {
+		p, diags, err = agentproject.LoadWithManifest(agent, expectedFingerprint(supplied))
+	}
 	if err != nil {
 		fmt.Fprintln(stderr, "tenon check:", err)
 		return 1
 	}
-	// A supplied manifest reports its closure drift before any generation, so
+	// A supplied pin set reports its closure drift before any generation, so
 	// check and apply fail identically.
 	if p != nil && !diags.HasErrors() && supplied != nil {
 		if err := verifyManifestDiag(p, driver.Harness(), resolveIntegrationStoreBase(), supplied, diags); err != nil {
@@ -196,6 +226,32 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	// The gate has passed, so the closure this resolves is one a passing
+	// project actually produces. The bytes for an unchanged closure are
+	// byte-identical across runs (no timestamps), so a written pin set is an
+	// ordinary versioned file. --model records the operator's advisory choice
+	// for the selected harness; the gate never resolves a model itself.
+	if *writePins != "" {
+		storeBase := resolveIntegrationStoreBase()
+		current, err := manifest.Resolve(p, *harnessName, version.Version, manifestResolverFor(p, *harnessName, storeBase))
+		if err != nil {
+			fmt.Fprintln(stderr, "tenon check:", err)
+			return 1
+		}
+		if *model != "" {
+			pins := current.Harnesses[*harnessName]
+			pins.Model = *model
+			current.Harnesses[*harnessName] = pins
+		}
+		if err := writeFileAtomic(*writePins, current.Bytes()); err != nil {
+			fmt.Fprintln(stderr, "tenon check:", err)
+			return 1
+		}
+		if !jsonl {
+			fmt.Fprintf(stdout, "wrote pins for agent %s (%s) to %s\n", p.Name, *harnessName, *writePins)
+		}
+	}
+
 	if emitFiles {
 		if err := emitFingerprintFiles(p, jsonl, stdout); err != nil {
 			fmt.Fprintln(stderr, "tenon check:", err)
@@ -210,7 +266,7 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 	}
 
 	if jsonl {
-		if err := writeResult(stdout, checkResult{Outcome: "ok", Agent: p.Name, Fingerprint: p.Fingerprint}); err != nil {
+		if err := writeResult(stdout, checkResult{Outcome: "ok", Agent: p.Name, Fingerprint: p.Fingerprint, PinsWritten: *writePins}); err != nil {
 			fmt.Fprintln(stderr, "tenon check:", err)
 			return 1
 		}
