@@ -218,8 +218,8 @@ func TestDriftJSONLIdentifiersAreStableAndParseable(t *testing.T) {
 }
 
 // TestDriftValidateApplyParityUntouched proves drift's addition changed
-// nothing about validate or apply's own diagnostics or exit codes for a
-// project that already fails: validate and apply must still agree exactly
+// nothing about check or apply's own diagnostics or exit codes for a
+// project that already fails: check and apply must still agree exactly
 // as before, and a passing apply must still succeed and write records
 // exactly as before.
 func TestDriftValidateApplyParityUntouched(t *testing.T) {
@@ -232,15 +232,15 @@ func TestDriftValidateApplyParityUntouched(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var validateOut, applyOut, stderr bytes.Buffer
-	validateCode := run([]string{"validate", agent, "--harness", "claude", "--diagnostics", "jsonl"}, nil, &validateOut, &stderr)
+	var checkOut, applyOut, stderr bytes.Buffer
+	checkCode := run([]string{"check", agent, "--harness", "claude", "--diagnostics", "jsonl"}, nil, &checkOut, &stderr)
 	applyCode := run([]string{"apply", agent, "--harness", "claude", "--diagnostics", "jsonl"}, nil, &applyOut, &stderr)
-	if validateCode != 1 || applyCode != 1 {
-		t.Fatalf("both must still fail with exit 1: validate=%d apply=%d", validateCode, applyCode)
+	if checkCode != 1 || applyCode != 1 {
+		t.Fatalf("both must still fail with exit 1: check=%d apply=%d", checkCode, applyCode)
 	}
-	if validateOut.String() != applyOut.String() {
-		t.Fatalf("validate and apply must still report identical diagnostics:\n%s\n%s",
-			validateOut.String(), applyOut.String())
+	if checkDiagnostics(checkOut.String()) != applyOut.String() {
+		t.Fatalf("check and apply must still report identical diagnostics:\n%s\n%s",
+			checkOut.String(), applyOut.String())
 	}
 }
 
@@ -475,7 +475,7 @@ func TestDriftManifestPinnedModelReportsClean(t *testing.T) {
 // improvement loop reading drift.file.modified in jsonl mode gets the
 // unified diff in the finding's own detail field, not only in prose-mode
 // stdout it never reads. It also proves the driftResult summary carries
-// fingerprint, matching validateResult/applyResult's shape.
+// fingerprint, matching checkResult/applyResult's shape.
 func TestDriftJSONLModifiedFindingCarriesDiff(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
 	ws := t.TempDir()

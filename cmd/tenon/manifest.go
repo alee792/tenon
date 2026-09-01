@@ -63,7 +63,7 @@ func readSuppliedManifest(path string) (*manifest.Manifest, error) {
 
 // verifyManifestDiag resolves the current closure and verifies the supplied
 // manifest against it, recording drift as a diagnostic whose identifier is the
-// stable typed-error code so validate and apply report identical, machine-
+// stable typed-error code so check and apply report identical, machine-
 // readable failures. A nil manifest is a no-op. The returned error is reserved
 // for an unresolvable closure (an environment failure), never for drift.
 func verifyManifestDiag(p *agentproject.Project, harnessName, storeBase string, supplied *manifest.Manifest, diags *diagnostics.List) error {
@@ -121,7 +121,7 @@ func manifestIdentity(supplied *manifest.Manifest) string {
 
 // manifestModel returns the supplied manifest's pinned model for
 // harnessName, or "" when no manifest was supplied or that harness pins no
-// model (ADR 0020). apply and validate thread the result into
+// model (ADR 0020). apply and check thread the result into
 // apply.Target.Model identically, so their generation — and any resulting
 // diagnostics — match.
 func manifestModel(supplied *manifest.Manifest, harnessName string) string {
@@ -278,7 +278,7 @@ func parseVersion(s string) string {
 // actually resolve to without a second, redundant network fetch of the
 // pinned interpreter — `uv` does not cache that download across separate
 // --install-dir targets, so resolving the real identity here would double
-// the network cost of every apply and validate. Once preparation has
+// the network cost of every apply and check. Once preparation has
 // actually run, the staged artifact manifest carries the full identity
 // (internal/stage.RuntimeInfo.Interpreters).
 func resolveToolRuntimes(p *agentproject.Project) (deno, uv, goVer, python string, err error) {

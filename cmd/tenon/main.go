@@ -45,9 +45,8 @@ const prepareBudget = 5 * time.Minute
 
 const usage = `usage:
   tenon apply AGENT --harness <claude|codex> [--workspace DIR] [--manifest PATH] [--diagnostics <prose|jsonl>] [--discard-local]
-  tenon validate AGENT --harness <claude|codex> [--manifest PATH] [--diagnostics <prose|jsonl>]
+  tenon check AGENT [--harness <claude|codex>] [--emit files,catalog] [--manifest PATH] [--diagnostics <prose|jsonl>]
   tenon drift AGENT --workspace DIR --harness <claude|codex> [--manifest PATH] [--diagnostics <prose|jsonl>]
-  tenon fingerprint show AGENT [--diagnostics <prose|jsonl>]
   tenon manifest write AGENT --harness <claude|codex> [--output PATH] [--manifest PATH] [--model VALUE]
   tenon mcp serve AGENT --harness <claude|codex> [--workspace DIR] [--manifest PATH]
   tenon run AGENT --workspace DIR --harness <claude|codex> [--conversation ID] [--input jsonl] [--manifest PATH] [--timeout DUR] [--turn-timeout DUR]
@@ -85,16 +84,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "apply":
 		return runApply(args[1:], stdout, stderr)
-	case "validate":
-		return runValidate(args[1:], stdout, stderr)
+	case "check":
+		return runCheck(args[1:], stdout, stderr)
 	case "drift":
 		return runDrift(args[1:], stdout, stderr)
-	case "fingerprint":
-		if len(args) < 2 || args[1] != "show" {
-			fmt.Fprintf(stderr, "tenon fingerprint: the only subcommand is show\n%s", usage)
-			return 2
-		}
-		return runFingerprintShow(args[2:], stdout, stderr)
 	case "manifest":
 		return runManifest(args[1:], stdout, stderr)
 	case "mcp":
@@ -209,12 +202,6 @@ func render(diags *diagnostics.List, jsonl bool, stdout, stderr io.Writer) {
 	_ = diags.WriteProse(stderr)
 }
 
-// validateResult is the jsonl-mode result summary for a successful validate.
-type validateResult struct {
-	Agent       string `json:"agent"`
-	Fingerprint string `json:"fingerprint"`
-}
-
 // applyResult is the jsonl-mode result summary for a successful apply. Field
 // names follow apply.Record's existing json tags (snake_case). ManagedTools
 // names only the tools exposed through tenon's managed MCP boundary — native
@@ -260,81 +247,6 @@ func resolveExecutable() (string, error) {
 		return "", fmt.Errorf("the tenon executable must be a regular file: %s", resolved)
 	}
 	return resolved, nil
-}
-
-func runValidate(args []string, stdout, stderr io.Writer) int {
-	agent, _, driver, jsonl, manifestPath, _, ok := commonFlags("validate", args, stderr, false, false)
-	if !ok {
-		return 2
-	}
-	supplied, err := readSuppliedManifest(manifestPath)
-	if err != nil {
-		fmt.Fprintln(stderr, "tenon validate:", err)
-		return 1
-	}
-	p, diags, err := agentproject.LoadWithManifest(agent, expectedFingerprint(supplied))
-	if err != nil {
-		fmt.Fprintln(stderr, "tenon validate:", err)
-		return 1
-	}
-	// When a manifest is supplied, validate reports the same closure drift apply
-	// would, before any generation, so validate and apply fail identically.
-	if p != nil && !diags.HasErrors() && supplied != nil {
-		if err := verifyManifestDiag(p, driver.Harness(), resolveIntegrationStoreBase(), supplied, diags); err != nil {
-			fmt.Fprintln(stderr, "tenon validate:", err)
-			return 1
-		}
-	}
-	if p != nil && !diags.HasErrors() {
-		// Validate resolves exactly what apply would — the same executable
-		// and apply's default workspace — so generation and its warnings are
-		// identical; the files themselves are discarded.
-		executable, err := resolveExecutable()
-		if err != nil {
-			fmt.Fprintln(stderr, "tenon validate:", err)
-			return 1
-		}
-		workspace, err := filepath.Abs(agent)
-		if err != nil {
-			fmt.Fprintln(stderr, "tenon validate:", err)
-			return 1
-		}
-		// Tool preparation is the same work apply does, in the same order,
-		// against a throwaway cache that is deleted afterwards: validate
-		// reports apply's tool failures while writing nothing to the
-		// workspace.
-		cache := ""
-		if len(p.Tools) > 0 {
-			cache, err = os.MkdirTemp("", "tenon-tools-")
-			if err != nil {
-				fmt.Fprintln(stderr, "tenon validate:", err)
-				return 1
-			}
-			defer os.RemoveAll(cache)
-		}
-		if prepareTools(p, workspace, cache, diags) {
-			_ = driver.Generate(p, apply.Target{
-				Workspace:        workspace,
-				Executable:       executable,
-				IntegrationStore: resolveIntegrationStoreBase(),
-				TenonVersion:     version.Version,
-				Model:            manifestModel(supplied, driver.Harness()),
-			}, diags)
-		}
-	}
-	render(diags, jsonl, stdout, stderr)
-	if p == nil || diags.HasErrors() {
-		return 1
-	}
-	if jsonl {
-		if err := writeResult(stdout, validateResult{Agent: p.Name, Fingerprint: p.Fingerprint}); err != nil {
-			fmt.Fprintln(stderr, "tenon validate:", err)
-			return 1
-		}
-	} else {
-		fmt.Fprintf(stdout, "valid: agent %s (fingerprint %s)\n", p.Name, p.Fingerprint)
-	}
-	return 0
 }
 
 func runApply(args []string, stdout, stderr io.Writer) int {
@@ -433,91 +345,6 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// fingerprintRollupJSON is the jsonl rendering of the final rolled-up
-// fingerprint line.
-type fingerprintRollupJSON struct {
-	Fingerprint string `json:"fingerprint"`
-}
-
-// runFingerprintShow prints every authored file that feeds AGENT's
-// fingerprint — its path, its own content hash, and its executable bit —
-// sorted the same way the rollup sorts them, then the rolled-up fingerprint
-// itself. It never recomputes a hash: agentproject.Load already built the
-// per-file list, and this only renders what Load returned. Tool preparation
-// runs first, exactly as validate and apply require it, so a project whose
-// tools cannot be built never reports a fingerprint as though it were clean.
-func runFingerprintShow(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("fingerprint show", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	diagMode := fs.String("diagnostics", "prose", "diagnostic rendering: prose or jsonl")
-	positional, ok := parsePositional(fs, args)
-	if !ok || len(positional) != 1 {
-		fmt.Fprintf(stderr, "tenon fingerprint show: usage: tenon fingerprint show AGENT [--diagnostics <prose|jsonl>]\n")
-		return 2
-	}
-	agent := positional[0]
-	jsonl := false
-	switch *diagMode {
-	case "prose":
-	case "jsonl":
-		jsonl = true
-	default:
-		fmt.Fprintf(stderr, "tenon fingerprint show: --diagnostics must be prose or jsonl\n")
-		return 2
-	}
-
-	p, diags, err := agentproject.Load(agent)
-	if err != nil {
-		fmt.Fprintln(stderr, "tenon fingerprint show:", err)
-		return 1
-	}
-	if p != nil && !diags.HasErrors() {
-		workspace, err := filepath.Abs(agent)
-		if err != nil {
-			fmt.Fprintln(stderr, "tenon fingerprint show:", err)
-			return 1
-		}
-		cache := ""
-		if len(p.Tools) > 0 {
-			cache, err = os.MkdirTemp("", "tenon-tools-")
-			if err != nil {
-				fmt.Fprintln(stderr, "tenon fingerprint show:", err)
-				return 1
-			}
-			defer os.RemoveAll(cache)
-		}
-		prepareTools(p, workspace, cache, diags)
-	}
-	render(diags, jsonl, stdout, stderr)
-	if p == nil || diags.HasErrors() {
-		return 1
-	}
-
-	if jsonl {
-		for _, e := range p.FingerprintEntries {
-			if err := writeResult(stdout, e); err != nil {
-				fmt.Fprintln(stderr, "tenon fingerprint show:", err)
-				return 1
-			}
-		}
-		if err := writeResult(stdout, fingerprintRollupJSON{Fingerprint: p.Fingerprint}); err != nil {
-			fmt.Fprintln(stderr, "tenon fingerprint show:", err)
-			return 1
-		}
-		return 0
-	}
-
-	for _, e := range p.FingerprintEntries {
-		bit := "-"
-		if e.Executable {
-			bit = "x"
-		}
-		fmt.Fprintf(stdout, "%s %s %s\n", e.Path, e.Hash, bit)
-	}
-	fmt.Fprintf(stdout, "fingerprint: %s\n", p.Fingerprint)
-	return 0
-}
-
 // managedTools names the tools the managed boundary will expose for the
 // project: the built-ins first, then every authored tool.
 func managedTools(p *agentproject.Project) []string {
@@ -533,7 +360,7 @@ func managedTools(p *agentproject.Project) []string {
 
 // toolConfig describes the project's tool runtime. cacheRoot is empty for the
 // workspace cache apply writes and serving reads, and a throwaway directory
-// for validate.
+// for check.
 func toolConfig(p *agentproject.Project, workspace, cacheRoot string) (toolruntime.Config, error) {
 	ws, err := filepath.Abs(workspace)
 	if err != nil {
@@ -589,7 +416,7 @@ func closureCacheRoot(workspace, harnessName string) (string, error) {
 
 // prepareTools prepares and inspects the project's authored tools, reporting
 // every failure as a diagnostic. A project without tools prepares nothing, so
-// apply and validate behave exactly as before for it.
+// apply and check behave exactly as before for it.
 func prepareTools(p *agentproject.Project, workspace, cacheRoot string, diags *diagnostics.List) bool {
 	if len(p.Tools) == 0 {
 		return true
@@ -1298,7 +1125,7 @@ func runMCPAdd(args []string, stdout, stderr io.Writer) int {
 	}
 
 	// Load proves the root — by instructions.md or by the supplied manifest's
-	// matching fingerprint, exactly as validate and apply do — and supplies the
+	// matching fingerprint, exactly as check and apply do — and supplies the
 	// exact offline collision space (existing connections and accepted plugin
 	// MCP servers) add must check. Its proven root is the one add writes into,
 	// so add needs no separate root proof.

@@ -18,7 +18,7 @@ import (
 )
 
 // driftResult is the jsonl-mode result summary for a clean drift check,
-// shaped like validateResult/applyResult: agent, harness, workspace, and the
+// shaped like checkResult/applyResult: agent, harness, workspace, and the
 // source fingerprint, plus the unchanged file list.
 type driftResult struct {
 	Agent       string   `json:"agent"`
@@ -94,8 +94,8 @@ func runDrift(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	// A supplied manifest is verified against the current closure exactly as
-	// validate does, before generation: drift reports the identical drift
-	// validate and apply would, rather than silently regenerating against a
+	// check does, before generation: drift reports the identical drift
+	// check and apply would, rather than silently regenerating against a
 	// pin the closure no longer matches.
 	if p != nil && !diags.HasErrors() && supplied != nil {
 		if err := verifyManifestDiag(p, driver.Harness(), resolveIntegrationStoreBase(), supplied, diags); err != nil {
@@ -125,7 +125,7 @@ func runDrift(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	// Tool preparation runs against a throwaway cache exactly as validate
+	// Tool preparation runs against a throwaway cache exactly as check
 	// does: drift writes nothing to the workspace or a persistent cache.
 	cache := ""
 	if len(p.Tools) > 0 {

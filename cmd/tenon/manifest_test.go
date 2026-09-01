@@ -178,28 +178,28 @@ func TestManifestValueNeverInGeneratedContent(t *testing.T) {
 	}
 }
 
-// TestValidateManifestReportsSameDriftAsApply proves validate/apply parity for
-// manifest drift: identical structured diagnostics, and validate mutates
+// TestCheckManifestReportsSameDriftAsApply proves check/apply parity for
+// manifest drift: identical structured diagnostics, and check mutates
 // nothing.
-func TestValidateManifestReportsSameDriftAsApply(t *testing.T) {
+func TestCheckManifestReportsSameDriftAsApply(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
 	withFakeResolver(t, "2.1.240", nil)
 	manifestPath := writeManifestFor(t, agent)
 
 	withFakeResolver(t, "9.9.9", nil) // drift
-	var validateOut, applyOut, errb bytes.Buffer
-	validateCode := run([]string{"validate", agent, "--harness", "claude", "--manifest", manifestPath, "--diagnostics", "jsonl"}, nil, &validateOut, &errb)
+	var checkOut, applyOut, errb bytes.Buffer
+	checkCode := run([]string{"check", agent, "--harness", "claude", "--manifest", manifestPath, "--diagnostics", "jsonl"}, nil, &checkOut, &errb)
 	applyWorkspace := t.TempDir()
 	applyCode := run([]string{"apply", agent, "--harness", "claude", "--workspace", applyWorkspace, "--manifest", manifestPath, "--diagnostics", "jsonl"}, nil, &applyOut, &errb)
 
-	if validateCode == 0 || applyCode == 0 {
-		t.Fatalf("both must fail on drift: validate=%d apply=%d", validateCode, applyCode)
+	if checkCode == 0 || applyCode == 0 {
+		t.Fatalf("both must fail on drift: check=%d apply=%d", checkCode, applyCode)
 	}
-	if validateOut.String() != applyOut.String() {
-		t.Fatalf("validate and apply must report identical drift:\nvalidate: %s\napply: %s", validateOut.String(), applyOut.String())
+	if checkDiagnostics(checkOut.String()) != applyOut.String() {
+		t.Fatalf("check and apply must report identical drift:\ncheck: %s\napply: %s", checkOut.String(), applyOut.String())
 	}
-	if !strings.Contains(validateOut.String(), "manifest.drift.harness-version") {
-		t.Fatalf("drift diagnostic must carry the stable identifier: %s", validateOut.String())
+	if !strings.Contains(checkOut.String(), "manifest.drift.harness-version") {
+		t.Fatalf("drift diagnostic must carry the stable identifier: %s", checkOut.String())
 	}
 	if _, err := os.Stat(filepath.Join(applyWorkspace, "CLAUDE.md")); !os.IsNotExist(err) {
 		t.Fatal("a drifted apply must not mutate the workspace")

@@ -314,28 +314,28 @@ func TestModelValueNeverLeaksIntoModelFacingContent(t *testing.T) {
 	}
 }
 
-// TestValidateApplyModelParity proves validate builds the same Target.Model
+// TestCheckApplyModelParity proves check builds the same Target.Model
 // apply does: a model-pinned manifest produces identical diagnostics from
-// validate and apply, and validate mutates nothing.
-func TestValidateApplyModelParity(t *testing.T) {
+// check and apply, and check mutates nothing.
+func TestCheckApplyModelParity(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
 	writeFile(t, agent, "harnesses/claude/.claude/settings.json", []byte(`{not valid`), 0o644)
 	withFakeResolver(t, "2.1.240", nil)
 	manifestPath := writeManifestForModel(t, agent, "claude", "claude-opus-4")
 
 	ws := t.TempDir()
-	var validateOut, applyOut, errb bytes.Buffer
-	validateCode := run([]string{"validate", agent, "--harness", "claude", "--manifest", manifestPath, "--diagnostics", "jsonl"}, nil, &validateOut, &errb)
+	var checkOut, applyOut, errb bytes.Buffer
+	checkCode := run([]string{"check", agent, "--harness", "claude", "--manifest", manifestPath, "--diagnostics", "jsonl"}, nil, &checkOut, &errb)
 	applyCode := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--manifest", manifestPath, "--diagnostics", "jsonl"}, nil, &applyOut, &errb)
 
-	if validateCode == 0 || applyCode == 0 {
-		t.Fatalf("both must fail on the invalid authored settings.json: validate=%d apply=%d", validateCode, applyCode)
+	if checkCode == 0 || applyCode == 0 {
+		t.Fatalf("both must fail on the invalid authored settings.json: check=%d apply=%d", checkCode, applyCode)
 	}
-	if validateOut.String() != applyOut.String() {
-		t.Fatalf("validate and apply must report identical diagnostics:\nvalidate: %s\napply: %s", validateOut.String(), applyOut.String())
+	if checkDiagnostics(checkOut.String()) != applyOut.String() {
+		t.Fatalf("check and apply must report identical diagnostics:\ncheck: %s\napply: %s", checkOut.String(), applyOut.String())
 	}
-	if !strings.Contains(validateOut.String(), "claude.settings.invalid") {
-		t.Fatalf("expected claude.settings.invalid: %s", validateOut.String())
+	if !strings.Contains(checkOut.String(), "claude.settings.invalid") {
+		t.Fatalf("expected claude.settings.invalid: %s", checkOut.String())
 	}
 	entries, err := os.ReadDir(ws)
 	if err != nil {

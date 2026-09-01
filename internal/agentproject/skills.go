@@ -47,6 +47,9 @@ type Skill struct {
 	// SourcePath is the authored path relative to the agent root:
 	// "skills/NAME".
 	SourcePath string
+	// Description is SKILL.md's required frontmatter description, the
+	// model-facing summary of when to use the skill.
+	Description string
 	// Files carries every regular file in the skill, SKILL.md first and
 	// the rest sorted by relative path.
 	Files []SkillFile
@@ -317,9 +320,10 @@ func loadSkill(skillsDir, dirName, sourcePath string, budget *skillSetBudget, di
 			diags.Errorf("skill.skill-md.encoding", mdPath, "SKILL.md must be valid UTF-8")
 			valid = false
 		} else {
-			bodyStart, fields, ok := parseSkillMD(s.Files[mdIndex].Content, dirName, mdPath, diags)
+			bodyStart, fields, description, ok := parseSkillMD(s.Files[mdIndex].Content, dirName, mdPath, diags)
 			s.SkillMDBodyStart = bodyStart
 			s.ClaudeFields = fields
+			s.Description = description
 			if !ok {
 				valid = false
 			}
@@ -343,23 +347,24 @@ func loadSkill(skillsDir, dirName, sourcePath string, budget *skillSetBudget, di
 // parseSkillMD enforces the closed SKILL.md frontmatter contract: the
 // standard portable fields validated to the standard's rules, the recognized
 // Claude extension allowlist preserved without value-shape validation, and
-// nothing else. It returns the body offset for marker insertion and the
-// recognized vendor fields present, sorted.
-func parseSkillMD(content []byte, name, path string, diags *diagnostics.List) (int, []string, bool) {
+// nothing else. It returns the body offset for marker insertion, the
+// recognized vendor fields present, sorted, and the validated description.
+func parseSkillMD(content []byte, name, path string, diags *diagnostics.List) (int, []string, string, bool) {
 	raw, bodyStart, err := frontmatter.Split(content)
 	if err != nil {
 		diags.Errorf("skill.frontmatter.missing", path,
 			"SKILL.md must start with YAML frontmatter delimited by --- lines")
-		return 0, nil, false
+		return 0, nil, "", false
 	}
 	doc, err := frontmatter.Parse(raw)
 	if err != nil {
 		diags.Errorf("skill.frontmatter.invalid", path, "%s", err)
-		return 0, nil, false
+		return 0, nil, "", false
 	}
 
 	valid := true
 	var claudeFields []string
+	var description string
 	for _, key := range doc.Keys() {
 		switch {
 		case key == "name" || key == "description" || key == "license" ||
@@ -389,6 +394,8 @@ func parseSkillMD(content []byte, name, path string, diags *diagnostics.List) (i
 			diags.Errorf("skill.description.invalid", path,
 				"description must be one plain string of 1-1024 characters")
 			valid = false
+		} else {
+			description = v
 		}
 	} else {
 		diags.Errorf("skill.description.missing", path,
@@ -424,5 +431,5 @@ func parseSkillMD(content []byte, name, path string, diags *diagnostics.List) (i
 		claudeFields = append(claudeFields, "allowed-tools")
 	}
 	slices.Sort(claudeFields)
-	return bodyStart, claudeFields, valid
+	return bodyStart, claudeFields, description, valid
 }
