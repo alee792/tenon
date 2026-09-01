@@ -25,7 +25,7 @@ func runClean(args []string, stdout, stderr io.Writer) int {
 	harnessName := fs.String("harness", "", "target harness: claude or codex (omit to clean every harness recorded in the workspace)")
 	workspace := fs.String("workspace", "", "workspace directory (required)")
 	force := fs.Bool("force", false, "remove tenon-owned files even when modified since the previous apply; files without a record entry are never touched")
-	mode := fs.String("diagnostics", "prose", "diagnostic rendering: prose or jsonl")
+	mode := fs.String("format", "prose", "output rendering: prose or jsonl")
 
 	positional, ok := parsePositional(fs, args)
 	if !ok || len(positional) != 0 {
@@ -36,6 +36,10 @@ func runClean(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "tenon clean: --workspace is required")
 		return 2
 	}
+	// clean deliberately ignores TENON_HARNESS: an empty --harness here means
+	// "every harness recorded in the workspace" (a full reset), and letting
+	// the env var narrow that silently would clean less than an operator
+	// with TENON_HARNESS set in their shell would expect from a bare clean.
 	if *harnessName != "" && *harnessName != "claude" && *harnessName != "codex" {
 		fmt.Fprintln(stderr, "tenon clean: --harness must be exactly claude or codex")
 		return 2
@@ -46,7 +50,7 @@ func runClean(args []string, stdout, stderr io.Writer) int {
 	case "jsonl":
 		jsonl = true
 	default:
-		fmt.Fprintln(stderr, "tenon clean: --diagnostics must be prose or jsonl")
+		fmt.Fprintln(stderr, "tenon clean: --format must be prose or jsonl")
 		return 2
 	}
 

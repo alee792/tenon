@@ -188,14 +188,14 @@ func TestCheckManifestReportsSameDriftAsApply(t *testing.T) {
 
 	withFakeResolver(t, "9.9.9", nil) // drift
 	var checkOut, applyOut, errb bytes.Buffer
-	checkCode := run([]string{"check", agent, "--harness", "claude", "--pins", manifestPath, "--diagnostics", "jsonl"}, nil, &checkOut, &errb)
+	checkCode := run([]string{"check", agent, "--harness", "claude", "--pins", manifestPath, "--format", "jsonl"}, nil, &checkOut, &errb)
 	applyWorkspace := t.TempDir()
-	applyCode := run([]string{"apply", agent, "--harness", "claude", "--workspace", applyWorkspace, "--pins", manifestPath, "--diagnostics", "jsonl"}, nil, &applyOut, &errb)
+	applyCode := run([]string{"apply", agent, "--harness", "claude", "--workspace", applyWorkspace, "--pins", manifestPath, "--format", "jsonl"}, nil, &applyOut, &errb)
 
 	if checkCode == 0 || applyCode == 0 {
 		t.Fatalf("both must fail on drift: check=%d apply=%d", checkCode, applyCode)
 	}
-	if checkDiagnostics(checkOut.String()) != applyOut.String() {
+	if checkDiagnostics(checkOut.String()) != checkDiagnostics(applyOut.String()) {
 		t.Fatalf("check and apply must report identical drift:\ncheck: %s\napply: %s", checkOut.String(), applyOut.String())
 	}
 	if !strings.Contains(checkOut.String(), "pins.drift.harness-version") {

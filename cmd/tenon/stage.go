@@ -29,7 +29,7 @@ func runStagePrepare(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	harness := fs.String("harness", "", "target harness: claude or codex")
 	output := fs.String("output", "", "output directory to publish (must not already exist)")
-	mode := fs.String("diagnostics", "prose", "diagnostic rendering: prose or jsonl")
+	mode := fs.String("format", "prose", "output rendering: prose or jsonl")
 
 	positional, ok := parsePositional(fs, args)
 	if !ok || len(positional) != 1 {
@@ -38,14 +38,15 @@ func runStagePrepare(args []string, stdout, stderr io.Writer) int {
 	}
 	agent := positional[0]
 
+	harnessValue, harnessFromEnv := resolveHarness(*harness)
 	var driver apply.Driver
-	switch *harness {
+	switch harnessValue {
 	case "claude":
 		driver = claude.Driver{}
 	case "codex":
 		driver = codex.Driver{}
 	default:
-		fmt.Fprintf(stderr, "tenon stage: --harness must be exactly claude or codex\n")
+		fmt.Fprint(stderr, harnessFlagError("stage", harnessValue, harnessFromEnv))
 		return 2
 	}
 	jsonl := false
@@ -54,7 +55,7 @@ func runStagePrepare(args []string, stdout, stderr io.Writer) int {
 	case "jsonl":
 		jsonl = true
 	default:
-		fmt.Fprintf(stderr, "tenon stage: --diagnostics must be prose or jsonl\n")
+		fmt.Fprintf(stderr, "tenon stage: --format must be prose or jsonl\n")
 		return 2
 	}
 	if *output == "" {
@@ -72,7 +73,7 @@ func runStagePrepare(args []string, stdout, stderr io.Writer) int {
 	defer cancel()
 	result, diags, err := stage.Stage(ctx, stage.Options{
 		AgentDir:   agent,
-		Harness:    *harness,
+		Harness:    harnessValue,
 		Output:     *output,
 		Executable: executable,
 		Driver:     driver,
@@ -86,7 +87,7 @@ func runStagePrepare(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	fmt.Fprintf(stdout, "staged: agent %s for %s at %s (fingerprint %s)\n",
-		result.Agent, *harness, result.Output, result.Fingerprint)
+		result.Agent, harnessValue, result.Output, result.Fingerprint)
 	if len(result.RuntimeLanguages) == 0 {
 		fmt.Fprintln(stdout, "  runtime closure: none (tool-free agent)")
 	} else {

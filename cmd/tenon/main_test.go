@@ -98,12 +98,12 @@ func TestCheckReportsApplyFailuresWithoutMutating(t *testing.T) {
 	}
 
 	var checkOut, applyOut, stderr bytes.Buffer
-	checkCode := run([]string{"check", agent, "--harness", "claude", "--diagnostics", "jsonl"}, nil, &checkOut, &stderr)
-	applyCode := run([]string{"apply", agent, "--harness", "claude", "--diagnostics", "jsonl"}, nil, &applyOut, &stderr)
+	checkCode := run([]string{"check", agent, "--harness", "claude", "--format", "jsonl"}, nil, &checkOut, &stderr)
+	applyCode := run([]string{"apply", agent, "--harness", "claude", "--format", "jsonl"}, nil, &applyOut, &stderr)
 	if checkCode == 0 || applyCode == 0 {
 		t.Fatalf("both must fail: check=%d apply=%d", checkCode, applyCode)
 	}
-	if checkDiagnostics(checkOut.String()) != applyOut.String() {
+	if checkDiagnostics(checkOut.String()) != checkDiagnostics(applyOut.String()) {
 		t.Fatalf("check and apply must report identical diagnostics:\n%s\n%s",
 			checkOut.String(), applyOut.String())
 	}
@@ -122,7 +122,7 @@ func TestJSONLDiagnosticsAreParseable(t *testing.T) {
 	agent := writeAgent(t, "my-agent", "no frontmatter\n")
 
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"check", agent, "--harness", "codex", "--diagnostics", "jsonl"}, nil, &stdout, &stderr); code == 0 {
+	if code := run([]string{"check", agent, "--harness", "codex", "--format", "jsonl"}, nil, &stdout, &stderr); code == 0 {
 		t.Fatal("expected validation failure")
 	}
 	lines := strings.Split(strings.TrimSpace(checkDiagnostics(stdout.String())), "\n")
@@ -222,7 +222,7 @@ func TestEmitFilesJSONLIsParseable(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
 
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"check", agent, "--emit", "files", "--diagnostics", "jsonl"}, nil, &stdout, &stderr); code != 0 {
+	if code := run([]string{"check", agent, "--emit", "files", "--format", "jsonl"}, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("check --emit files exit %d: %s", code, stderr.String())
 	}
 	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
@@ -260,13 +260,13 @@ func TestCheckWithoutHarnessIsThePortableGate(t *testing.T) {
 	writeFile(t, agent, "skills/vendor/SKILL.md", []byte(vendorSkillMD), 0o644)
 
 	var codexOut, portableOut, stderr bytes.Buffer
-	if code := run([]string{"check", agent, "--harness", "codex", "--diagnostics", "jsonl"}, nil, &codexOut, &stderr); code != 0 {
+	if code := run([]string{"check", agent, "--harness", "codex", "--format", "jsonl"}, nil, &codexOut, &stderr); code != 0 {
 		t.Fatalf("check --harness codex exit %d: %s", code, stderr.String())
 	}
 	if len(filterDiags(parseDiagLines(t, codexOut.String()), "skill.vendor-field.not-honored")) == 0 {
 		t.Fatalf("the codex generation dry-run must warn about vendor fields: %q", codexOut.String())
 	}
-	if code := run([]string{"check", agent, "--diagnostics", "jsonl"}, nil, &portableOut, &stderr); code != 0 {
+	if code := run([]string{"check", agent, "--format", "jsonl"}, nil, &portableOut, &stderr); code != 0 {
 		t.Fatalf("check exit %d: %s", code, stderr.String())
 	}
 	lines := strings.Split(strings.TrimSpace(portableOut.String()), "\n")
@@ -306,7 +306,7 @@ func TestEmitCatalogReportsResolvedCapabilities(t *testing.T) {
 	writeFile(t, agent, "schedules/digest.md", []byte("---\ncron: 0 9 * * 1\n---\n\nSummarize the week.\n"), 0o644)
 
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"check", agent, "--emit", "catalog,files", "--diagnostics", "jsonl"}, nil, &stdout, &stderr); code != 0 {
+	if code := run([]string{"check", agent, "--emit", "catalog,files", "--format", "jsonl"}, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("check --emit exit %d: %s", code, stderr.String())
 	}
 	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
@@ -354,7 +354,7 @@ func TestEmitEmitsNothingOnGateFailure(t *testing.T) {
 	writeFile(t, agent, "skills/vendor/SKILL.md", []byte(vendorSkillMD), 0o644)
 
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"check", agent, "--emit", "files,catalog", "--diagnostics", "jsonl"}, nil, &stdout, &stderr); code != 1 {
+	if code := run([]string{"check", agent, "--emit", "files,catalog", "--format", "jsonl"}, nil, &stdout, &stderr); code != 1 {
 		t.Fatalf("a failing gate must exit 1, got %d: %s", code, stdout.String())
 	}
 	for _, needle := range []string{`"kind"`, `"hash"`, `"fingerprint"`} {
@@ -400,7 +400,7 @@ func TestCheckRejectsUnusableFlagCombinations(t *testing.T) {
 
 // TestProseResultSummaryUnchanged proves the additive jsonl branch left the
 // default prose result summary byte-identical: same check and apply
-// success lines as before, with no --diagnostics flag at all.
+// success lines as before, with no --format flag at all.
 func TestProseResultSummaryUnchanged(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
 
@@ -435,7 +435,7 @@ func TestProseResultSummaryUnchanged(t *testing.T) {
 func fingerprintOf(t *testing.T, agent string) string {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"check", agent, "--harness", "claude", "--diagnostics", "jsonl"}, nil, &stdout, &stderr); code != 0 {
+	if code := run([]string{"check", agent, "--harness", "claude", "--format", "jsonl"}, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("check exit %d: %s", code, stderr.String())
 	}
 	var got checkResultForTest
@@ -458,7 +458,7 @@ func TestJSONLResultSummaryCheck(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
 
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"check", agent, "--harness", "claude", "--diagnostics", "jsonl"}, nil, &stdout, &stderr); code != 0 {
+	if code := run([]string{"check", agent, "--harness", "claude", "--format", "jsonl"}, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("check exit %d: %s", code, stderr.String())
 	}
 	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
@@ -478,6 +478,7 @@ func TestJSONLResultSummaryCheck(t *testing.T) {
 }
 
 type applyResultForTest struct {
+	Outcome      string   `json:"outcome"`
 	Agent        string   `json:"agent"`
 	Harness      string   `json:"harness"`
 	Workspace    string   `json:"workspace"`
@@ -488,15 +489,15 @@ type applyResultForTest struct {
 }
 
 // TestJSONLResultSummaryApply proves a successful apply in jsonl mode emits
-// one parseable JSON result object carrying the agent, harness, workspace,
-// fingerprint, written/removed file lists, and managed tools, with no prose
-// output at all.
+// one parseable JSON result object carrying the outcome, agent, harness,
+// workspace, fingerprint, written/removed file lists, and managed tools,
+// with no prose output at all.
 func TestJSONLResultSummaryApply(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
 	ws := t.TempDir()
 
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--diagnostics", "jsonl"}, nil, &stdout, &stderr); code != 0 {
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--format", "jsonl"}, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("apply exit %d: %s", code, stderr.String())
 	}
 	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
@@ -507,8 +508,8 @@ func TestJSONLResultSummaryApply(t *testing.T) {
 	if err := json.Unmarshal([]byte(lines[0]), &got); err != nil {
 		t.Fatalf("result line %q is not valid JSON: %v", lines[0], err)
 	}
-	if got.Agent != "my-agent" || got.Harness != "claude" || got.Workspace != ws || got.Fingerprint == "" {
-		t.Fatalf("result = %+v, want agent=my-agent harness=claude workspace=%s and a non-empty fingerprint", got, ws)
+	if got.Outcome != "ok" || got.Agent != "my-agent" || got.Harness != "claude" || got.Workspace != ws || got.Fingerprint == "" {
+		t.Fatalf("result = %+v, want outcome ok, agent=my-agent harness=claude workspace=%s and a non-empty fingerprint", got, ws)
 	}
 	if !slices.Contains(got.Written, ".mcp.json") || !slices.Contains(got.Written, "CLAUDE.md") {
 		t.Fatalf("result.written = %v, want .mcp.json and CLAUDE.md", got.Written)
@@ -591,9 +592,12 @@ func parseDiagLines(t *testing.T, out string) []testDiag {
 	return ds
 }
 
-// checkDiagnostics strips check's terminal gate_failed object, which apply
-// does not emit: what remains is the diagnostic stream apply must match byte
-// for byte.
+// checkDiagnostics strips a command's terminal outcome object — check's
+// gate_failed, or apply's gate_failed on the identical gate failure — so
+// what remains is the diagnostic stream alone, which check and apply must
+// match byte for byte on a gate failure. Both sides of that comparison call
+// this: apply's trailing object is byte-identical to check's, but stripping
+// only one side would leave the other's outcome line in the diff.
 func checkDiagnostics(out string) string {
 	return strings.TrimSuffix(out, "{\"outcome\":\"gate_failed\"}\n")
 }
@@ -715,7 +719,7 @@ func TestSymlinkedSkillResourceFailsBeforeWriting(t *testing.T) {
 
 	ws := t.TempDir()
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--diagnostics", "jsonl"}, nil, &stdout, &stderr)
+	code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--format", "jsonl"}, nil, &stdout, &stderr)
 	if code == 0 {
 		t.Fatal("a symlinked skill resource must fail apply")
 	}
@@ -759,7 +763,7 @@ func TestVendorFieldsWarnForCodexOnly(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	ws := t.TempDir()
-	if code := run([]string{"apply", agent, "--harness", "codex", "--workspace", ws, "--diagnostics", "jsonl"}, nil, &stdout, &stderr); code != 0 {
+	if code := run([]string{"apply", agent, "--harness", "codex", "--workspace", ws, "--format", "jsonl"}, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("warnings alone must not fail apply: exit %d, %s", code, stdout.String())
 	}
 	requireCodexWarnings(stdout.String())
@@ -768,13 +772,13 @@ func TestVendorFieldsWarnForCodexOnly(t *testing.T) {
 	}
 
 	stdout.Reset()
-	if code := run([]string{"check", agent, "--harness", "codex", "--diagnostics", "jsonl"}, nil, &stdout, &stderr); code != 0 {
+	if code := run([]string{"check", agent, "--harness", "codex", "--format", "jsonl"}, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("warnings alone must not fail check: exit %d, %s", code, stdout.String())
 	}
 	requireCodexWarnings(stdout.String())
 
 	stdout.Reset()
-	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", t.TempDir(), "--diagnostics", "jsonl"}, nil, &stdout, &stderr); code != 0 {
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", t.TempDir(), "--format", "jsonl"}, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("claude apply exit %d: %s", code, stdout.String())
 	}
 	if got := filterDiags(parseDiagLines(t, stdout.String()), "skill.vendor-field.not-honored"); len(got) != 0 {
@@ -794,7 +798,7 @@ func TestOpenAIYAMLRoundTripsAndWarnsForClaudeOnly(t *testing.T) {
 	apply := func(harness, ws string) []testDiag {
 		t.Helper()
 		var stdout, stderr bytes.Buffer
-		if code := run([]string{"apply", agent, "--harness", harness, "--workspace", ws, "--diagnostics", "jsonl"}, nil, &stdout, &stderr); code != 0 {
+		if code := run([]string{"apply", agent, "--harness", harness, "--workspace", ws, "--format", "jsonl"}, nil, &stdout, &stderr); code != 0 {
 			t.Fatalf("%s apply exit %d: %s", harness, code, stdout.String())
 		}
 		return parseDiagLines(t, stdout.String())
@@ -833,7 +837,7 @@ func TestFlatSkillLayoutIsRejected(t *testing.T) {
 	writeFile(t, agent, "skills/flat.md", []byte("flat skill\n"), 0o644)
 
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"check", agent, "--harness", "claude", "--diagnostics", "jsonl"}, nil, &stdout, &stderr); code == 0 {
+	if code := run([]string{"check", agent, "--harness", "claude", "--format", "jsonl"}, nil, &stdout, &stderr); code == 0 {
 		t.Fatal("the flat skills/NAME.md layout must be rejected")
 	}
 	got := filterDiags(parseDiagLines(t, stdout.String()), "skill.entry.invalid")
@@ -871,7 +875,7 @@ func TestPluginSkillCollisionParity(t *testing.T) {
 	}
 
 	var checkOut, stderr bytes.Buffer
-	if code := run([]string{"check", agent, "--harness", "claude", "--diagnostics", "jsonl"}, nil, &checkOut, &stderr); code != 0 {
+	if code := run([]string{"check", agent, "--harness", "claude", "--format", "jsonl"}, nil, &checkOut, &stderr); code != 0 {
 		t.Fatalf("a collision warning alone must not fail check: exit %d, %s", code, checkOut.String())
 	}
 	requireCollisionWarning(checkOut.String())
@@ -881,7 +885,7 @@ func TestPluginSkillCollisionParity(t *testing.T) {
 		t.Helper()
 		ws := t.TempDir()
 		var applyOut bytes.Buffer
-		if code := run([]string{"apply", agent, "--harness", harness, "--workspace", ws, "--diagnostics", "jsonl"}, nil, &applyOut, &stderr); code != 0 {
+		if code := run([]string{"apply", agent, "--harness", harness, "--workspace", ws, "--format", "jsonl"}, nil, &applyOut, &stderr); code != 0 {
 			t.Fatalf("%s apply exit %d\nstdout: %s", harness, code, applyOut.String())
 		}
 		requireCollisionWarning(applyOut.String())
@@ -950,8 +954,8 @@ func TestValidateApplyWarningParity(t *testing.T) {
 	writeFile(t, agent, "skills/vendor/SKILL.md", []byte(vendorSkillMD), 0o644)
 
 	var checkOut, applyOut, stderr bytes.Buffer
-	checkCode := run([]string{"check", agent, "--harness", "codex", "--diagnostics", "jsonl"}, nil, &checkOut, &stderr)
-	applyCode := run([]string{"apply", agent, "--harness", "codex", "--workspace", t.TempDir(), "--diagnostics", "jsonl"}, nil, &applyOut, &stderr)
+	checkCode := run([]string{"check", agent, "--harness", "codex", "--format", "jsonl"}, nil, &checkOut, &stderr)
+	applyCode := run([]string{"apply", agent, "--harness", "codex", "--workspace", t.TempDir(), "--format", "jsonl"}, nil, &applyOut, &stderr)
 	if checkCode != 0 || applyCode != 0 {
 		t.Fatalf("warnings alone must not fail: check=%d apply=%d", checkCode, applyCode)
 	}
@@ -1078,7 +1082,7 @@ func TestSubagentChildToolsDirectoryFailsApplyBeforeWriting(t *testing.T) {
 
 	ws := t.TempDir()
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--diagnostics", "jsonl"}, nil, &stdout, &stderr)
+	code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--format", "jsonl"}, nil, &stdout, &stderr)
 	if code == 0 {
 		t.Fatal("a subagent with a tools/ child must fail apply")
 	}
@@ -1105,7 +1109,7 @@ func TestNestedSubagentsDirectoryFailsApplyBeforeWriting(t *testing.T) {
 
 	ws := t.TempDir()
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"apply", agent, "--harness", "codex", "--workspace", ws, "--diagnostics", "jsonl"}, nil, &stdout, &stderr)
+	code := run([]string{"apply", agent, "--harness", "codex", "--workspace", ws, "--format", "jsonl"}, nil, &stdout, &stderr)
 	if code == 0 {
 		t.Fatal("a nested subagents/ directory must fail apply")
 	}
@@ -1164,12 +1168,12 @@ func TestValidateApplyParityOnSubagentError(t *testing.T) {
 	writeFile(t, agent, "subagents/reviewer/tools/helper.ts", []byte("export default {}\n"), 0o644)
 
 	var checkOut, applyOut, stderr bytes.Buffer
-	checkCode := run([]string{"check", agent, "--harness", "claude", "--diagnostics", "jsonl"}, nil, &checkOut, &stderr)
-	applyCode := run([]string{"apply", agent, "--harness", "claude", "--workspace", t.TempDir(), "--diagnostics", "jsonl"}, nil, &applyOut, &stderr)
+	checkCode := run([]string{"check", agent, "--harness", "claude", "--format", "jsonl"}, nil, &checkOut, &stderr)
+	applyCode := run([]string{"apply", agent, "--harness", "claude", "--workspace", t.TempDir(), "--format", "jsonl"}, nil, &applyOut, &stderr)
 	if checkCode == 0 || applyCode == 0 {
 		t.Fatalf("both must fail: check=%d apply=%d", checkCode, applyCode)
 	}
-	if checkDiagnostics(checkOut.String()) != applyOut.String() {
+	if checkDiagnostics(checkOut.String()) != checkDiagnostics(applyOut.String()) {
 		t.Fatalf("check and apply must report identical diagnostics:\n%s\n%s",
 			checkOut.String(), applyOut.String())
 	}
@@ -1264,7 +1268,7 @@ func TestHarnessFilesReservedDestinationsFailBeforeWriting(t *testing.T) {
 
 			ws := t.TempDir()
 			var stdout, stderr bytes.Buffer
-			code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--diagnostics", "jsonl"}, nil, &stdout, &stderr)
+			code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--format", "jsonl"}, nil, &stdout, &stderr)
 			if code == 0 {
 				t.Fatal("a reserved harness-file destination must fail apply")
 			}
@@ -1290,7 +1294,7 @@ func TestHarnessFilesUnknownHarnessDirectoryFails(t *testing.T) {
 	writeFile(t, agent, "harnesses/cursor/rules.md", []byte("body\n"), 0o644)
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"check", agent, "--harness", "claude", "--diagnostics", "jsonl"}, nil, &stdout, &stderr)
+	code := run([]string{"check", agent, "--harness", "claude", "--format", "jsonl"}, nil, &stdout, &stderr)
 	if code == 0 {
 		t.Fatal("an unknown harnesses/ entry must fail validation")
 	}
@@ -1311,7 +1315,7 @@ func TestHarnessFilesRefuseHandAuthoredWorkspaceFile(t *testing.T) {
 	writeFile(t, ws, ".claude/settings.json", []byte(`{"hand":"authored"}`), 0o644)
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--diagnostics", "jsonl"}, nil, &stdout, &stderr)
+	code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--format", "jsonl"}, nil, &stdout, &stderr)
 	if code == 0 {
 		t.Fatal("a hand-authored native file already in the workspace must refuse apply")
 	}
@@ -1337,12 +1341,12 @@ func TestHarnessFilesValidateApplyParity(t *testing.T) {
 
 	ws := t.TempDir()
 	var checkOut, applyOut, stderr bytes.Buffer
-	checkCode := run([]string{"check", agent, "--harness", "claude", "--diagnostics", "jsonl"}, nil, &checkOut, &stderr)
-	applyCode := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--diagnostics", "jsonl"}, nil, &applyOut, &stderr)
+	checkCode := run([]string{"check", agent, "--harness", "claude", "--format", "jsonl"}, nil, &checkOut, &stderr)
+	applyCode := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--format", "jsonl"}, nil, &applyOut, &stderr)
 	if checkCode == 0 || applyCode == 0 {
 		t.Fatalf("both must fail: check=%d apply=%d", checkCode, applyCode)
 	}
-	if checkDiagnostics(checkOut.String()) != applyOut.String() {
+	if checkDiagnostics(checkOut.String()) != checkDiagnostics(applyOut.String()) {
 		t.Fatalf("check and apply must report identical diagnostics:\n%s\n%s",
 			checkOut.String(), applyOut.String())
 	}
@@ -1834,7 +1838,7 @@ func TestPluginMCPServersApplyToBothHarnesses(t *testing.T) {
 	codexData := filepath.Join(codexWS, ".tenon", "plugin-data", "my-agent", "vendor-x")
 
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", claudeWS, "--diagnostics", "jsonl"}, nil, &stdout, &stderr); code != 0 {
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", claudeWS, "--format", "jsonl"}, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("claude apply exit %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
 	}
 	wantClaude := `{
@@ -1884,7 +1888,7 @@ func TestPluginMCPServersApplyToBothHarnesses(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	if code := run([]string{"apply", agent, "--harness", "codex", "--workspace", codexWS, "--diagnostics", "jsonl"}, nil, &stdout, &stderr); code != 0 {
+	if code := run([]string{"apply", agent, "--harness", "codex", "--workspace", codexWS, "--format", "jsonl"}, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("codex apply exit %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
 	}
 	wantCodex := wantCodexConfig(executable, agent, codexWS) + `
@@ -1962,10 +1966,10 @@ func TestPluginMCPSurvivingPlaceholderSkipsClaudeOnly(t *testing.T) {
 
 	var applyOut, checkOut, stderr bytes.Buffer
 	claudeWS := t.TempDir()
-	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", claudeWS, "--diagnostics", "jsonl"}, nil, &applyOut, &stderr); code != 0 {
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", claudeWS, "--format", "jsonl"}, nil, &applyOut, &stderr); code != 0 {
 		t.Fatalf("a per-harness skip must not fail apply: exit %d, %s", code, applyOut.String())
 	}
-	if code := run([]string{"check", agent, "--harness", "claude", "--diagnostics", "jsonl"}, nil, &checkOut, &stderr); code != 0 {
+	if code := run([]string{"check", agent, "--harness", "claude", "--format", "jsonl"}, nil, &checkOut, &stderr); code != 0 {
 		t.Fatalf("a per-harness skip must not fail check: exit %d, %s", code, checkOut.String())
 	}
 	warnings := filterDiags(parseDiagLines(t, applyOut.String()), "plugin.mcp.claude-expansion")
@@ -1988,7 +1992,7 @@ func TestPluginMCPSurvivingPlaceholderSkipsClaudeOnly(t *testing.T) {
 
 	codexWS := t.TempDir()
 	var codexOut bytes.Buffer
-	if code := run([]string{"apply", agent, "--harness", "codex", "--workspace", codexWS, "--diagnostics", "jsonl"}, nil, &codexOut, &stderr); code != 0 {
+	if code := run([]string{"apply", agent, "--harness", "codex", "--workspace", codexWS, "--format", "jsonl"}, nil, &codexOut, &stderr); code != 0 {
 		t.Fatalf("codex apply exit %d: %s", code, codexOut.String())
 	}
 	if got := filterDiags(parseDiagLines(t, codexOut.String()), "plugin.mcp.claude-expansion"); len(got) != 0 {
@@ -2009,7 +2013,7 @@ func TestPluginMCPManagedNameIsReservedEndToEnd(t *testing.T) {
 
 	ws := t.TempDir()
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--diagnostics", "jsonl"}, nil, &stdout, &stderr); code != 0 {
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--format", "jsonl"}, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("a reserved name must not fail apply: exit %d, %s", code, stdout.String())
 	}
 	warnings := filterDiags(parseDiagLines(t, stdout.String()), "plugin.mcp.server.collision")
@@ -2358,12 +2362,12 @@ func TestConnectionCheckApplyParityOnConnectionError(t *testing.T) {
 	writeFile(t, agent, "mcp/catalog.md", []byte("no frontmatter\n"), 0o644)
 
 	var checkOut, applyOut, stderr bytes.Buffer
-	checkCode := run([]string{"check", agent, "--harness", "claude", "--diagnostics", "jsonl"}, nil, &checkOut, &stderr)
-	applyCode := run([]string{"apply", agent, "--harness", "claude", "--diagnostics", "jsonl"}, nil, &applyOut, &stderr)
+	checkCode := run([]string{"check", agent, "--harness", "claude", "--format", "jsonl"}, nil, &checkOut, &stderr)
+	applyCode := run([]string{"apply", agent, "--harness", "claude", "--format", "jsonl"}, nil, &applyOut, &stderr)
 	if checkCode == 0 || applyCode == 0 {
 		t.Fatalf("both must fail: check=%d apply=%d", checkCode, applyCode)
 	}
-	if checkDiagnostics(checkOut.String()) != applyOut.String() {
+	if checkDiagnostics(checkOut.String()) != checkDiagnostics(applyOut.String()) {
 		t.Fatalf("check and apply must report identical diagnostics:\n%s\n%s",
 			checkOut.String(), applyOut.String())
 	}
@@ -2430,12 +2434,12 @@ func TestConnectionCheckApplyParityOnInstalledResolutionError(t *testing.T) {
 		[]byte("---\ntype: installed\npackage: nope-pkg\ncapability: mcp\n---\n"), 0o644)
 
 	var checkOut, applyOut, stderr bytes.Buffer
-	checkCode := run([]string{"check", agent, "--harness", "claude", "--diagnostics", "jsonl"}, nil, &checkOut, &stderr)
-	applyCode := run([]string{"apply", agent, "--harness", "claude", "--diagnostics", "jsonl"}, nil, &applyOut, &stderr)
+	checkCode := run([]string{"check", agent, "--harness", "claude", "--format", "jsonl"}, nil, &checkOut, &stderr)
+	applyCode := run([]string{"apply", agent, "--harness", "claude", "--format", "jsonl"}, nil, &applyOut, &stderr)
 	if checkCode == 0 || applyCode == 0 {
 		t.Fatalf("both must fail: check=%d apply=%d", checkCode, applyCode)
 	}
-	if checkDiagnostics(checkOut.String()) != applyOut.String() {
+	if checkDiagnostics(checkOut.String()) != checkDiagnostics(applyOut.String()) {
 		t.Fatalf("check and apply must report identical diagnostics:\n%s\n%s",
 			checkOut.String(), applyOut.String())
 	}
@@ -2683,5 +2687,90 @@ func TestConnectionCommandsRefuseUnprovenRoot(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "fingerprint") {
 		t.Fatalf("the refusal must name the fingerprint mismatch: %s", stderr.String())
+	}
+}
+
+// TestTenonHarnessEnvIsPickedUpWithoutTheFlag proves an omitted --harness
+// falls back to TENON_HARNESS: apply succeeds against the env-supplied
+// harness alone.
+func TestTenonHarnessEnvIsPickedUpWithoutTheFlag(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	ws := t.TempDir()
+	t.Setenv("TENON_HARNESS", "claude")
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"apply", agent, "--workspace", ws}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("apply exit %d: %s", code, stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(ws, "CLAUDE.md")); err != nil {
+		t.Fatalf("expected the claude-harness file from TENON_HARNESS=claude: %v", err)
+	}
+}
+
+// TestTenonHarnessFlagOverridesEnv proves the explicit --harness flag always
+// wins over TENON_HARNESS, even when the env var names the other harness.
+func TestTenonHarnessFlagOverridesEnv(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	ws := t.TempDir()
+	t.Setenv("TENON_HARNESS", "codex")
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("apply exit %d: %s", code, stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(ws, "CLAUDE.md")); err != nil {
+		t.Fatal("the explicit --harness claude must win over TENON_HARNESS=codex")
+	}
+	if _, err := os.Stat(filepath.Join(ws, "AGENTS.md")); !os.IsNotExist(err) {
+		t.Fatal("TENON_HARNESS must not apply when --harness is explicit")
+	}
+}
+
+// TestTenonHarnessInvalidEnvValueIsNamedHonestly proves an invalid
+// TENON_HARNESS value is reported by its own name, not as a --harness error,
+// since the flag was never the source of the bad value.
+func TestTenonHarnessInvalidEnvValueIsNamedHonestly(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	ws := t.TempDir()
+	t.Setenv("TENON_HARNESS", "gpt4")
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"apply", agent, "--workspace", ws}, nil, &stdout, &stderr); code == 0 {
+		t.Fatal("expected failure on an invalid TENON_HARNESS value")
+	}
+	want := `tenon apply: TENON_HARNESS must be claude or codex (found "gpt4")`
+	if !strings.Contains(stderr.String(), want) {
+		t.Fatalf("stderr = %q, want it to contain %q", stderr.String(), want)
+	}
+}
+
+// TestCleanIgnoresTenonHarnessEnv proves clean never lets TENON_HARNESS
+// narrow a bare clean: with the env var set to one harness, an unqualified
+// clean still removes both harnesses' records, exactly as it would with no
+// env var set at all.
+func TestCleanIgnoresTenonHarnessEnv(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	ws := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("apply claude exit %d: %s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"apply", agent, "--harness", "codex", "--workspace", ws}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("apply codex exit %d: %s", code, stderr.String())
+	}
+
+	t.Setenv("TENON_HARNESS", "claude")
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"clean", "--workspace", ws}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("clean exit %d: %s", code, stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(ws, ".tenon", "apply-claude.json")); !os.IsNotExist(err) {
+		t.Fatal("a bare clean must remove the claude record too, TENON_HARNESS notwithstanding")
+	}
+	if _, err := os.Stat(filepath.Join(ws, ".tenon", "apply-codex.json")); !os.IsNotExist(err) {
+		t.Fatal("a bare clean must remove the codex record too, TENON_HARNESS notwithstanding")
 	}
 }

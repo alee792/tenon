@@ -87,7 +87,7 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("check", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	harnessName := fs.String("harness", "", "target harness: claude or codex (omit for the portable gate)")
-	mode := fs.String("diagnostics", "prose", "diagnostic rendering: prose or jsonl")
+	mode := fs.String("format", "prose", "output rendering: prose or jsonl")
 	manifestPath := fs.String("pins", "", "supplied pin set to verify against the current runtime closure; fails closed naming the first drifted pin")
 	writePins := fs.String("write-pins", "", "write the resolved pin set for the current closure to FILE once the gate passes; requires --harness")
 	model := fs.String("model", "", "optional model to record in the written pin set (advisory: operator-supplied, never resolved automatically, and never verified — the harness owns model selection)")
@@ -100,15 +100,19 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 	}
 	agent := positional[0]
 
+	// An empty flag defers to TENON_HARNESS; the flag always wins when set.
+	// check's harness stays optional either way — empty flag and unset env
+	// both mean the portable gate.
+	harnessValue, harnessFromEnv := resolveHarness(*harnessName)
 	var driver apply.Driver
-	switch *harnessName {
+	switch harnessValue {
 	case "":
 	case "claude":
 		driver = claude.Driver{}
 	case "codex":
 		driver = codex.Driver{}
 	default:
-		fmt.Fprintln(stderr, "tenon check: --harness must be exactly claude or codex")
+		fmt.Fprint(stderr, harnessFlagError("check", harnessValue, harnessFromEnv))
 		return 2
 	}
 	jsonl := false
@@ -117,7 +121,7 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 	case "jsonl":
 		jsonl = true
 	default:
-		fmt.Fprintln(stderr, "tenon check: --diagnostics must be prose or jsonl")
+		fmt.Fprintln(stderr, "tenon check: --format must be prose or jsonl")
 		return 2
 	}
 	// Pin verification is harness-specific: the closure a pin set pins is the
@@ -218,11 +222,7 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 	}
 	render(diags, jsonl, stdout, stderr)
 	if p == nil || diags.HasErrors() {
-		if jsonl {
-			if err := writeResult(stdout, gateFailedResult{Outcome: "gate_failed"}); err != nil {
-				fmt.Fprintln(stderr, "tenon check:", err)
-			}
-		}
+		writeGateFailed(jsonl, stdout, stderr, "check")
 		return 1
 	}
 
@@ -233,22 +233,22 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 	// for the selected harness; the gate never resolves a model itself.
 	if *writePins != "" {
 		storeBase := resolveIntegrationStoreBase()
-		current, err := manifest.Resolve(p, *harnessName, version.Version, manifestResolverFor(p, *harnessName, storeBase))
+		current, err := manifest.Resolve(p, harnessValue, version.Version, manifestResolverFor(p, harnessValue, storeBase))
 		if err != nil {
 			fmt.Fprintln(stderr, "tenon check:", err)
 			return 1
 		}
 		if *model != "" {
-			pins := current.Harnesses[*harnessName]
+			pins := current.Harnesses[harnessValue]
 			pins.Model = *model
-			current.Harnesses[*harnessName] = pins
+			current.Harnesses[harnessValue] = pins
 		}
 		if err := writeFileAtomic(*writePins, current.Bytes()); err != nil {
 			fmt.Fprintln(stderr, "tenon check:", err)
 			return 1
 		}
 		if !jsonl {
-			fmt.Fprintf(stdout, "wrote pins for agent %s (%s) to %s\n", p.Name, *harnessName, *writePins)
+			fmt.Fprintf(stdout, "wrote pins for agent %s (%s) to %s\n", p.Name, harnessValue, *writePins)
 		}
 	}
 

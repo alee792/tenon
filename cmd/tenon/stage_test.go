@@ -88,7 +88,7 @@ func TestStageUnderGithubStyledPathStagesCleanly(t *testing.T) {
 
 	out := filepath.Join(t.TempDir(), "staged")
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"stage", agent, "--harness", "claude", "--output", out, "--diagnostics", "jsonl"},
+	if code := run([]string{"stage", agent, "--harness", "claude", "--output", out, "--format", "jsonl"},
 		nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("stage exit %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
 	}
@@ -128,7 +128,7 @@ func TestStageUnderGithubStyledPathStagesCleanlyWithAPythonClosure(t *testing.T)
 
 	out := filepath.Join(t.TempDir(), "staged")
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"stage", agent, "--harness", "claude", "--output", out, "--diagnostics", "jsonl"},
+	if code := run([]string{"stage", agent, "--harness", "claude", "--output", out, "--format", "jsonl"},
 		nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("stage exit %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
 	}
@@ -163,7 +163,7 @@ func TestStageUnderGithubStyledPathStagesCleanlyWithATypeScriptClosure(t *testin
 
 	out := filepath.Join(t.TempDir(), "staged")
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"stage", agent, "--harness", "claude", "--output", out, "--diagnostics", "jsonl"},
+	if code := run([]string{"stage", agent, "--harness", "claude", "--output", out, "--format", "jsonl"},
 		nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("stage exit %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
 	}

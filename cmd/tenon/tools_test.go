@@ -289,7 +289,7 @@ func TestBrokenToolFailsCheckAndApplyIdentically(t *testing.T) {
 	writeGoTool(t, agent, brokenGoToolFile)
 
 	var checkOut, applyOut, stderr bytes.Buffer
-	checkCode := run([]string{"check", agent, "--harness", "claude", "--diagnostics", "jsonl"}, nil, &checkOut, &stderr)
+	checkCode := run([]string{"check", agent, "--harness", "claude", "--format", "jsonl"}, nil, &checkOut, &stderr)
 	if checkCode == 0 {
 		t.Fatalf("a tool that does not compile must fail check: %q", checkOut.String())
 	}
@@ -308,11 +308,11 @@ func TestBrokenToolFailsCheckAndApplyIdentically(t *testing.T) {
 	}
 
 	ws := t.TempDir()
-	applyCode := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--diagnostics", "jsonl"}, nil, &applyOut, &stderr)
+	applyCode := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--format", "jsonl"}, nil, &applyOut, &stderr)
 	if applyCode == 0 {
 		t.Fatal("a tool that does not compile must fail apply")
 	}
-	if checkDiagnostics(checkOut.String()) != applyOut.String() {
+	if checkDiagnostics(checkOut.String()) != checkDiagnostics(applyOut.String()) {
 		t.Fatalf("check and apply must report identical diagnostics:\n%s\n%s",
 			checkOut.String(), applyOut.String())
 	}
@@ -335,7 +335,7 @@ func TestBrokenToolFailsThePortableGateToo(t *testing.T) {
 	writeGoTool(t, agent, brokenGoToolFile)
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"check", agent, "--emit", "files", "--diagnostics", "jsonl"}, nil, &stdout, &stderr)
+	code := run([]string{"check", agent, "--emit", "files", "--format", "jsonl"}, nil, &stdout, &stderr)
 	if code == 0 {
 		t.Fatalf("a tool that does not compile must fail the portable gate: %q", stdout.String())
 	}
@@ -357,7 +357,7 @@ func TestToolAndSubagentNamesMayNotCollide(t *testing.T) {
 		[]byte(minimalSubagentInstructionsFor("hash-text")), 0o644)
 
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"check", agent, "--harness", "claude", "--diagnostics", "jsonl"}, nil, &stdout, &stderr); code == 0 {
+	if code := run([]string{"check", agent, "--harness", "claude", "--format", "jsonl"}, nil, &stdout, &stderr); code == 0 {
 		t.Fatal("a tool and subagent sharing a name must fail validation")
 	}
 	got := filterDiags(parseDiagLines(t, stdout.String()), "tool.name.collision")
@@ -378,7 +378,7 @@ func TestCrossLanguageDuplicateToolNamesAreRejected(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"check", agent, "--harness", "claude", "--diagnostics", "jsonl"}, nil, &stdout, &stderr); code == 0 {
+	if code := run([]string{"check", agent, "--harness", "claude", "--format", "jsonl"}, nil, &stdout, &stderr); code == 0 {
 		t.Fatal("two languages declaring one tool name must fail validation")
 	}
 	if len(filterDiags(parseDiagLines(t, stdout.String()), "tool.name.duplicate")) != 1 {
@@ -602,7 +602,7 @@ func TestToolShapeViolationsFailInspectionNamingTheFile(t *testing.T) {
 
 			ws := t.TempDir()
 			var stdout, stderr bytes.Buffer
-			code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--diagnostics", "jsonl"},
+			code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--format", "jsonl"},
 				nil, &stdout, &stderr)
 			if code == 0 {
 				t.Fatalf("a tool that does not declare the contract must fail apply: %q", stdout.String())

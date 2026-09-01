@@ -50,6 +50,32 @@ func TestDriftCleanWorkspaceExitsZero(t *testing.T) {
 	}
 }
 
+// TestDriftJSONLResultSummaryOK proves the jsonl-mode driftResult on a clean
+// run carries outcome ok alongside agent/harness/workspace/fingerprint,
+// matching checkResult and applyResult's own shape.
+func TestDriftJSONLResultSummaryOK(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	ws := t.TempDir()
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("apply exit %d: %s", code, stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"drift", agent, "--harness", "claude", "--workspace", ws, "--format", "jsonl"}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("drift exit %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+	}
+	var got driftResult
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &got); err != nil {
+		t.Fatalf("result line %q is not valid JSON: %v", stdout.String(), err)
+	}
+	if got.Outcome != "ok" || got.Agent != "my-agent" || got.Harness != "claude" || got.Workspace != ws || got.Fingerprint == "" {
+		t.Fatalf("result = %+v, want outcome ok, agent=my-agent harness=claude workspace=%s and a non-empty fingerprint", got, ws)
+	}
+}
+
 // TestDriftReportsModifiedOwnedFileWithDiff proves drift's central case: an
 // owned file edited on disk since apply is reported as modified, exits 1,
 // carries the stable drift.file.modified identifier at the owned file's
@@ -180,7 +206,7 @@ func TestDriftJSONLIdentifiersAreStableAndParseable(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	code := run([]string{"drift", agent, "--harness", "claude", "--workspace", ws, "--diagnostics", "jsonl"}, nil, &stdout, &stderr)
+	code := run([]string{"drift", agent, "--harness", "claude", "--workspace", ws, "--format", "jsonl"}, nil, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("drift exit %d, want 1\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
 	}
@@ -209,11 +235,20 @@ func TestDriftJSONLIdentifiersAreStableAndParseable(t *testing.T) {
 	}
 	// Every jsonl line must itself be a single parseable JSON object with no
 	// unescaped embedded newlines breaking the one-object-per-line contract.
-	for _, line := range strings.Split(strings.TrimSpace(stdout.String()), "\n") {
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	for _, line := range lines {
 		var raw json.RawMessage
 		if err := json.Unmarshal([]byte(line), &raw); err != nil {
 			t.Fatalf("line %q is not one JSON object: %v", line, err)
 		}
+	}
+	// The stream ends with an outcome object distinguishing this from a
+	// gate_failed run: the source itself is fine, only the workspace drifted.
+	var final struct {
+		Outcome string `json:"outcome"`
+	}
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &final); err != nil || final.Outcome != "drift" {
+		t.Fatalf("the stream must end with the drift outcome object, got %q", lines[len(lines)-1])
 	}
 }
 
@@ -233,12 +268,12 @@ func TestDriftValidateApplyParityUntouched(t *testing.T) {
 	}
 
 	var checkOut, applyOut, stderr bytes.Buffer
-	checkCode := run([]string{"check", agent, "--harness", "claude", "--diagnostics", "jsonl"}, nil, &checkOut, &stderr)
-	applyCode := run([]string{"apply", agent, "--harness", "claude", "--diagnostics", "jsonl"}, nil, &applyOut, &stderr)
+	checkCode := run([]string{"check", agent, "--harness", "claude", "--format", "jsonl"}, nil, &checkOut, &stderr)
+	applyCode := run([]string{"apply", agent, "--harness", "claude", "--format", "jsonl"}, nil, &applyOut, &stderr)
 	if checkCode != 1 || applyCode != 1 {
 		t.Fatalf("both must still fail with exit 1: check=%d apply=%d", checkCode, applyCode)
 	}
-	if checkDiagnostics(checkOut.String()) != applyOut.String() {
+	if checkDiagnostics(checkOut.String()) != checkDiagnostics(applyOut.String()) {
 		t.Fatalf("check and apply must still report identical diagnostics:\n%s\n%s",
 			checkOut.String(), applyOut.String())
 	}
@@ -489,7 +524,7 @@ func TestDriftJSONLModifiedFindingCarriesDiff(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	code := run([]string{"drift", agent, "--harness", "claude", "--workspace", ws, "--diagnostics", "jsonl"}, nil, &stdout, &stderr)
+	code := run([]string{"drift", agent, "--harness", "claude", "--workspace", ws, "--format", "jsonl"}, nil, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("drift exit %d, want 1\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
 	}
@@ -532,7 +567,7 @@ func TestDriftFlagValidation(t *testing.T) {
 	}{
 		{"missing workspace", []string{"drift", agent, "--harness", "claude"}},
 		{"bad harness", []string{"drift", agent, "--workspace", ws, "--harness", "gpt"}},
-		{"bad diagnostics mode", []string{"drift", agent, "--workspace", ws, "--harness", "claude", "--diagnostics", "yaml"}},
+		{"bad format value", []string{"drift", agent, "--workspace", ws, "--harness", "claude", "--format", "yaml"}},
 		{"no agent", []string{"drift", "--workspace", ws, "--harness", "claude"}},
 		{"two agents", []string{"drift", agent, agent, "--workspace", ws, "--harness", "claude"}},
 	}

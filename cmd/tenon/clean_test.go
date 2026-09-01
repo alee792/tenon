@@ -176,7 +176,7 @@ func TestCleanJSONLShapes(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	if code := run([]string{"clean", "--workspace", ws, "--harness", "claude", "--diagnostics", "jsonl"}, nil, &stdout, &stderr); code != 0 {
+	if code := run([]string{"clean", "--workspace", ws, "--harness", "claude", "--format", "jsonl"}, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("clean exit %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
 	}
 	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
@@ -225,7 +225,7 @@ func TestCleanJSONLShapes(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	code := run([]string{"clean", "--workspace", ws, "--harness", "claude", "--diagnostics", "jsonl"}, nil, &stdout, &stderr)
+	code := run([]string{"clean", "--workspace", ws, "--harness", "claude", "--format", "jsonl"}, nil, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("blocked clean must exit 1, got %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
 	}

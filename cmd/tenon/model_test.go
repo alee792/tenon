@@ -207,7 +207,7 @@ func TestApplyClaudeModelPinInvalidAuthorJSONFailsClosed(t *testing.T) {
 
 	ws := t.TempDir()
 	var out, errb bytes.Buffer
-	code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--pins", manifestPath, "--diagnostics", "jsonl"}, nil, &out, &errb)
+	code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--pins", manifestPath, "--format", "jsonl"}, nil, &out, &errb)
 	if code == 0 {
 		t.Fatal("invalid authored settings.json must fail apply")
 	}
@@ -245,7 +245,7 @@ func TestReapplyHandEditedGeneratedClaudeSettingsFailsClosed(t *testing.T) {
 
 	out.Reset()
 	errb.Reset()
-	code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--pins", manifestPath, "--diagnostics", "jsonl"}, nil, &out, &errb)
+	code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--pins", manifestPath, "--format", "jsonl"}, nil, &out, &errb)
 	if code == 0 {
 		t.Fatal("reapplying over a hand-edited generated settings.json must fail closed")
 	}
@@ -325,13 +325,13 @@ func TestCheckApplyModelParity(t *testing.T) {
 
 	ws := t.TempDir()
 	var checkOut, applyOut, errb bytes.Buffer
-	checkCode := run([]string{"check", agent, "--harness", "claude", "--pins", manifestPath, "--diagnostics", "jsonl"}, nil, &checkOut, &errb)
-	applyCode := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--pins", manifestPath, "--diagnostics", "jsonl"}, nil, &applyOut, &errb)
+	checkCode := run([]string{"check", agent, "--harness", "claude", "--pins", manifestPath, "--format", "jsonl"}, nil, &checkOut, &errb)
+	applyCode := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--pins", manifestPath, "--format", "jsonl"}, nil, &applyOut, &errb)
 
 	if checkCode == 0 || applyCode == 0 {
 		t.Fatalf("both must fail on the invalid authored settings.json: check=%d apply=%d", checkCode, applyCode)
 	}
-	if checkDiagnostics(checkOut.String()) != applyOut.String() {
+	if checkDiagnostics(checkOut.String()) != checkDiagnostics(applyOut.String()) {
 		t.Fatalf("check and apply must report identical diagnostics:\ncheck: %s\napply: %s", checkOut.String(), applyOut.String())
 	}
 	if !strings.Contains(checkOut.String(), "claude.settings.invalid") {

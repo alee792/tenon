@@ -44,10 +44,10 @@ import (
 const prepareBudget = 5 * time.Minute
 
 const usage = `usage:
-  tenon apply AGENT --harness <claude|codex> [--workspace DIR] [--pins FILE] [--diagnostics <prose|jsonl>] [--discard-local]
-  tenon check AGENT [--harness <claude|codex>] [--emit files,catalog] [--pins FILE] [--write-pins FILE] [--model VALUE] [--diagnostics <prose|jsonl>]
-  tenon drift AGENT --workspace DIR --harness <claude|codex> [--pins FILE] [--diagnostics <prose|jsonl>]
-  tenon clean --workspace DIR [--harness <claude|codex>] [--force] [--diagnostics <prose|jsonl>]
+  tenon apply AGENT --harness <claude|codex> [--workspace DIR] [--pins FILE] [--format <prose|jsonl>] [--discard-local]
+  tenon check AGENT [--harness <claude|codex>] [--emit files,catalog] [--pins FILE] [--write-pins FILE] [--model VALUE] [--format <prose|jsonl>]
+  tenon drift AGENT --workspace DIR --harness <claude|codex> [--pins FILE] [--format <prose|jsonl>]
+  tenon clean --workspace DIR [--harness <claude|codex>] [--force] [--format <prose|jsonl>]
   tenon mcp serve AGENT --harness <claude|codex> [--workspace DIR] [--pins FILE]
   tenon run AGENT --workspace DIR --harness <claude|codex> [--conversation ID] [--input jsonl] [--pins FILE] [--timeout DUR] [--turn-timeout DUR]
   tenon schedule trigger AGENT NAME --workspace DIR --harness <claude|codex> --input-id ID [--pins FILE] [--turn-timeout DUR] [--timeout DUR]
@@ -122,8 +122,35 @@ func runVersion(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// resolveHarness applies TENON_HARNESS as the fallback for an unset --harness
+// flag: the explicit flag always wins. A flag.FlagSet cannot distinguish "not
+// passed" from "passed as empty string", so an empty flag with the env var
+// set defers to it — every caller that reaches this treats that as
+// indistinguishable from an explicit --harness. It does not itself validate
+// the result; callers still switch on claude/codex, using fromEnv to name the
+// actual source (TENON_HARNESS vs --harness) in their error.
+func resolveHarness(flagValue string) (value string, fromEnv bool) {
+	if flagValue != "" {
+		return flagValue, false
+	}
+	if env := os.Getenv("TENON_HARNESS"); env != "" {
+		return env, true
+	}
+	return "", false
+}
+
+// harnessFlagError formats the --harness/TENON_HARNESS validation error,
+// naming whichever source actually produced the invalid value so the error
+// stays honest about where a bad value came from.
+func harnessFlagError(cmd, value string, fromEnv bool) string {
+	if fromEnv {
+		return fmt.Sprintf("tenon %s: TENON_HARNESS must be claude or codex (found %q)\n", cmd, value)
+	}
+	return fmt.Sprintf("tenon %s: --harness must be exactly claude or codex\n", cmd)
+}
+
 // commonFlags parses the shared AGENT positional and flag set. It returns
-// the agent path, the selected driver, and the diagnostics mode. When
+// the agent path, the selected driver, and the output format. When
 // withDiscardLocal is true (apply only), it also accepts --discard-local and
 // returns whether it was set; every other caller gets discardLocal=false
 // unconditionally, since the flag is not registered on their FlagSet.
@@ -131,7 +158,7 @@ func commonFlags(name string, args []string, stderr io.Writer, withWorkspace, wi
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	harness := fs.String("harness", "", "target harness: claude or codex")
-	mode := fs.String("diagnostics", "prose", "diagnostic rendering: prose or jsonl")
+	mode := fs.String("format", "prose", "output rendering: prose or jsonl")
 	manifest := fs.String("pins", "", "supplied pin set to verify against the current runtime closure; fails closed naming the first drifted pin")
 	var ws *string
 	if withWorkspace {
@@ -167,13 +194,14 @@ func commonFlags(name string, args []string, stderr io.Writer, withWorkspace, wi
 	}
 	agent = positional[0]
 
-	switch *harness {
+	harnessValue, harnessFromEnv := resolveHarness(*harness)
+	switch harnessValue {
 	case "claude":
 		driver = claude.Driver{}
 	case "codex":
 		driver = codex.Driver{}
 	default:
-		fmt.Fprintf(stderr, "tenon %s: --harness must be exactly claude or codex\n", name)
+		fmt.Fprint(stderr, harnessFlagError(name, harnessValue, harnessFromEnv))
 		return "", "", nil, false, "", false, false
 	}
 	switch *mode {
@@ -181,7 +209,7 @@ func commonFlags(name string, args []string, stderr io.Writer, withWorkspace, wi
 	case "jsonl":
 		jsonl = true
 	default:
-		fmt.Fprintf(stderr, "tenon %s: --diagnostics must be prose or jsonl\n", name)
+		fmt.Fprintf(stderr, "tenon %s: --format must be prose or jsonl\n", name)
 		return "", "", nil, false, "", false, false
 	}
 	workspace = agent
@@ -202,12 +230,27 @@ func render(diags *diagnostics.List, jsonl bool, stdout, stderr io.Writer) {
 	_ = diags.WriteProse(stderr)
 }
 
+// writeGateFailed terminates the jsonl stream with check's own gate_failed
+// object (defined in check.go) when apply's gate rejects the project — the
+// same gate check runs, so apply's failure stream ends exactly as check's
+// does. A no-op in prose mode.
+func writeGateFailed(jsonl bool, stdout, stderr io.Writer, cmd string) {
+	if !jsonl {
+		return
+	}
+	if err := writeResult(stdout, gateFailedResult{Outcome: "gate_failed"}); err != nil {
+		fmt.Fprintln(stderr, "tenon "+cmd+":", err)
+	}
+}
+
 // applyResult is the jsonl-mode result summary for a successful apply. Field
 // names follow apply.Record's existing json tags (snake_case). ManagedTools
 // names only the tools exposed through tenon's managed MCP boundary — native
 // harness tools are never included and always remain unmanaged, regardless
-// of this list's contents.
+// of this list's contents. Outcome is first, matching checkResult/
+// driftResult/clean's own result shapes.
 type applyResult struct {
+	Outcome      string   `json:"outcome"`
 	Agent        string   `json:"agent"`
 	Harness      string   `json:"harness"`
 	Workspace    string   `json:"workspace"`
@@ -266,6 +309,7 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 	}
 	if p == nil || diags.HasErrors() {
 		render(diags, jsonl, stdout, stderr)
+		writeGateFailed(jsonl, stdout, stderr, "apply")
 		return 1
 	}
 	storeBase := resolveIntegrationStoreBase()
@@ -279,6 +323,7 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 		}
 		if diags.HasErrors() {
 			render(diags, jsonl, stdout, stderr)
+			writeGateFailed(jsonl, stdout, stderr, "apply")
 			return 1
 		}
 	}
@@ -292,6 +337,7 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 	// half-applied.
 	if !prepareTools(p, workspace, "", diags) {
 		render(diags, jsonl, stdout, stderr)
+		writeGateFailed(jsonl, stdout, stderr, "apply")
 		return 1
 	}
 
@@ -313,10 +359,12 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if result == nil || diags.HasErrors() {
+		writeGateFailed(jsonl, stdout, stderr, "apply")
 		return 1
 	}
 	if jsonl {
 		res := applyResult{
+			Outcome:      "ok",
 			Agent:        p.Name,
 			Harness:      driver.Harness(),
 			Workspace:    workspace,
@@ -564,7 +612,7 @@ func newHarnessDriver(name string) (harness.Driver, error) {
 func runRun(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	harnessName := fs.String("harness", "", "target harness: claude or codex")
+	harness := fs.String("harness", "", "target harness: claude or codex")
 	workspace := fs.String("workspace", "", "workspace directory (required)")
 	conversation := fs.String("conversation", "", "conversation id (defaults to local)")
 	input := fs.String("input", "jsonl", "input format: jsonl")
@@ -579,10 +627,11 @@ func runRun(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	agent := positional[0]
 
-	switch *harnessName {
+	harnessName, harnessFromEnv := resolveHarness(*harness)
+	switch harnessName {
 	case "claude", "codex":
 	default:
-		fmt.Fprintln(stderr, "tenon run: --harness must be exactly claude or codex")
+		fmt.Fprint(stderr, harnessFlagError("run", harnessName, harnessFromEnv))
 		return 2
 	}
 	if *workspace == "" {
@@ -602,7 +651,7 @@ func runRun(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	driver, err := newHarnessDriver(*harnessName)
+	driver, err := newHarnessDriver(harnessName)
 	if err != nil {
 		fmt.Fprintln(stderr, "tenon run:", err)
 		return 1
@@ -625,7 +674,7 @@ func runRun(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 	// A supplied manifest gates the process open: on drift, open nothing.
-	if err := checkManifest(p, *harnessName, resolveIntegrationStoreBase(), supplied); err != nil {
+	if err := checkManifest(p, harnessName, resolveIntegrationStoreBase(), supplied); err != nil {
 		fmt.Fprintln(stderr, "tenon run:", err)
 		return 1
 	}
@@ -635,7 +684,7 @@ func runRun(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		Project:      p,
 		Driver:       driver,
 		Workspace:    *workspace,
-		Harness:      *harnessName,
+		Harness:      harnessName,
 		Conversation: *conversation,
 		Mode:         dispatch.Interactive,
 		In:           stdin,
@@ -691,7 +740,7 @@ func loadScheduleProject(agent, cmdName, expectedFingerprint string, stderr io.W
 func runScheduleTrigger(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("schedule trigger", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	harnessName := fs.String("harness", "", "target harness: claude or codex")
+	harness := fs.String("harness", "", "target harness: claude or codex")
 	workspace := fs.String("workspace", "", "workspace directory (required)")
 	inputID := fs.String("input-id", "", "caller-owned stable occurrence id (required)")
 	turnTimeout := fs.Duration("turn-timeout", 90*time.Second, "per-turn deadline (0 disables)")
@@ -705,10 +754,11 @@ func runScheduleTrigger(args []string, stdout, stderr io.Writer) int {
 	}
 	agent, name := positional[0], positional[1]
 
-	switch *harnessName {
+	harnessName, harnessFromEnv := resolveHarness(*harness)
+	switch harnessName {
 	case "claude", "codex":
 	default:
-		fmt.Fprintln(stderr, "tenon schedule trigger: --harness must be exactly claude or codex")
+		fmt.Fprint(stderr, harnessFlagError("schedule trigger", harnessName, harnessFromEnv))
 		return 2
 	}
 	if *workspace == "" {
@@ -749,14 +799,14 @@ func runScheduleTrigger(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	driver, err := newHarnessDriver(*harnessName)
+	driver, err := newHarnessDriver(harnessName)
 	if err != nil {
 		fmt.Fprintln(stderr, "tenon schedule trigger:", err)
 		return 1
 	}
 	// Triggering requires the workspace to carry the applied setup: fail closed
 	// on stale or missing generated setup rather than dispatch against drift.
-	if err := apply.Verify(p, *workspace, *harnessName); err != nil {
+	if err := apply.Verify(p, *workspace, harnessName); err != nil {
 		fmt.Fprintln(stderr, "tenon schedule trigger:", err)
 		return 1
 	}
@@ -764,7 +814,7 @@ func runScheduleTrigger(args []string, stdout, stderr io.Writer) int {
 	// running clock or a concurrent trigger for the same setup — both would
 	// rewrite the single dispatch file under last-writer-wins. Fail closed if
 	// held; the caller can retry.
-	release, err := schedule.Lock(*workspace, p.Name, *harnessName)
+	release, err := schedule.Lock(*workspace, p.Name, harnessName)
 	if err != nil {
 		fmt.Fprintln(stderr, "tenon schedule trigger:", err)
 		return 1
@@ -775,12 +825,12 @@ func runScheduleTrigger(args []string, stdout, stderr io.Writer) int {
 	defer cancel()
 	// A supplied manifest gates this process open before any harness
 	// invocation, matching run and mcp serve: on drift, open nothing.
-	if err := checkManifest(p, *harnessName, resolveIntegrationStoreBase(), supplied); err != nil {
+	if err := checkManifest(p, harnessName, resolveIntegrationStoreBase(), supplied); err != nil {
 		fmt.Fprintln(stderr, "tenon schedule trigger:", err)
 		return 1
 	}
 	if err := driver.Verify(ctx); err != nil {
-		fmt.Fprintf(stderr, "tenon schedule trigger: the %s harness could not be verified: %v\n", *harnessName, err)
+		fmt.Fprintf(stderr, "tenon schedule trigger: the %s harness could not be verified: %v\n", harnessName, err)
 		return 1
 	}
 
@@ -788,7 +838,7 @@ func runScheduleTrigger(args []string, stdout, stderr io.Writer) int {
 		Project:      p,
 		Driver:       driver,
 		Workspace:    *workspace,
-		Harness:      *harnessName,
+		Harness:      harnessName,
 		Conversation: schedule.ConversationID(name),
 		Mode:         dispatch.Task,
 		TurnTimeout:  *turnTimeout,
@@ -822,7 +872,7 @@ func runScheduleTrigger(args []string, stdout, stderr io.Writer) int {
 func runScheduleRun(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("schedule run", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	harnessName := fs.String("harness", "", "target harness: claude or codex")
+	harness := fs.String("harness", "", "target harness: claude or codex")
 	workspace := fs.String("workspace", "", "workspace directory (required)")
 	turnTimeout := fs.Duration("turn-timeout", 90*time.Second, "per-turn deadline (0 disables)")
 	maxActive := fs.Int("max-active-turns", schedule.DefaultMaxActive, "concurrent occurrences across distinct schedules")
@@ -835,10 +885,11 @@ func runScheduleRun(args []string, stdout, stderr io.Writer) int {
 	}
 	agent := positional[0]
 
-	switch *harnessName {
+	harnessName, harnessFromEnv := resolveHarness(*harness)
+	switch harnessName {
 	case "claude", "codex":
 	default:
-		fmt.Fprintln(stderr, "tenon schedule run: --harness must be exactly claude or codex")
+		fmt.Fprint(stderr, harnessFlagError("schedule run", harnessName, harnessFromEnv))
 		return 2
 	}
 	if *workspace == "" {
@@ -866,7 +917,7 @@ func runScheduleRun(args []string, stdout, stderr io.Writer) int {
 	if !ok {
 		return 1
 	}
-	driver, err := newHarnessDriver(*harnessName)
+	driver, err := newHarnessDriver(harnessName)
 	if err != nil {
 		fmt.Fprintln(stderr, "tenon schedule run:", err)
 		return 1
@@ -880,7 +931,7 @@ func runScheduleRun(args []string, stdout, stderr io.Writer) int {
 		Project:     p,
 		Driver:      driver,
 		Workspace:   *workspace,
-		Harness:     *harnessName,
+		Harness:     harnessName,
 		TurnTimeout: *turnTimeout,
 		MaxActive:   *maxActive,
 		Out:         stdout,
@@ -890,7 +941,7 @@ func runScheduleRun(args []string, stdout, stderr io.Writer) int {
 	// process; drift fails the occurrence closed and ends admission.
 	if supplied != nil {
 		opts.VerifyOccurrence = func() error {
-			return checkManifest(p, *harnessName, storeBase, supplied)
+			return checkManifest(p, harnessName, storeBase, supplied)
 		}
 	}
 	if err := schedule.Run(ctx, opts); err != nil {
