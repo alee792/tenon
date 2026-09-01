@@ -3,6 +3,18 @@
 Actionable compaction of [improve-notes.md](improve-notes.md). Evidence lives
 there; decisions live here. Where the two disagree, this file is later.
 
+## Superseding decision (2026-09-01)
+
+The plan below is being IMPLEMENTED on this branch rather than merged as a
+document. Two changes to it:
+
+- **tenon-improve is sidelined until after the refactor**, then joins this
+  repository as a separate module (monorepo), not a separate repo. PR #61 stays
+  open and untouched until then. The one-directional relationship stands —
+  tenon exports facts, the improve module composes them — enforced by module
+  boundary instead of repo boundary. The I-items defer accordingly.
+- The T-items land as commits here, sequenced as written.
+
 ## The idea
 
 **Tenon answers three questions about an agent source, each bound to a different
