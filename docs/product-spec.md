@@ -455,7 +455,11 @@ stale (recorded by a previous apply but no longer generated). A workspace
 that does not exist is not a gate failure — the source is fine, the
 environment is what is missing — so it classifies as what it is: no record,
 every generated path missing, and the run ends in the ordinary `drift`
-outcome. Drift
+outcome; drift's own gate (including authored-tool preparation) runs
+against the source, not against the workspace, so a missing workspace can
+never be reported as a source failure. A path passed as `--workspace` that
+exists but is a regular file is neither of those: it is a mistake in the
+invocation, reported as a usage error with no outcome object at all. Drift
 deliberately never adopts a workspace edit back into source: generation is
 lossy in reverse, so tenon never guesses author intent from a diff. Drift
 only shows the diff; the author edits source and reapplies, optionally with
@@ -474,7 +478,14 @@ otherwise leaves the first one's files behind). Ownership discipline is
 apply's, run in reverse: a file recorded but modified since that apply
 refuses the whole clean, all-or-nothing, rather than half-uninstalling a
 workspace, and `--force` overrides exactly that refusal; a file tenon never
-recorded as its own is never touched, with or without the flag. An omitted
+recorded as its own is never touched, with or without the flag. That
+all-or-nothing is decided at plan time, before anything is removed. Because
+the workspace can change underneath a running clean, every path is
+re-classified immediately before its own removal, and one that no longer
+classifies as removable stops the clean where it stands: the files already
+removed stay removed, the jsonl stream ends `{"outcome":"blocked"}` and the
+prose names the offending path and what changed about it, and the record is
+deliberately kept so a re-run can finish the job. An omitted
 `--harness` means every harness recorded in the workspace, which is why
 clean alone ignores `TENON_HARNESS`: an environment default would silently
 narrow a full reset. A workspace with no records succeeds trivially, and a
@@ -482,16 +493,21 @@ record owning no files is still dropped.
 
 An apply record is durable state on disk, so the paths in it are an input
 like any other and are never trusted verbatim. A recorded path that is not
-workspace-local, or one that would be reached through a parent that is a
-symlink rather than a real directory, blocks the clean
-(`escapes-workspace`, `symlink-parent`) and is removed by nothing, with or
-without `--force`: the flag widens what tenon removes inside a workspace,
-never where it removes. The directory pruning that follows a removal is
-bounded by the workspace and never removes the workspace itself. Apply
-enforces the identical rule on its own removal of stale recorded files,
-refusing the apply rather than removing outside the workspace. A file in
-`.tenon` whose name resolves to no harness tenon knows is reported and left
-alone rather than acted on.
+workspace-local, one that would be reached through a parent that is a
+symlink rather than a real directory, or one whose parent chain cannot be
+read at all, blocks the clean (`escapes-workspace`, `symlink-parent`,
+`unreadable-parent`) and is removed by nothing, with or without `--force`:
+the flag widens what tenon removes inside a workspace, never where it
+removes. The directory pruning that follows a removal is bounded by the
+workspace and never removes the workspace itself. Apply enforces the
+identical rule on both sides of its own file handling — on the removal of
+stale recorded files and on every file it writes — refusing the apply
+rather than acting outside the workspace, so a generated parent directory
+replaced by a symlink cannot make an atomic write land on a file the
+workspace does not contain. A file in `.tenon` whose name resolves to no
+harness tenon knows is reported and left alone rather than acted on: in
+jsonl mode as `{"ignored":NAME,"reason":"unknown-harness"}`, which is a
+report and not a block — the clean continues and still ends `ok`.
 
 ## Pins
 
@@ -702,7 +718,10 @@ conversation state. Staging is deterministic for identical pinned inputs,
 verifies that preparation did not mutate authored source, and publishes with
 one rename only after the manifest is complete. The entrypoint verifies
 runtime identity, generated integration, and source fingerprint before a
-turn. Tenon does not construct OCI layers, contact registries, publish, sign,
+turn; the same verification is available directly as `tenon stage verify
+--artifact PATH [--prefix DIR] [--format <prose|jsonl>]`, whose jsonl run
+ends with `{"outcome":"ok","artifact":PATH}` on a clean tree and the
+`gate_failed` object on a tampered one. Tenon does not construct OCI layers, contact registries, publish, sign,
 deploy, or operate images, and publishing a harness image requires current
 permission to redistribute that harness.
 

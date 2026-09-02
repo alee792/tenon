@@ -51,9 +51,20 @@ The first release, v0.1.0, ships the core described in
   parent that is a symlink rather than a real directory, blocks the clean
   (`escapes-workspace`, `symlink-parent`) with or without `--force`, every
   path is re-classified immediately before its own removal, and the
-  directory pruning is bounded by the workspace itself. Apply enforces the
-  same rule on its own removal of stale recorded files
-  (`apply.record.unsafe-path`).
+  directory pruning is bounded by the workspace itself. A parent chain that
+  cannot be read at all blocks the same way (`unreadable-parent`), naming
+  what was actually observed rather than claiming a symlink. Clean's
+  all-or-nothing refusal is decided at plan time: a path that changes
+  between the plan and its own removal stops the clean where it stands, the
+  jsonl stream ends `{"outcome":"blocked"}`, the prose names the path, and
+  the record is kept so a re-run can finish. A `.tenon` file naming no
+  harness tenon knows is reported as
+  `{"ignored":NAME,"reason":"unknown-harness"}` and left alone; the clean
+  continues. Apply enforces the same containment rule on its own removal of
+  stale recorded files (`apply.record.unsafe-path`) and on every file it
+  writes (`apply.workspace.unsafe-path`), so a generated parent directory
+  swapped for a symlink cannot make an atomic write land outside the
+  workspace.
 
 - `--diagnostics` is renamed `--format` everywhere, since the flag governs
   all output rendering rather than diagnostics alone; there is no deprecated
@@ -63,15 +74,23 @@ The first release, v0.1.0, ships the core described in
   `clean`, which ignores it deliberately so that a bare clean still means
   "every harness recorded here". Every jsonl stream now ends with one
   distinct object carrying an `outcome` field: `ok` from check, apply,
-  drift, and clean, `gate_failed` when the source itself is invalid, `drift`
+  drift, clean, and stage (including `stage verify`), `gate_failed` when the
+  source itself is invalid, `drift`
   when the workspace no longer matches a fresh apply, and `blocked` when
   clean refuses. Check's success object keeps `agent` and `fingerprint` and
   adds `pins_written` when `--write-pins` wrote one; `outcome` is the only
   field every result object carries, and the rest vary by command. `stage`
   honors `--format` too, ending a jsonl run with its own result object
-  (agent, fingerprint, output directory) instead of prose. `drift` against a
-  workspace that does not exist now reports `drift` with every generated
-  path missing, rather than `gate_failed` for a source that is fine.
+  (agent, fingerprint, output directory) instead of prose, and `stage verify`
+  honors it as well, ending a jsonl run with
+  `{"outcome":"ok","artifact":PATH}` or the `gate_failed` object. `drift`
+  against a workspace that does not exist now reports `drift` with every
+  generated path missing, rather than `gate_failed` for a source that is
+  fine — its gate, authored-tool preparation included, runs against the
+  source rather than the workspace, so a tool-bearing agent reports the same
+  thing a tool-free one does. A path passed as `--workspace` that exists but
+  is a regular file is neither drift nor a gate failure: it is a usage
+  error, exit 2 with no outcome object.
 
 - `--emit catalog` reports an MCP entry's `transport` in one vocabulary
   whichever side declared the server — `stdio`, `streamable-http`, or
