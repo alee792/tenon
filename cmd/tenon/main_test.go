@@ -2969,3 +2969,51 @@ func TestApplyRefusesStaleRecordPathsOutsideTheWorkspace(t *testing.T) {
 		}
 	})
 }
+
+// TestApplyRefusesEverythingWhenOnlySomePathsFailContainment proves the
+// containment refusal is whole-run and not per-path. Only one generated
+// destination is compromised — .claude/skills is a symlink out of the
+// workspace — while CLAUDE.md and .mcp.json are ordinary workspace-local
+// paths that would write safely. Apply writes none of them. A partially
+// applied workspace is a state nobody asked for and nothing in tenon can
+// describe, and "the safe files landed" is exactly the report that would
+// hide the compromised one.
+func TestApplyRefusesEverythingWhenOnlySomePathsFailContainment(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	writeFile(t, agent, "skills/echo/SKILL.md", []byte(echoSkillMD), 0o644)
+	ws := t.TempDir()
+	outside := t.TempDir()
+
+	if err := os.MkdirAll(filepath.Join(ws, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(ws, ".claude", "skills")); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--format", "jsonl"}, nil, &stdout, &stderr); code == 0 {
+		t.Fatalf("apply must refuse the run: %s", stdout.String())
+	}
+	diags := filterDiags(parseDiagLines(t, stdout.String()), "apply.workspace.unsafe-path")
+	if len(diags) == 0 {
+		t.Fatalf("the refusal must carry the stable identifier: %q", stdout.String())
+	}
+	if !strings.Contains(diags[0].Rule, "symlink-parent") {
+		t.Fatalf("the refusal must name what is wrong with the path: %+v", diags[0])
+	}
+	// The safe paths are not written, and neither is the record.
+	for _, rel := range []string{"CLAUDE.md", ".mcp.json", filepath.Join(".tenon", "apply-claude.json")} {
+		if _, err := os.Stat(filepath.Join(ws, rel)); !os.IsNotExist(err) {
+			t.Fatalf("a refused apply must write nothing, but %s exists: %v", rel, err)
+		}
+	}
+	// Nothing landed through the symlink either.
+	entries, err := os.ReadDir(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("nothing may be written through the symlinked parent, found %d entries", len(entries))
+	}
+}

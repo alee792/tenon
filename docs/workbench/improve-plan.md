@@ -95,19 +95,49 @@ answers a documented gap — no way to turn a diagnostic identifier back into a
 cause, no artifact behind "stable machine-readable", no uninstall story at all.
 If the plan must be cut to hold tenet 1, cut T10 and T6's `explain` first.
 
-## Open questions for T1's ADR
+## Open questions for T1's ADR — closed
 
-1. **`pins` or `lock`?** The strongest sentence in the naming discussion —
-   "everyone knows what a lockfile is and nobody expects one to list
-   components" — was dropped without counterargument when `pins` landed. Against
-   `lock`: a lockfile connotes resolved transitive dependencies, while this pins
-   environment versions; and one field (`model`) is never verified, so the
-   fail-closed connotation is not quite honest. Air it once. Cheapest now.
-2. **Identity for candidates that fail the gate.** Do not weaken the
-   certificate — per ADR 0025 a fingerprint means the project loaded and its
-   tools prepared. Instead emit a distinct `source_digest` on failure, a plain
-   content hash explicitly not a fingerprint, so rejected mutations stay
-   attributable without diluting identity.
+Both are settled in [ADR 0027](../adr/0027-consolidate-the-read-surface.md)
+and implemented, along with three smaller decisions the review raised.
+
+1. **`pins` or `lock`?** Settled: `pins`, final. A lockfile connotes a
+   resolved dependency graph the tool computed, and this file records
+   versions of things tenon neither resolves nor installs; and its `model`
+   field is advisory and never verified, so `lock`'s fail-closed connotation
+   would be dishonest for one of its own fields. Recorded in the ADR before
+   the identifier stability window closes.
+2. **Identity for candidates that fail the gate.** Settled and implemented:
+   `gate_failed` carries `source_digest`, a content hash explicitly not a
+   fingerprint, domain-separated so the two can never collide. A consumer
+   joins failures by digest and successes by fingerprint.
+3. **`TENON_HARNESS` on `check`.** Kept, and documented: it selects the
+   harness gate, so `--harness` omitted means the portable gate only when
+   the environment variable is unset. The flag help and the usage block say
+   so.
+4. **An `error` outcome.** Every non-usage failure that is not a finding
+   about the source or the workspace now ends the jsonl stream with
+   `{"outcome":"error","error":MSG}`. The vocabulary is
+   `ok / gate_failed / drift / blocked / error`; a loop scores the first
+   four and retries or escalates the fifth.
+5. **`clean --harness H` with no `apply-H.json` record.** Exits 1 with the
+   `error` outcome. A bare clean over an unapplied workspace still succeeds
+   trivially.
+
+## Next
+
+**Extract the shared gate.** Check, drift, and apply each open with the same
+sequence — read the supplied pins, load with the expected fingerprint,
+verify the closure, prepare tools, dry-run generation — written out three
+times. Lift it to one `runGate(agent, driver, supplied) (*Project,
+*diagnostics.List, ...)` so the parity ADR 0027 asserts as a binding
+contract ("check and apply fail identically on the same source") becomes
+structural rather than test-enforced.
+
+Deliberately not in this PR: it touches every failure path in three
+commands at once, and interleaving it with the outcome and digest work
+above would make a diff nobody can review. The parity tests are the guard
+until then — they are the reason the divergence would be caught, and they
+are also the reason the extraction is safe to do later rather than never.
 
 ## Corrections to the notes
 

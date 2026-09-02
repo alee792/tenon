@@ -756,3 +756,60 @@ func TestDriftAgainstAFileWorkspaceIsAUsageError(t *testing.T) {
 		t.Fatalf("the usage error must name the rule and the path: %q", stderr.String())
 	}
 }
+
+// TestDriftAgainstADanglingSymlinkWorkspaceReportsDrift settles what a
+// --workspace that is a symlink to nothing means. It is deliberately the
+// missing-workspace answer and not the not-a-directory one: os.Stat follows
+// the link and reports the target, which does not exist, so the path names
+// no directory and no file — nothing exists there to have been applied. The
+// source is fine, the environment is what is missing, and every generated
+// path is missing, which is the ordinary drift outcome. The alternative,
+// treating it as the usage error a regular file gets, would claim the
+// operator pointed at the wrong kind of thing when they pointed at
+// something that is not there at all.
+func TestDriftAgainstADanglingSymlinkWorkspaceReportsDrift(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	dir := t.TempDir()
+	ws := filepath.Join(dir, "workspace")
+	if err := os.Symlink(filepath.Join(dir, "no-such-target"), ws); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"drift", agent, "--harness", "claude", "--workspace", ws, "--format", "jsonl"}, nil, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("drift exit %d, want 1\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+	}
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	var final struct {
+		Outcome string `json:"outcome"`
+	}
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &final); err != nil || final.Outcome != "drift" {
+		t.Fatalf("the stream must end with the drift outcome, got %q", lines[len(lines)-1])
+	}
+	for _, d := range parseDiagLines(t, stdout.String()) {
+		if d.Path == "CLAUDE.md" && d.ID == "drift.file.missing" {
+			return
+		}
+	}
+	t.Fatalf("every generated path must report missing, got %s", stdout.String())
+}
+
+// TestDriftRefusesAWorkspaceThatIsAFile is the contrast: a --workspace that
+// exists and is a regular file is not drift and not a gate failure, but a
+// mistake in the invocation, and it exits 2 with no outcome object at all.
+func TestDriftRefusesAWorkspaceThatIsAFile(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	file := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(file, []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"drift", agent, "--harness", "claude", "--workspace", file, "--format", "jsonl"}, nil, &stdout, &stderr); code != 2 {
+		t.Fatalf("drift exit %d, want 2\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), `"outcome"`) {
+		t.Fatalf("a usage error must emit no outcome object, got %q", stdout.String())
+	}
+}

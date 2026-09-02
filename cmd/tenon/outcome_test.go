@@ -114,6 +114,11 @@ func TestEnvironmentFailureEndsTheStreamWithAnError(t *testing.T) {
 // invocation never ran, so there is no outcome to report, and inventing one
 // would tell a consumer a run happened.
 func TestUsageErrorsEmitNoOutcome(t *testing.T) {
+	// --pins without --harness is a usage error only when no harness is
+	// supplied at all, and TENON_HARNESS supplies one: the suite must not
+	// inherit the operator's shell for a case that is about the absence of a
+	// harness.
+	t.Setenv("TENON_HARNESS", "")
 	agent := writeAgent(t, "my-agent", validInstructions)
 	cases := [][]string{
 		{"check", agent, "--harness", "gpt", "--format", "jsonl"},

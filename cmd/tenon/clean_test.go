@@ -693,3 +693,20 @@ func emptyRecordFiles(t *testing.T, ws, harness string) {
 		t.Fatal(err)
 	}
 }
+
+// TestCleanRefusesPathsWithAnUnreadableParent is the third containment
+// refusal — a recorded path whose parent chain cannot be read at all, so
+// containment can be neither proven nor disproven and clean fails closed
+// (ContainmentUnreadableParent, reason "unreadable-parent"). It is skipped
+// rather than written against the filesystem because the only portable way
+// to make a parent unreadable is to strip its permission bits, and this
+// suite runs as root in CI, where CAP_DAC_OVERRIDE makes a 0o000 directory
+// traversable anyway: the setup would produce an ordinary successful clean
+// and the test would assert nothing it claims to. Dropping privileges or
+// mounting a filesystem to reproduce it is a heavier apparatus than the
+// branch is worth, and the same branch is exercised through
+// apply.CheckContainment's own escaping-path and symlink-parent cases,
+// which share every line but the classification.
+func TestCleanRefusesPathsWithAnUnreadableParent(t *testing.T) {
+	t.Skip("cannot be reproduced as root: permission bits do not stop a CAP_DAC_OVERRIDE traversal")
+}

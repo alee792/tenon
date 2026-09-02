@@ -243,19 +243,28 @@ match the environment, not a refusal to remove something, which is what
 - Four flag and command renames land at once. They are correct and they are
   cheap exactly now, and every one of them would be expensive later.
 
-## Open questions
+## Settled: `pins`, not `lock`
 
-**Should `pins` be `lock`?** The case for: `lock` is universally
-recognized, and it carries the fail-closed connotation the file actually
-has — a lockfile is the thing you verify against, and drifting from it is an
-error rather than a note. The case against: a lockfile connotes *resolved
-dependencies*, and this file resolves nothing and locks no dependency graph;
-worse, its model field is advisory — operator-supplied, never resolved
+The question was whether the file should be called a lockfile, since
+everyone recognizes the word and it carries the fail-closed connotation this
+file genuinely has. It is settled as **`pins`, final**, before the
+identifier stability window closes, on two grounds.
+
+A lockfile connotes a *resolved dependency graph the tool computed*. This
+file records versions of things tenon does not resolve and does not install:
+the harness executable somebody else put on the PATH, integration package
+identities, tool runtime versions. Calling it a lock would promise a
+resolution step that does not exist, which is the same failure `manifest`
+had — a name whose first sentence has to be a denial.
+
+And one of its fields could not honor the promise even if the rest could.
+The `model` field is advisory: operator-supplied, never resolved
 automatically, and never verified, because the harness owns model selection
-and tenon does not claim to know which model served a turn. A name promising
-lock semantics over a field that has none would be dishonest in exactly the
-way `manifest` was. `pins` claims less and delivers all of it. The question
-stays open because the recognition argument is real; if it is reopened, it
-should be reopened before the identifier stability window closes, or not at
-all.
+and tenon does not claim to know which model served a turn. `lock` says
+"verify against this and fail closed"; over that field there is nothing to
+verify, so the connotation would be dishonest for part of the file's own
+contents.
+
+`pins` says exactly what the file holds and no more. That is the whole
+argument: it claims less, and it delivers all of what it claims.
 
