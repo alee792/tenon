@@ -12,7 +12,7 @@ what is still rough.
 ## Author an agent as reviewable files
 
 **For** anyone who understands files, directories, instructions, skills,
-and tools — and should never have to learn manifests, registration, or
+and tools — and should never have to learn pin sets, registration, or
 harness configuration.
 
 An agent authored the usual way lives as vendor-specific configuration
@@ -37,7 +37,7 @@ tenon apply . --harness claude   # or: --harness codex
 ```
 
 Apply validates the whole project and compiles it into native harness
-files; you then start the harness normally. There is no manifest to update
+files; you then start the harness normally. There is no inventory to update
 and nothing to register. The [README's quick start](../README.md#quick-start)
 walks the whole path; [the authored project](product-spec.md#the-authored-project)
 is the full convention, including the bounds every surface is held to.
@@ -68,17 +68,21 @@ and `.claude/agents/`; Codex receives `AGENTS.md`, `.codex/config.toml`,
 `.agents/skills/`, and `.codex/agents/`. Three commands cover the crossing:
 
 ```sh
-tenon validate AGENT --harness <claude|codex>
-tenon apply    AGENT --workspace WORKSPACE --harness <claude|codex>
-tenon drift    AGENT --workspace WORKSPACE --harness <claude|codex>
+tenon check AGENT --harness <claude|codex>
+tenon apply AGENT --workspace WORKSPACE --harness <claude|codex>
+tenon drift AGENT --workspace WORKSPACE --harness <claude|codex>
+tenon clean --workspace WORKSPACE [--harness <claude|codex>]
 ```
 
-- `validate` runs apply's own validation and writes nothing.
+- `check` is the gate: it runs apply's own validation and writes nothing.
 - `apply` materializes the owned native files and records a source
   fingerprint over every authored input, so stale or edited generated setup
   fails closed.
 - `drift` regenerates every tenon-owned file in memory and reports each one
   unchanged, modified on disk with a unified diff, missing, or stale.
+- `clean` is apply's inverse: it removes the files the apply record owns,
+  then the record, so switching harnesses or uninstalling leaves nothing
+  behind.
 
 Agent source and workspace are independent directories, so one source tree
 applies into several workspaces. Genuinely nonportable native files have an
@@ -163,19 +167,24 @@ The editable surface is files, bounded and legible: `instructions.md`,
 gates itself:
 
 ```sh
-tenon validate . --harness claude --diagnostics jsonl
-tenon apply    . --harness claude
+tenon check . --harness claude --format jsonl
+tenon apply . --harness claude
 ```
 
 In the machine-readable mode each failure is one JSON line carrying a
 stable identifier, the authored path, and the exact rule violated. The
 identifiers hold across releases and match apply's own failures, so a loop
-self-corrects against an identifier rather than against prose. On success
-the stream ends with one further object — no `id`, `path`, or `rule` field
-— carrying the agent name and source fingerprint, so a consumer must expect
-it as a final, distinct line. Apply records that fingerprint, and every
-dispatch lifecycle event carries it too. An instructions-free project is a
-legitimate candidate for a loop to try: a supplied manifest whose expected
+self-corrects against an identifier rather than against prose. The
+stream always ends with one further object — no `id`, `path`, or `rule`
+field — carrying an `outcome` (`ok` or `gate_failed`) and, on success, the
+agent name and source fingerprint, so a consumer must expect it as a final,
+distinct line and never has to infer failure from a missing summary. Apply
+records that fingerprint, and every dispatch lifecycle event carries it
+too. `check --emit catalog` additionally reports the resolved capability
+inventory the gate has already computed — skills, tools, MCP servers,
+subagents, schedules — but only for a source that passes, and tenon never
+accepts such an inventory as input. An instructions-free project is a
+legitimate candidate for a loop to try: a supplied pin set whose expected
 fingerprint matches the directory also proves the agent root, and the
 generated always-on surface is simply empty.
 
@@ -187,7 +196,7 @@ the units a lineage is built from.
 it is an improvement. It collects no transcripts, evaluations, or scores.
 Evaluation, selection among revisions, and lineage tracking are out of
 scope — lineage belongs to version control, a candidate being a source
-revision crossed with a supplied manifest. How variants are isolated —
+revision crossed with a supplied pin set. How variants are isolated —
 worktrees, containers, sandboxes — is your infrastructure choice; tenon
 requires only that each variant is a directory that applies
 deterministically. Automatic or unreviewed promotion of an agent-authored
@@ -230,7 +239,7 @@ There is no daemon, no downtime or clock-jump backfill, no missed-run
 replay, and no hosted delivery runtime. After a restart, active work
 without a proven terminal result is recorded uncertain and never silently
 retried, and lifecycle output is bounded and never contains model text. A
-supplied manifest is verified at `tenon run`'s session start rather than
+supplied pin set is verified at `tenon run`'s session start rather than
 per turn within that session; the recurring `schedule run` path re-verifies
 each occurrence.
 
@@ -282,7 +291,7 @@ installed-package identities, so two runs that look identical may not be.
 
 Two artifacts pin the closure. The **source fingerprint** travels with
 every apply record and every dispatch lifecycle event. The optional
-[agent manifest](product-spec.md#agent-manifest) pins what the directory
+[pin set](product-spec.md#pins) pins what the directory
 cannot express — schema version, agent name, expected source fingerprint,
 tenon version, and per harness the executable version, a model identifier,
 integration package identities, and authored-tool runtime versions. It is
@@ -290,24 +299,26 @@ supplied at application rather than stored in source, so one commit crosses
 with many pin sets:
 
 ```sh
-tenon manifest write AGENT --harness <claude|codex> --output PATH
-tenon apply AGENT --harness claude --manifest PATH
-tenon apply AGENT --harness codex  --manifest PATH
-tenon fingerprint show AGENT --diagnostics jsonl
+tenon check AGENT --harness claude --write-pins PATH
+tenon apply AGENT --workspace WORKSPACE-CLAUDE --harness claude --pins PATH
+tenon apply AGENT --workspace WORKSPACE-CODEX  --harness codex  --pins PATH
+tenon check AGENT --emit files --format jsonl
 ```
 
-A supplied manifest is verified before apply and before every tenon-owned
+The pin set is written by the gate itself, so it can only ever be minted by
+a source that passes right now, bound to the fingerprint just proven. A
+supplied pin set is verified before apply and before every tenon-owned
 process open, failing closed and naming the exact drifted pin; writing it
 for an unchanged closure is byte-identical, and supplying none changes
-nothing. Applying the same source under the same manifest to both harnesses
+nothing. Applying the same source under the same pin set to both harnesses
 gives two runs whose starting agent state is identical by construction, so
 the difference observed is harness behavior. A pin is an axis of variation
 in its own right: a loop may hold the files fixed and move the model or
 harness version instead.
 
 **The boundary.** Scoring stays outside. Tenon retains no transcripts,
-evaluations, or scores — only the fingerprint and, when supplied, the
-manifest identity travel with a run, so observation made elsewhere joins
+evaluations, or scores — only the fingerprint and, when supplied, the pin
+set's identity travel with a run, so observation made elsewhere joins
 back to the exact configuration that produced it. The model pin is emitted
 through the harness's documented configuration and recorded in provenance;
 the harness owns model selection, and tenon does not claim to verify which

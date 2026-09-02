@@ -125,7 +125,7 @@ func TestPluginFetchRejectsNonHTTPSSource(t *testing.T) {
 	}
 }
 
-// TestApplyFailsClosedOnUnresolvedPluginReference proves apply and validate
+// TestApplyFailsClosedOnUnresolvedPluginReference proves apply and check
 // stay fully offline: an uncached reference fails, naming `tenon plugin
 // fetch`, before any generation.
 func TestApplyFailsClosedOnUnresolvedPluginReference(t *testing.T) {
@@ -135,9 +135,9 @@ func TestApplyFailsClosedOnUnresolvedPluginReference(t *testing.T) {
 	writePluginReferenceFile(t, agent, "obs", "https://github.com/acme/observability-plugin", rev)
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"validate", agent, "--harness", "claude"}, nil, &stdout, &stderr)
+	code := run([]string{"check", agent, "--harness", "claude"}, nil, &stdout, &stderr)
 	if code == 0 {
-		t.Fatalf("expected validate to fail on an unresolved plugin reference")
+		t.Fatalf("expected check to fail on an unresolved plugin reference")
 	}
 	if !strings.Contains(stderr.String(), "tenon plugin fetch") {
 		t.Fatalf("expected the failure to name `tenon plugin fetch`, got: %s", stderr.String())

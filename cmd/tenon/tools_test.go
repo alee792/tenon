@@ -281,21 +281,21 @@ func TestGoToolIsPreparedByApplyAndServedByTheManagedBoundary(t *testing.T) {
 	}
 }
 
-// TestBrokenToolFailsValidateAndApplyIdentically proves validate reports
+// TestBrokenToolFailsCheckAndApplyIdentically proves check reports
 // apply's tool failures while writing nothing: same stable identifier, same
 // bounded message, no cache and no generated files left behind.
-func TestBrokenToolFailsValidateAndApplyIdentically(t *testing.T) {
+func TestBrokenToolFailsCheckAndApplyIdentically(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
 	writeGoTool(t, agent, brokenGoToolFile)
 
-	var validateOut, applyOut, stderr bytes.Buffer
-	validateCode := run([]string{"validate", agent, "--harness", "claude", "--diagnostics", "jsonl"}, nil, &validateOut, &stderr)
-	if validateCode == 0 {
-		t.Fatalf("a tool that does not compile must fail validate: %q", validateOut.String())
+	var checkOut, applyOut, stderr bytes.Buffer
+	checkCode := run([]string{"check", agent, "--harness", "claude", "--format", "jsonl"}, nil, &checkOut, &stderr)
+	if checkCode == 0 {
+		t.Fatalf("a tool that does not compile must fail check: %q", checkOut.String())
 	}
-	diags := filterDiags(parseDiagLines(t, validateOut.String()), "tool.prepare.failed")
+	diags := filterDiags(parseDiagLines(t, checkOut.String()), "tool.prepare.failed")
 	if len(diags) != 1 || diags[0].Path != "tools" {
-		t.Fatalf("expected one tool.prepare.failed at tools, got %q", validateOut.String())
+		t.Fatalf("expected one tool.prepare.failed at tools, got %q", checkOut.String())
 	}
 	if !strings.Contains(diags[0].Rule, "go") {
 		t.Fatalf("the diagnostic must name the language: %q", diags[0].Rule)
@@ -303,18 +303,18 @@ func TestBrokenToolFailsValidateAndApplyIdentically(t *testing.T) {
 	// Validate writes nothing: no cache, no state, no generated files.
 	for _, path := range []string{".tenon", "CLAUDE.md", ".mcp.json"} {
 		if _, err := os.Stat(filepath.Join(agent, path)); !os.IsNotExist(err) {
-			t.Fatalf("validate must not write %s into the workspace", path)
+			t.Fatalf("check must not write %s into the workspace", path)
 		}
 	}
 
 	ws := t.TempDir()
-	applyCode := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--diagnostics", "jsonl"}, nil, &applyOut, &stderr)
+	applyCode := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--format", "jsonl"}, nil, &applyOut, &stderr)
 	if applyCode == 0 {
 		t.Fatal("a tool that does not compile must fail apply")
 	}
-	if validateOut.String() != applyOut.String() {
-		t.Fatalf("validate and apply must report identical diagnostics:\n%s\n%s",
-			validateOut.String(), applyOut.String())
+	if checkDiagnostics(t, checkOut.String()) != checkDiagnostics(t, applyOut.String()) {
+		t.Fatalf("check and apply must report identical diagnostics:\n%s\n%s",
+			checkOut.String(), applyOut.String())
 	}
 	// Preparation happens before apply mutates anything, so no generated
 	// native file and no apply record exist.
@@ -325,18 +325,23 @@ func TestBrokenToolFailsValidateAndApplyIdentically(t *testing.T) {
 	}
 }
 
-// TestBrokenToolFailsFingerprintShowToo proves fingerprint show runs the same
-// tool preparation gate as validate and apply: a project whose tool does not
-// compile never reports a fingerprint, matching validate/apply's own
-// tool.prepare.failed diagnostic instead of silently succeeding.
-func TestBrokenToolFailsFingerprintShowToo(t *testing.T) {
+// TestBrokenToolFailsThePortableGateToo proves the harness-free check runs the
+// same tool preparation gate as check with a harness and apply: a project whose
+// tool does not compile never reports a fingerprint or a file list, and carries
+// check/apply's own tool.prepare.failed diagnostic instead of silently
+// succeeding.
+func TestBrokenToolFailsThePortableGateToo(t *testing.T) {
+	// The absence of --harness is the subject here, so the developer's own
+	// TENON_HARNESS must not supply one: with it set, these runs would take
+	// the harness path and the assertions below would prove nothing.
+	t.Setenv("TENON_HARNESS", "")
 	agent := writeAgent(t, "my-agent", validInstructions)
 	writeGoTool(t, agent, brokenGoToolFile)
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"fingerprint", "show", agent, "--diagnostics", "jsonl"}, nil, &stdout, &stderr)
+	code := run([]string{"check", agent, "--emit", "files", "--format", "jsonl"}, nil, &stdout, &stderr)
 	if code == 0 {
-		t.Fatalf("a tool that does not compile must fail fingerprint show: %q", stdout.String())
+		t.Fatalf("a tool that does not compile must fail the portable gate: %q", stdout.String())
 	}
 	diags := filterDiags(parseDiagLines(t, stdout.String()), "tool.prepare.failed")
 	if len(diags) != 1 || diags[0].Path != "tools" {
@@ -356,7 +361,7 @@ func TestToolAndSubagentNamesMayNotCollide(t *testing.T) {
 		[]byte(minimalSubagentInstructionsFor("hash-text")), 0o644)
 
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"validate", agent, "--harness", "claude", "--diagnostics", "jsonl"}, nil, &stdout, &stderr); code == 0 {
+	if code := run([]string{"check", agent, "--harness", "claude", "--format", "jsonl"}, nil, &stdout, &stderr); code == 0 {
 		t.Fatal("a tool and subagent sharing a name must fail validation")
 	}
 	got := filterDiags(parseDiagLines(t, stdout.String()), "tool.name.collision")
@@ -377,7 +382,7 @@ func TestCrossLanguageDuplicateToolNamesAreRejected(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"validate", agent, "--harness", "claude", "--diagnostics", "jsonl"}, nil, &stdout, &stderr); code == 0 {
+	if code := run([]string{"check", agent, "--harness", "claude", "--format", "jsonl"}, nil, &stdout, &stderr); code == 0 {
 		t.Fatal("two languages declaring one tool name must fail validation")
 	}
 	if len(filterDiags(parseDiagLines(t, stdout.String()), "tool.name.duplicate")) != 1 {
@@ -601,7 +606,7 @@ func TestToolShapeViolationsFailInspectionNamingTheFile(t *testing.T) {
 
 			ws := t.TempDir()
 			var stdout, stderr bytes.Buffer
-			code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--diagnostics", "jsonl"},
+			code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--format", "jsonl"},
 				nil, &stdout, &stderr)
 			if code == 0 {
 				t.Fatalf("a tool that does not declare the contract must fail apply: %q", stdout.String())

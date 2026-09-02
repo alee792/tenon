@@ -52,20 +52,20 @@ func TestParseStrictAndBounds(t *testing.T) {
 	}
 
 	// unknown field is rejected (closed decode)
-	mustCode(t, mustParseErr(t, strings.Replace(valid, `"agent": "my-agent",`, `"agent": "my-agent", "extra": 1,`, 1)), "manifest.invalid")
+	mustCode(t, mustParseErr(t, strings.Replace(valid, `"agent": "my-agent",`, `"agent": "my-agent", "extra": 1,`, 1)), "pins.invalid")
 
 	// wrong schema version
-	mustCode(t, mustParseErr(t, strings.Replace(valid, `"schema_version": 1,`, `"schema_version": 2,`, 1)), "manifest.schema-version")
+	mustCode(t, mustParseErr(t, strings.Replace(valid, `"schema_version": 1,`, `"schema_version": 2,`, 1)), "pins.schema-version")
 
 	// bad fingerprint
-	mustCode(t, mustParseErr(t, strings.Replace(valid, "sha256:"+strings.Repeat("a", 64), "deadbeef", 1)), "manifest.source-fingerprint.invalid")
+	mustCode(t, mustParseErr(t, strings.Replace(valid, "sha256:"+strings.Repeat("a", 64), "deadbeef", 1)), "pins.source-fingerprint.invalid")
 
 	// unknown harness key
-	mustCode(t, mustParseErr(t, strings.Replace(valid, `"claude"`, `"gemini"`, 1)), "manifest.harness.unknown")
+	mustCode(t, mustParseErr(t, strings.Replace(valid, `"claude"`, `"gemini"`, 1)), "pins.harness.unknown")
 
 	// over the 32 KiB bound
 	big := `{"schema_version":1,"agent":"a","source_fingerprint":"sha256:x","tenon_version":"v","harnesses":{"claude":{"harness_version":"` + strings.Repeat("v", MaxManifestBytes) + `","tool_runtimes":{}}}}`
-	mustCode(t, mustParseErr(t, big), "manifest.too-large")
+	mustCode(t, mustParseErr(t, big), "pins.too-large")
 }
 
 func mustParseErr(t *testing.T, doc string) error {
@@ -74,7 +74,7 @@ func mustParseErr(t *testing.T, doc string) error {
 	return err
 }
 
-// TestMarshalByteIdentical proves `tenon manifest write` reproducibility: two
+// TestMarshalByteIdentical proves `tenon check --write-pins` reproducibility: two
 // Resolves of the same fake closure encode byte-for-byte identically, even when
 // the package list is supplied out of order.
 func TestMarshalByteIdentical(t *testing.T) {
@@ -131,27 +131,27 @@ func TestVerifyFailsClosedPerPin(t *testing.T) {
 	// source fingerprint drift
 	driftFP := &agentproject.Project{Name: "my-agent", Fingerprint: "sha256:" + strings.Repeat("b", 64)}
 	cur, _ := Resolve(driftFP, "claude", "0.1.0-dev", base())
-	mustCode(t, Verify(supplied, cur), "manifest.drift.source-fingerprint")
+	mustCode(t, Verify(supplied, cur), "pins.drift.source-fingerprint")
 
 	// tenon version drift
 	cur, _ = Resolve(fakeProject(), "claude", "9.9.9", base())
-	mustCode(t, Verify(supplied, cur), "manifest.drift.tenon-version")
+	mustCode(t, Verify(supplied, cur), "pins.drift.tenon-version")
 
 	// harness version drift
 	cur, _ = Resolve(fakeProject(), "claude", "0.1.0-dev", fakeClosure("9.9.9", "2.0.0", "", "1.26.5", "", []PackageIdentity{{ID: "gh", ManifestSHA256: "abc"}}))
-	mustCode(t, Verify(supplied, cur), "manifest.drift.harness-version")
+	mustCode(t, Verify(supplied, cur), "pins.drift.harness-version")
 
 	// package manifest hash drift
 	cur, _ = Resolve(fakeProject(), "claude", "0.1.0-dev", fakeClosure("2.1.240", "2.0.0", "", "1.26.5", "", []PackageIdentity{{ID: "gh", ManifestSHA256: "CHANGED"}}))
-	mustCode(t, Verify(supplied, cur), "manifest.drift.package-hash")
+	mustCode(t, Verify(supplied, cur), "pins.drift.package-hash")
 
 	// package pinned but absent in current
 	cur, _ = Resolve(fakeProject(), "claude", "0.1.0-dev", fakeClosure("2.1.240", "2.0.0", "", "1.26.5", "", nil))
-	mustCode(t, Verify(supplied, cur), "manifest.drift.package-missing")
+	mustCode(t, Verify(supplied, cur), "pins.drift.package-missing")
 
 	// tool runtime drift (deno)
 	cur, _ = Resolve(fakeProject(), "claude", "0.1.0-dev", fakeClosure("2.1.240", "2.9.9", "", "1.26.5", "", []PackageIdentity{{ID: "gh", ManifestSHA256: "abc"}}))
-	mustCode(t, Verify(supplied, cur), "manifest.drift.tool-runtime")
+	mustCode(t, Verify(supplied, cur), "pins.drift.tool-runtime")
 
 	// tool runtime drift (python): the resolved version specification
 	// changing — an author editing requires-python or .python-version — is
@@ -161,20 +161,20 @@ func TestVerifyFailsClosedPerPin(t *testing.T) {
 		fakeClosure("2.1.240", "2.0.0", "", "1.26.5", "3.11", []PackageIdentity{{ID: "gh", ManifestSHA256: "abc"}}))
 	cur, _ = Resolve(fakeProject(), "claude", "0.1.0-dev",
 		fakeClosure("2.1.240", "2.0.0", "", "1.26.5", "3.12", []PackageIdentity{{ID: "gh", ManifestSHA256: "abc"}}))
-	mustCode(t, Verify(pySupplied, cur), "manifest.drift.tool-runtime")
+	mustCode(t, Verify(pySupplied, cur), "pins.drift.tool-runtime")
 
 	// package now selected but not pinned (present in current, absent in supplied)
 	noPkg, _ := Resolve(fakeProject(), "claude", "0.1.0-dev", fakeClosure("2.1.240", "2.0.0", "", "1.26.5", "", nil))
 	cur, _ = Resolve(fakeProject(), "claude", "0.1.0-dev", base())
-	mustCode(t, Verify(noPkg, cur), "manifest.drift.package-added")
+	mustCode(t, Verify(noPkg, cur), "pins.drift.package-added")
 
 	// agent drift
 	cur, _ = Resolve(&agentproject.Project{Name: "other", Fingerprint: fakeProject().Fingerprint}, "claude", "0.1.0-dev", base())
-	mustCode(t, Verify(supplied, cur), "manifest.drift.agent")
+	mustCode(t, Verify(supplied, cur), "pins.drift.agent")
 
 	// harness missing: supplied pins no entry for the resolved harness
 	curCodex, _ := Resolve(fakeProject(), "codex", "0.1.0-dev", base())
-	mustCode(t, Verify(supplied, curCodex), "manifest.drift.harness-missing")
+	mustCode(t, Verify(supplied, curCodex), "pins.drift.harness-missing")
 }
 
 // TestVerifyRejectsNoHarnessClosure guards the fail-open path where a current
@@ -183,7 +183,7 @@ func TestVerifyFailsClosedPerPin(t *testing.T) {
 func TestVerifyRejectsNoHarnessClosure(t *testing.T) {
 	supplied, _ := Resolve(fakeProject(), "claude", "0.1.0-dev", fakeClosure("2.1.240", "", "", "", "", nil))
 	empty := &Manifest{Agent: supplied.Agent, SourceFingerprint: supplied.SourceFingerprint, TenonVersion: supplied.TenonVersion}
-	mustCode(t, Verify(supplied, empty), "manifest.verify.no-harness")
+	mustCode(t, Verify(supplied, empty), "pins.verify.no-harness")
 }
 
 // TestVerifyIgnoresModel proves the deliberate non-verification of the model
@@ -225,5 +225,5 @@ func TestParseRejectsDuplicatePackageID(t *testing.T) {
   }
 }`)
 	_, err := Parse(raw)
-	mustCode(t, err, "manifest.package.duplicate")
+	mustCode(t, err, "pins.package.duplicate")
 }

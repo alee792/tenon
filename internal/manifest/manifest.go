@@ -111,54 +111,54 @@ func errorf(code, format string, args ...any) *Error {
 // a stable code.
 func Parse(data []byte) (*Manifest, error) {
 	if len(data) > MaxManifestBytes {
-		return nil, errorf("manifest.too-large",
-			"a manifest may contain at most %d bytes; found %d", MaxManifestBytes, len(data))
+		return nil, errorf("pins.too-large",
+			"a pin set may contain at most %d bytes; found %d", MaxManifestBytes, len(data))
 	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	var m Manifest
 	if err := dec.Decode(&m); err != nil {
-		return nil, errorf("manifest.invalid", "the manifest is not a valid closed manifest document: %v", err)
+		return nil, errorf("pins.invalid", "the pin set is not a valid closed pins document: %v", err)
 	}
 	if dec.More() {
-		return nil, errorf("manifest.invalid", "the manifest must be exactly one JSON document")
+		return nil, errorf("pins.invalid", "the pin set must be exactly one JSON document")
 	}
 	if m.SchemaVersion != SchemaVersion {
-		return nil, errorf("manifest.schema-version",
-			"the manifest schema_version must be %d; found %d", SchemaVersion, m.SchemaVersion)
+		return nil, errorf("pins.schema-version",
+			"the pin set schema_version must be %d; found %d", SchemaVersion, m.SchemaVersion)
 	}
 	if m.Agent == "" {
-		return nil, errorf("manifest.agent.missing", "the manifest must carry a non-empty agent name")
+		return nil, errorf("pins.agent.missing", "the pin set must carry a non-empty agent name")
 	}
 	if !strings.HasPrefix(m.SourceFingerprint, "sha256:") {
-		return nil, errorf("manifest.source-fingerprint.invalid",
-			"the manifest source_fingerprint must be a \"sha256:\" identity")
+		return nil, errorf("pins.source-fingerprint.invalid",
+			"the pin set source_fingerprint must be a \"sha256:\" identity")
 	}
 	if m.TenonVersion == "" {
-		return nil, errorf("manifest.tenon-version.missing", "the manifest must carry a non-empty tenon_version")
+		return nil, errorf("pins.tenon-version.missing", "the pin set must carry a non-empty tenon_version")
 	}
 	if len(m.Harnesses) == 0 {
-		return nil, errorf("manifest.harnesses.missing", "the manifest must pin at least one harness")
+		return nil, errorf("pins.harnesses.missing", "the pin set must pin at least one harness")
 	}
 	for name, pins := range m.Harnesses {
 		if !harnessNames[name] {
-			return nil, errorf("manifest.harness.unknown",
-				"the manifest pins an unknown harness %q; only claude and codex are supported", name)
+			return nil, errorf("pins.harness.unknown",
+				"the pin set names an unknown harness %q; only claude and codex are supported", name)
 		}
 		if pins.HarnessVersion == "" {
-			return nil, errorf("manifest.harness-version.missing",
-				"the manifest entry for harness %q must carry a non-empty harness_version", name)
+			return nil, errorf("pins.harness-version.missing",
+				"the pin set entry for harness %q must carry a non-empty harness_version", name)
 		}
 		seen := make(map[string]bool, len(pins.IntegrationPackages))
 		for _, pkg := range pins.IntegrationPackages {
 			if pkg.ID == "" || pkg.ManifestSHA256 == "" {
-				return nil, errorf("manifest.package.invalid",
+				return nil, errorf("pins.package.invalid",
 					"each integration package for harness %q must carry a non-empty id and manifest_sha256", name)
 			}
 			// A duplicate id would be collapsed last-writer-wins during Verify,
 			// silently dropping one pin; reject it here where strictness lives.
 			if seen[pkg.ID] {
-				return nil, errorf("manifest.package.duplicate",
+				return nil, errorf("pins.package.duplicate",
 					"harness %q pins integration package %q more than once", name, pkg.ID)
 			}
 			seen[pkg.ID] = true
@@ -169,7 +169,7 @@ func Parse(data []byte) (*Manifest, error) {
 
 // Bytes returns the deterministic canonical encoding of the manifest: sorted
 // keys, stable field order, no timestamps. Two manifests describing the same
-// closure encode BYTE-IDENTICALLY, which is what makes `tenon manifest write`
+// closure encode BYTE-IDENTICALLY, which is what makes `tenon check --write-pins`
 // reproducible and Identity stable.
 func (m *Manifest) Bytes() []byte {
 	// Canonicalize the package lists so a caller that built them out of order

@@ -385,7 +385,7 @@ type sourceInput struct {
 // computeFingerprint hashes every authored input into one stable identity,
 // sorted by path and covering each input's path, content length, content
 // hash, and executable intent ("x" or "-"). It also returns each sorted
-// input's own contribution, for tenon fingerprint show; the rollup algorithm
+// input's own contribution, for tenon check --emit files; the rollup algorithm
 // itself is unchanged by having a caller for the per-file detail.
 func computeFingerprint(inputs []sourceInput) ([]FingerprintEntry, string) {
 	inputs = slices.Clone(inputs)

@@ -10,37 +10,37 @@ import (
 	"github.com/alee792/tenon/internal/manifest"
 )
 
-// writeManifestForModel runs `tenon manifest write --model model` for agent
+// writePinsForModel runs `tenon check --write-pins --model model` for agent
 // with the active fake resolver and returns the written manifest path.
-func writeManifestForModel(t *testing.T, agent, harnessName, model string) string {
+func writePinsForModel(t *testing.T, agent, harnessName, model string) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "manifest.json")
+	path := filepath.Join(t.TempDir(), "pins.json")
 	var out, errb bytes.Buffer
-	args := []string{"manifest", "write", agent, "--harness", harnessName, "--output", path}
+	args := []string{"check", agent, "--harness", harnessName, "--write-pins", path}
 	if model != "" {
 		args = append(args, "--model", model)
 	}
 	if code := run(args, nil, &out, &errb); code != 0 {
-		t.Fatalf("manifest write exit %d: %s", code, errb.String())
+		t.Fatalf("check --write-pins exit %d: %s", code, errb.String())
 	}
 	return path
 }
 
-// TestManifestWriteModelFlagRecordsAndIsDeterministic proves --model records
+// TestCheckWritePinsModelFlagRecordsAndIsDeterministic proves --model records
 // the value as the selected harness's pinned model, and that writing it twice
 // for an unchanged closure is byte-identical (the same determinism clause
-// TestManifestWriteByteIdentical proves for the unpinned case).
-func TestManifestWriteModelFlagRecordsAndIsDeterministic(t *testing.T) {
+// TestCheckWritePinsByteIdentical proves for the unpinned case).
+func TestCheckWritePinsModelFlagRecordsAndIsDeterministic(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
 	withFakeResolver(t, "2.1.240", nil)
 
 	a := filepath.Join(t.TempDir(), "a.json")
 	b := filepath.Join(t.TempDir(), "b.json")
 	var out, errb bytes.Buffer
-	if code := run([]string{"manifest", "write", agent, "--harness", "claude", "--model", "claude-opus-4", "--output", a}, nil, &out, &errb); code != 0 {
+	if code := run([]string{"check", agent, "--harness", "claude", "--model", "claude-opus-4", "--write-pins", a}, nil, &out, &errb); code != 0 {
 		t.Fatalf("first write failed: %s", errb.String())
 	}
-	if code := run([]string{"manifest", "write", agent, "--harness", "claude", "--model", "claude-opus-4", "--output", b}, nil, &out, &errb); code != 0 {
+	if code := run([]string{"check", agent, "--harness", "claude", "--model", "claude-opus-4", "--write-pins", b}, nil, &out, &errb); code != 0 {
 		t.Fatalf("second write failed: %s", errb.String())
 	}
 	ba, err := os.ReadFile(a)
@@ -63,12 +63,12 @@ func TestManifestWriteModelFlagRecordsAndIsDeterministic(t *testing.T) {
 	}
 }
 
-// TestManifestWriteWithoutModelLeavesModelEmpty proves an unset --model
+// TestCheckWritePinsWithoutModelLeavesModelEmpty proves an unset --model
 // leaves the model empty rather than resolving any default.
-func TestManifestWriteWithoutModelLeavesModelEmpty(t *testing.T) {
+func TestCheckWritePinsWithoutModelLeavesModelEmpty(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
 	withFakeResolver(t, "2.1.240", nil)
-	path := writeManifestForModel(t, agent, "claude", "")
+	path := writePinsForModel(t, agent, "claude", "")
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -89,11 +89,11 @@ func TestManifestWriteWithoutModelLeavesModelEmpty(t *testing.T) {
 func TestApplyCodexModelPinEmitsConfigTOML(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
 	withFakeResolver(t, "0.144.1", nil)
-	manifestPath := writeManifestForModel(t, agent, "codex", "o4-mini")
+	manifestPath := writePinsForModel(t, agent, "codex", "o4-mini")
 
 	ws := t.TempDir()
 	var out, errb bytes.Buffer
-	if code := run([]string{"apply", agent, "--harness", "codex", "--workspace", ws, "--manifest", manifestPath}, nil, &out, &errb); code != 0 {
+	if code := run([]string{"apply", agent, "--harness", "codex", "--workspace", ws, "--pins", manifestPath}, nil, &out, &errb); code != 0 {
 		t.Fatalf("apply failed: %s", errb.String())
 	}
 	got, err := os.ReadFile(filepath.Join(ws, ".codex", "config.toml"))
@@ -129,10 +129,10 @@ func TestApplyCodexModelPinEmitsConfigTOML(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	unpinnedManifest := writeManifestForModel(t, agent, "codex", "")
+	unpinnedManifest := writePinsForModel(t, agent, "codex", "")
 	out.Reset()
 	errb.Reset()
-	if code := run([]string{"apply", agent, "--harness", "codex", "--workspace", sharedWS, "--manifest", unpinnedManifest}, nil, &out, &errb); code != 0 {
+	if code := run([]string{"apply", agent, "--harness", "codex", "--workspace", sharedWS, "--pins", unpinnedManifest}, nil, &out, &errb); code != 0 {
 		t.Fatalf("unpinned-manifest apply failed: %s", errb.String())
 	}
 	gotUnpinned, err := os.ReadFile(filepath.Join(sharedWS, ".codex", "config.toml"))
@@ -150,11 +150,11 @@ func TestApplyCodexModelPinEmitsConfigTOML(t *testing.T) {
 func TestApplyClaudeModelPinNoAuthorBase(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
 	withFakeResolver(t, "2.1.240", nil)
-	manifestPath := writeManifestForModel(t, agent, "claude", "claude-opus-4")
+	manifestPath := writePinsForModel(t, agent, "claude", "claude-opus-4")
 
 	ws := t.TempDir()
 	var out, errb bytes.Buffer
-	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--manifest", manifestPath}, nil, &out, &errb); code != 0 {
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--pins", manifestPath}, nil, &out, &errb); code != 0 {
 		t.Fatalf("apply failed: %s", errb.String())
 	}
 	got, err := os.ReadFile(filepath.Join(ws, ".claude", "settings.json"))
@@ -177,11 +177,11 @@ func TestApplyClaudeModelPinWithAuthorBaseInjectsAndDropsPassthrough(t *testing.
 	writeFile(t, agent, "harnesses/claude/.claude/settings.json",
 		[]byte(`{"permissions":{"allow":["Bash"]}}`), 0o644)
 	withFakeResolver(t, "2.1.240", nil)
-	manifestPath := writeManifestForModel(t, agent, "claude", "claude-opus-4")
+	manifestPath := writePinsForModel(t, agent, "claude", "claude-opus-4")
 
 	ws := t.TempDir()
 	var out, errb bytes.Buffer
-	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--manifest", manifestPath}, nil, &out, &errb); code != 0 {
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--pins", manifestPath}, nil, &out, &errb); code != 0 {
 		t.Fatalf("apply failed: %s", errb.String())
 	}
 	got, err := os.ReadFile(filepath.Join(ws, ".claude", "settings.json"))
@@ -203,11 +203,11 @@ func TestApplyClaudeModelPinInvalidAuthorJSONFailsClosed(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
 	writeFile(t, agent, "harnesses/claude/.claude/settings.json", []byte(`{not valid`), 0o644)
 	withFakeResolver(t, "2.1.240", nil)
-	manifestPath := writeManifestForModel(t, agent, "claude", "claude-opus-4")
+	manifestPath := writePinsForModel(t, agent, "claude", "claude-opus-4")
 
 	ws := t.TempDir()
 	var out, errb bytes.Buffer
-	code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--manifest", manifestPath, "--diagnostics", "jsonl"}, nil, &out, &errb)
+	code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--pins", manifestPath, "--format", "jsonl"}, nil, &out, &errb)
 	if code == 0 {
 		t.Fatal("invalid authored settings.json must fail apply")
 	}
@@ -231,11 +231,11 @@ func TestApplyClaudeModelPinInvalidAuthorJSONFailsClosed(t *testing.T) {
 func TestReapplyHandEditedGeneratedClaudeSettingsFailsClosed(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
 	withFakeResolver(t, "2.1.240", nil)
-	manifestPath := writeManifestForModel(t, agent, "claude", "claude-opus-4")
+	manifestPath := writePinsForModel(t, agent, "claude", "claude-opus-4")
 
 	ws := t.TempDir()
 	var out, errb bytes.Buffer
-	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--manifest", manifestPath}, nil, &out, &errb); code != 0 {
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--pins", manifestPath}, nil, &out, &errb); code != 0 {
 		t.Fatalf("first apply failed: %s", errb.String())
 	}
 	settingsPath := filepath.Join(ws, ".claude", "settings.json")
@@ -245,7 +245,7 @@ func TestReapplyHandEditedGeneratedClaudeSettingsFailsClosed(t *testing.T) {
 
 	out.Reset()
 	errb.Reset()
-	code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--manifest", manifestPath, "--diagnostics", "jsonl"}, nil, &out, &errb)
+	code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--pins", manifestPath, "--format", "jsonl"}, nil, &out, &errb)
 	if code == 0 {
 		t.Fatal("reapplying over a hand-edited generated settings.json must fail closed")
 	}
@@ -273,11 +273,11 @@ func TestModelValueNeverLeaksIntoModelFacingContent(t *testing.T) {
 		t.Run(harnessName, func(t *testing.T) {
 			agent := writeAgent(t, "my-agent", validInstructions)
 			withFakeResolver(t, "2.1.240", nil)
-			manifestPath := writeManifestForModel(t, agent, harnessName, conspicuousModel)
+			manifestPath := writePinsForModel(t, agent, harnessName, conspicuousModel)
 
 			ws := t.TempDir()
 			var out, errb bytes.Buffer
-			if code := run([]string{"apply", agent, "--harness", harnessName, "--workspace", ws, "--manifest", manifestPath}, nil, &out, &errb); code != 0 {
+			if code := run([]string{"apply", agent, "--harness", harnessName, "--workspace", ws, "--pins", manifestPath}, nil, &out, &errb); code != 0 {
 				t.Fatalf("apply failed: %s", errb.String())
 			}
 
@@ -314,28 +314,28 @@ func TestModelValueNeverLeaksIntoModelFacingContent(t *testing.T) {
 	}
 }
 
-// TestValidateApplyModelParity proves validate builds the same Target.Model
+// TestCheckApplyModelParity proves check builds the same Target.Model
 // apply does: a model-pinned manifest produces identical diagnostics from
-// validate and apply, and validate mutates nothing.
-func TestValidateApplyModelParity(t *testing.T) {
+// check and apply, and check mutates nothing.
+func TestCheckApplyModelParity(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
 	writeFile(t, agent, "harnesses/claude/.claude/settings.json", []byte(`{not valid`), 0o644)
 	withFakeResolver(t, "2.1.240", nil)
-	manifestPath := writeManifestForModel(t, agent, "claude", "claude-opus-4")
+	manifestPath := writePinsForModel(t, agent, "claude", "claude-opus-4")
 
 	ws := t.TempDir()
-	var validateOut, applyOut, errb bytes.Buffer
-	validateCode := run([]string{"validate", agent, "--harness", "claude", "--manifest", manifestPath, "--diagnostics", "jsonl"}, nil, &validateOut, &errb)
-	applyCode := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--manifest", manifestPath, "--diagnostics", "jsonl"}, nil, &applyOut, &errb)
+	var checkOut, applyOut, errb bytes.Buffer
+	checkCode := run([]string{"check", agent, "--harness", "claude", "--pins", manifestPath, "--format", "jsonl"}, nil, &checkOut, &errb)
+	applyCode := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--pins", manifestPath, "--format", "jsonl"}, nil, &applyOut, &errb)
 
-	if validateCode == 0 || applyCode == 0 {
-		t.Fatalf("both must fail on the invalid authored settings.json: validate=%d apply=%d", validateCode, applyCode)
+	if checkCode == 0 || applyCode == 0 {
+		t.Fatalf("both must fail on the invalid authored settings.json: check=%d apply=%d", checkCode, applyCode)
 	}
-	if validateOut.String() != applyOut.String() {
-		t.Fatalf("validate and apply must report identical diagnostics:\nvalidate: %s\napply: %s", validateOut.String(), applyOut.String())
+	if checkDiagnostics(t, checkOut.String()) != checkDiagnostics(t, applyOut.String()) {
+		t.Fatalf("check and apply must report identical diagnostics:\ncheck: %s\napply: %s", checkOut.String(), applyOut.String())
 	}
-	if !strings.Contains(validateOut.String(), "claude.settings.invalid") {
-		t.Fatalf("expected claude.settings.invalid: %s", validateOut.String())
+	if !strings.Contains(checkOut.String(), "claude.settings.invalid") {
+		t.Fatalf("expected claude.settings.invalid: %s", checkOut.String())
 	}
 	entries, err := os.ReadDir(ws)
 	if err != nil {
@@ -356,11 +356,11 @@ func TestClaudeModelPinToUnpinnedTransition(t *testing.T) {
 		base := []byte("{\n  \"permissions\": {\n    \"allow\": [\n      \"Bash\"\n    ]\n  }\n}\n")
 		writeFile(t, agent, "harnesses/claude/.claude/settings.json", base, 0o644)
 		withFakeResolver(t, "2.1.240", nil)
-		manifestPath := writeManifestForModel(t, agent, "claude", "claude-opus-4")
+		manifestPath := writePinsForModel(t, agent, "claude", "claude-opus-4")
 
 		ws := t.TempDir()
 		var out, errb bytes.Buffer
-		if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--manifest", manifestPath}, nil, &out, &errb); code != 0 {
+		if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--pins", manifestPath}, nil, &out, &errb); code != 0 {
 			t.Fatalf("pinned apply failed: %s", errb.String())
 		}
 		if got, _ := os.ReadFile(filepath.Join(ws, ".claude", "settings.json")); !strings.Contains(string(got), `"model"`) {
@@ -385,11 +385,11 @@ func TestClaudeModelPinToUnpinnedTransition(t *testing.T) {
 	t.Run("without author base is removed", func(t *testing.T) {
 		agent := writeAgent(t, "my-agent", validInstructions)
 		withFakeResolver(t, "2.1.240", nil)
-		manifestPath := writeManifestForModel(t, agent, "claude", "claude-opus-4")
+		manifestPath := writePinsForModel(t, agent, "claude", "claude-opus-4")
 
 		ws := t.TempDir()
 		var out, errb bytes.Buffer
-		if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--manifest", manifestPath}, nil, &out, &errb); code != 0 {
+		if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--pins", manifestPath}, nil, &out, &errb); code != 0 {
 			t.Fatalf("pinned apply failed: %s", errb.String())
 		}
 		if _, err := os.Stat(filepath.Join(ws, ".claude", "settings.json")); err != nil {

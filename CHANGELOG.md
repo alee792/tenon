@@ -9,6 +9,147 @@ The first release, v0.1.0, ships the core described in
 
 ### Added
 
+- `tenon check` is now the single gate over an agent project, absorbing
+  `tenon validate` and `tenon fingerprint show`
+  ([ADR 0027](docs/adr/0027-consolidate-the-read-surface.md)). Without
+  `--harness` it is a portable gate — load, bound, prove tool contracts,
+  prepare tools — that validate never offered; with `--harness` it is
+  everything apply does short of writing, so check and apply still fail
+  identically on the same source. `--emit` names the inventories the gate
+  already resolved and emits them only once it passes, always files before
+  catalog: `--emit files` is the per-file fingerprint stream
+  `fingerprint show` emitted, and `--emit catalog` is the resolved
+  capability inventory (skills including plugin-merged ones with their
+  descriptions, tools with their language, MCP servers, subagents,
+  schedules). A catalog is derived only, never accepted as input.
+
+- The supplied agent manifest is renamed to the **pin set**, and the gate
+  writes it. `--manifest PATH` becomes `--pins FILE` on `apply`, `drift`,
+  `run`, `schedule`, `mcp`, `plugin`, and `check`; the `manifest` command is
+  gone, replaced by `tenon check AGENT --harness H --write-pins FILE`, so a
+  pin set can only be minted by a project that passes the gate right now,
+  bound to the fingerprint just proven. `--model VALUE`, valid only with
+  `--write-pins`, records the operator's advisory model. With `--write-pins`
+  and no `--pins`, check loads for write, so an instructions-free
+  loop-generated directory can still mint the pin set that later proves it.
+  Diagnostic identifiers rename from `manifest.*` to `pins.*`
+  (`manifest.drift.agent` → `pins.drift.agent`, and so on) — a one-time
+  pre-release break in an otherwise stable surface. Integration *package*
+  manifests keep their `manifest.*` identifiers: that document really is a
+  list of contents.
+
+- `tenon clean --workspace DIR [--harness <claude|codex>] [--force]
+  [--format <prose|jsonl>]` is the inverse of apply: it removes the files
+  the workspace's apply record(s) own, prunes the directories emptying them
+  leaves behind, and drops the record(s) — the harness-switch and uninstall
+  stories neither apply nor drift covered. It takes no AGENT, so it works
+  when the source is gone. A file modified since its apply refuses the whole
+  clean unless `--force` is passed; a file tenon never recorded is never
+  touched either way; a workspace with no records succeeds trivially, and a
+  record owning no files is still dropped. That trivial success belongs to
+  the bare clean alone: `clean --harness H` over a workspace holding no
+  `apply-H.json` record exits 1 with
+  `tenon clean: no claude record in WORKSPACE/.tenon; nothing to clean for
+  that harness` and the `error` outcome, because the operator named a
+  harness this workspace was never applied for and reporting success would
+  read as "that harness is now clean". Clean never trusts the paths in a
+  record verbatim: one that is not workspace-local, or one reached through a
+  parent that is a symlink rather than a real directory, blocks the clean
+  (`escapes-workspace`, `symlink-parent`) with or without `--force`, every
+  path is re-classified immediately before its own removal, and the
+  directory pruning is bounded by the workspace itself. A parent chain that
+  cannot be read at all blocks the same way (`unreadable-parent`), naming
+  what was actually observed rather than claiming a symlink. Clean's
+  all-or-nothing refusal is decided at plan time: a path that changes
+  between the plan and its own removal stops the clean where it stands, the
+  jsonl stream ends `{"outcome":"blocked"}`, the prose names the path, and
+  the record is kept so a re-run can finish. A `.tenon` file naming no
+  harness tenon knows is reported as
+  `{"ignored":NAME,"reason":"unknown-harness"}` and left alone; the clean
+  continues. Apply enforces the same containment rule on its own removal of
+  stale recorded files (`apply.record.unsafe-path`) and on every file it
+  writes (`apply.workspace.unsafe-path`), so a generated parent directory
+  swapped for a symlink cannot make an atomic write land outside the
+  workspace.
+
+- `--diagnostics` is renamed `--format` everywhere, since the flag governs
+  all output rendering rather than diagnostics alone; there is no deprecated
+  alias. An unset `--harness` now falls back to the `TENON_HARNESS`
+  environment variable — the explicit flag always wins, and an invalid
+  environment value is reported as coming from the environment — except in
+  `clean`, which ignores it deliberately so that a bare clean still means
+  "every harness recorded here". Every jsonl stream now ends with one
+  distinct object carrying an `outcome` field: `ok` from check, apply,
+  drift, clean, and stage (including `stage verify`), `gate_failed` when the
+  source itself is invalid, `drift`
+  when the workspace no longer matches a fresh apply, `blocked` when
+  clean refuses, and `error` when the run could not complete for a reason
+  that is not the source's fault — an unreadable pin set, an unwritable
+  path, a closure that would not resolve, an os error mid-clean, a harness
+  that would not start. The full vocabulary is
+  `ok / gate_failed / drift / blocked / error`. The first four are findings
+  a loop scores; `error` is a statement about the environment, which the
+  loop retries or escalates and never scores. An `error` object carries the
+  same prose stderr carries, bounded, so a consumer reading only the stream
+  still learns what went wrong. Usage errors remain the one deliberate
+  exception: exit 2, and no outcome object at all, because a malformed
+  invocation never ran. `tenon run`, whose stdout IS the wire event stream,
+  ends it with a terminal `run.completed` **event**: the next sequence
+  number and the same `schema_version`/`type`/`harness`/`conversation`/
+  `fingerprint` envelope every line before it carries, plus the `outcome`
+  field no other event carries and `turns`, the counts of the turns the
+  dispatch ran by terminal status (`completed`, `failed`, `uncertain`,
+  `process_failed`, `cancelled`). Run's `ok` means the dispatcher completed
+  every turn it was given, whatever those turns' own statuses — a run whose
+  every turn failed still ends `ok`, and a loop scores it from `turns` — and
+  its failure paths (`error`, `gate_failed`, the latter carrying the source
+  digest and no fingerprint) are `run.completed` events with the same
+  envelope. Previously run appended a bare `{"outcome":"ok"}` that broke its
+  own stream's event shape and reported `ok` even when every turn had
+  failed. Two commands are exempt from the outcome contract: `schedule`,
+  which has no `--format` and emits a prose lifecycle stream with no
+  machine-readable stream to terminate, and `mcp serve`, which now rejects
+  `--format jsonl` with a usage error — its stdout carries the MCP protocol,
+  and an outcome object written there would corrupt it. Check's success object keeps `agent` and `fingerprint` and
+  adds `pins_written` when `--write-pins` wrote one; `outcome` is the only
+  field every result object carries, and the rest vary by command. `stage`
+  honors `--format` too, ending a jsonl run with its own result object
+  (agent, fingerprint, output directory) instead of prose, and `stage verify`
+  honors it as well, ending a jsonl run with
+  `{"outcome":"ok","artifact":PATH}` or the `gate_failed` object. `drift`
+  against a workspace that does not exist now reports `drift` with every
+  generated path missing, rather than `gate_failed` for a source that is
+  fine — its gate, authored-tool preparation included, runs against the
+  source rather than the workspace, so a tool-bearing agent reports the same
+  thing a tool-free one does. A path passed as `--workspace` that exists but
+  is a regular file is neither drift nor a gate failure: it is a usage
+  error, exit 2 with no outcome object.
+
+- A failing gate now names the bytes that failed: the `gate_failed` object
+  from `check`, `apply`, `drift`, `stage`, and `run` carries `source_digest`,
+  a `sha256:` content hash over the authored files, so a loop that discards a
+  rejected candidate can still say which candidate it discarded. (`stage
+  verify` carries none: it verifies a staged tree and has no source to
+  name.) It is not a
+  fingerprint and must never be treated as one — a digest names bytes, a
+  fingerprint names a configuration the gate proved (ADR 0025) — and the two
+  are separated by construction: the digest is hashed under its own domain
+  prefix, so a source's digest always differs from that tree's fingerprint.
+  Both render as `sha256:` and 64 hex characters, so the field a value
+  arrives in carries the meaning, never the value alone.
+  A passing run carries a fingerprint and no digest; a failing one the
+  reverse. The digest covers exactly the authored inputs the loader reads —
+  `instructions.md`, the component directories, and the native tool
+  dependency files at the agent root — with each file's executable bit, so
+  generated output, `.git/`, and vendored dependency trees cannot move it.
+  It is omitted only when the agent root cannot be read.
+
+- `--emit catalog` reports an MCP entry's `transport` in one vocabulary
+  whichever side declared the server — `stdio`, `streamable-http`, or
+  `installed` — so an authored connection's kind and a plugin-declared
+  server's transport are directly comparable; `source` remains what
+  distinguishes where an entry came from.
+
 - Standalone MCP connections move from `connections/` to `mcp/`, re-shaped to
   the Agent Plugins 1.0 `mcp.json` server-entry vocabulary (issue #49): a
   remote connection now declares `type: streamable-http` (replacing

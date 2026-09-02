@@ -19,7 +19,7 @@ const integrationUsage = `usage:
 
 // resolveIntegrationStoreBase resolves the operator's integration-package
 // store base directory (ADR 0014's per-OS-user default). It is the one
-// resolution every command that opens the store shares — apply, validate,
+// resolution every command that opens the store shares — apply, check,
 // and connection status alike — so an installed connection resolves
 // identically no matter which command asks. A resolution failure (e.g. an
 // unreadable user config directory) yields an empty base, which callers that

@@ -15,9 +15,9 @@ import (
 )
 
 const pluginUsage = `usage:
-  tenon plugin fetch AGENT [NAME] [--manifest PATH]
-  tenon plugin update AGENT NAME --rev REV [--manifest PATH]
-  tenon plugin status AGENT [NAME] [--manifest PATH]
+  tenon plugin fetch AGENT [NAME] [--pins FILE]
+  tenon plugin update AGENT NAME --rev REV [--pins FILE]
+  tenon plugin status AGENT [NAME] [--pins FILE]
 `
 
 // resolvePluginCacheBase resolves the operator's plugin-reference cache base
@@ -73,10 +73,10 @@ func runPlugin(args []string, stdout, stderr io.Writer) int {
 func runPluginFetch(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("plugin fetch", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	manifestPath := fs.String("manifest", "", "optional supplied agent manifest proving an instructions-free root")
+	manifestPath := fs.String("pins", "", "supplied pin set to verify against the current runtime closure; fails closed naming the first drifted pin")
 	positional, ok := parsePositional(fs, args)
 	if !ok || len(positional) < 1 || len(positional) > 2 {
-		fmt.Fprintf(stderr, "tenon plugin fetch: usage: tenon plugin fetch AGENT [NAME] [--manifest PATH]\n")
+		fmt.Fprintf(stderr, "tenon plugin fetch: usage: tenon plugin fetch AGENT [NAME] [--pins FILE]\n")
 		return 2
 	}
 	agent := positional[0]
@@ -155,10 +155,10 @@ func runPluginUpdate(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("plugin update", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	rev := fs.String("rev", "", "the new full 40-character git commit SHA to pin")
-	manifestPath := fs.String("manifest", "", "optional supplied agent manifest proving an instructions-free root")
+	manifestPath := fs.String("pins", "", "supplied pin set to verify against the current runtime closure; fails closed naming the first drifted pin")
 	positional, ok := parsePositional(fs, args)
 	if !ok || len(positional) != 2 {
-		fmt.Fprintf(stderr, "tenon plugin update: usage: tenon plugin update AGENT NAME --rev REV [--manifest PATH]\n")
+		fmt.Fprintf(stderr, "tenon plugin update: usage: tenon plugin update AGENT NAME --rev REV [--pins FILE]\n")
 		return 2
 	}
 	agent, name := positional[0], positional[1]
@@ -258,10 +258,10 @@ func runPluginUpdate(args []string, stdout, stderr io.Writer) int {
 func runPluginStatus(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("plugin status", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	manifestPath := fs.String("manifest", "", "optional supplied agent manifest proving an instructions-free root")
+	manifestPath := fs.String("pins", "", "supplied pin set to verify against the current runtime closure; fails closed naming the first drifted pin")
 	positional, ok := parsePositional(fs, args)
 	if !ok || len(positional) < 1 || len(positional) > 2 {
-		fmt.Fprintf(stderr, "tenon plugin status: usage: tenon plugin status AGENT [NAME] [--manifest PATH]\n")
+		fmt.Fprintf(stderr, "tenon plugin status: usage: tenon plugin status AGENT [NAME] [--pins FILE]\n")
 		return 2
 	}
 	agent := positional[0]

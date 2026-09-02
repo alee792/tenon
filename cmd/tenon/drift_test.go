@@ -50,6 +50,32 @@ func TestDriftCleanWorkspaceExitsZero(t *testing.T) {
 	}
 }
 
+// TestDriftJSONLResultSummaryOK proves the jsonl-mode driftResult on a clean
+// run carries outcome ok alongside agent/harness/workspace/fingerprint,
+// matching checkResult and applyResult's own shape.
+func TestDriftJSONLResultSummaryOK(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	ws := t.TempDir()
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("apply exit %d: %s", code, stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"drift", agent, "--harness", "claude", "--workspace", ws, "--format", "jsonl"}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("drift exit %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+	}
+	var got driftResult
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &got); err != nil {
+		t.Fatalf("result line %q is not valid JSON: %v", stdout.String(), err)
+	}
+	if got.Outcome != "ok" || got.Agent != "my-agent" || got.Harness != "claude" || got.Workspace != ws || got.Fingerprint == "" {
+		t.Fatalf("result = %+v, want outcome ok, agent=my-agent harness=claude workspace=%s and a non-empty fingerprint", got, ws)
+	}
+}
+
 // TestDriftReportsModifiedOwnedFileWithDiff proves drift's central case: an
 // owned file edited on disk since apply is reported as modified, exits 1,
 // carries the stable drift.file.modified identifier at the owned file's
@@ -180,7 +206,7 @@ func TestDriftJSONLIdentifiersAreStableAndParseable(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	code := run([]string{"drift", agent, "--harness", "claude", "--workspace", ws, "--diagnostics", "jsonl"}, nil, &stdout, &stderr)
+	code := run([]string{"drift", agent, "--harness", "claude", "--workspace", ws, "--format", "jsonl"}, nil, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("drift exit %d, want 1\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
 	}
@@ -209,17 +235,26 @@ func TestDriftJSONLIdentifiersAreStableAndParseable(t *testing.T) {
 	}
 	// Every jsonl line must itself be a single parseable JSON object with no
 	// unescaped embedded newlines breaking the one-object-per-line contract.
-	for _, line := range strings.Split(strings.TrimSpace(stdout.String()), "\n") {
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	for _, line := range lines {
 		var raw json.RawMessage
 		if err := json.Unmarshal([]byte(line), &raw); err != nil {
 			t.Fatalf("line %q is not one JSON object: %v", line, err)
 		}
 	}
+	// The stream ends with an outcome object distinguishing this from a
+	// gate_failed run: the source itself is fine, only the workspace drifted.
+	var final struct {
+		Outcome string `json:"outcome"`
+	}
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &final); err != nil || final.Outcome != "drift" {
+		t.Fatalf("the stream must end with the drift outcome object, got %q", lines[len(lines)-1])
+	}
 }
 
 // TestDriftValidateApplyParityUntouched proves drift's addition changed
-// nothing about validate or apply's own diagnostics or exit codes for a
-// project that already fails: validate and apply must still agree exactly
+// nothing about check or apply's own diagnostics or exit codes for a
+// project that already fails: check and apply must still agree exactly
 // as before, and a passing apply must still succeed and write records
 // exactly as before.
 func TestDriftValidateApplyParityUntouched(t *testing.T) {
@@ -232,15 +267,15 @@ func TestDriftValidateApplyParityUntouched(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var validateOut, applyOut, stderr bytes.Buffer
-	validateCode := run([]string{"validate", agent, "--harness", "claude", "--diagnostics", "jsonl"}, nil, &validateOut, &stderr)
-	applyCode := run([]string{"apply", agent, "--harness", "claude", "--diagnostics", "jsonl"}, nil, &applyOut, &stderr)
-	if validateCode != 1 || applyCode != 1 {
-		t.Fatalf("both must still fail with exit 1: validate=%d apply=%d", validateCode, applyCode)
+	var checkOut, applyOut, stderr bytes.Buffer
+	checkCode := run([]string{"check", agent, "--harness", "claude", "--format", "jsonl"}, nil, &checkOut, &stderr)
+	applyCode := run([]string{"apply", agent, "--harness", "claude", "--format", "jsonl"}, nil, &applyOut, &stderr)
+	if checkCode != 1 || applyCode != 1 {
+		t.Fatalf("both must still fail with exit 1: check=%d apply=%d", checkCode, applyCode)
 	}
-	if validateOut.String() != applyOut.String() {
-		t.Fatalf("validate and apply must still report identical diagnostics:\n%s\n%s",
-			validateOut.String(), applyOut.String())
+	if checkDiagnostics(t, checkOut.String()) != checkDiagnostics(t, applyOut.String()) {
+		t.Fatalf("check and apply must still report identical diagnostics:\n%s\n%s",
+			checkOut.String(), applyOut.String())
 	}
 }
 
@@ -449,11 +484,11 @@ func TestDriftDetectsStaleRecordHashDespiteMatchingDisk(t *testing.T) {
 func TestDriftManifestPinnedModelReportsClean(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
 	withFakeResolver(t, "2.1.240", nil)
-	manifestPath := writeManifestForModel(t, agent, "claude", "claude-opus-4")
+	manifestPath := writePinsForModel(t, agent, "claude", "claude-opus-4")
 
 	ws := t.TempDir()
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--manifest", manifestPath}, nil, &stdout, &stderr); code != 0 {
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--pins", manifestPath}, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("apply exit %d: %s", code, stderr.String())
 	}
 	if _, err := os.Stat(filepath.Join(ws, ".claude", "settings.json")); err != nil {
@@ -462,7 +497,7 @@ func TestDriftManifestPinnedModelReportsClean(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	code := run([]string{"drift", agent, "--harness", "claude", "--workspace", ws, "--manifest", manifestPath}, nil, &stdout, &stderr)
+	code := run([]string{"drift", agent, "--harness", "claude", "--workspace", ws, "--pins", manifestPath}, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("drift exit %d, want 0 (clean)\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
 	}
@@ -475,7 +510,7 @@ func TestDriftManifestPinnedModelReportsClean(t *testing.T) {
 // improvement loop reading drift.file.modified in jsonl mode gets the
 // unified diff in the finding's own detail field, not only in prose-mode
 // stdout it never reads. It also proves the driftResult summary carries
-// fingerprint, matching validateResult/applyResult's shape.
+// fingerprint, matching checkResult/applyResult's shape.
 func TestDriftJSONLModifiedFindingCarriesDiff(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
 	ws := t.TempDir()
@@ -489,7 +524,7 @@ func TestDriftJSONLModifiedFindingCarriesDiff(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	code := run([]string{"drift", agent, "--harness", "claude", "--workspace", ws, "--diagnostics", "jsonl"}, nil, &stdout, &stderr)
+	code := run([]string{"drift", agent, "--harness", "claude", "--workspace", ws, "--format", "jsonl"}, nil, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("drift exit %d, want 1\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
 	}
@@ -532,7 +567,7 @@ func TestDriftFlagValidation(t *testing.T) {
 	}{
 		{"missing workspace", []string{"drift", agent, "--harness", "claude"}},
 		{"bad harness", []string{"drift", agent, "--workspace", ws, "--harness", "gpt"}},
-		{"bad diagnostics mode", []string{"drift", agent, "--workspace", ws, "--harness", "claude", "--diagnostics", "yaml"}},
+		{"bad format value", []string{"drift", agent, "--workspace", ws, "--harness", "claude", "--format", "yaml"}},
 		{"no agent", []string{"drift", "--workspace", ws, "--harness", "claude"}},
 		{"two agents", []string{"drift", agent, agent, "--workspace", ws, "--harness", "claude"}},
 	}
@@ -655,5 +690,127 @@ func TestUnifiedDiffBoundsTotalBytes(t *testing.T) {
 		if !strings.Contains(diff, "truncated") {
 			t.Fatalf("a diff over the byte limit must carry a truncation marker, got tail %q", diff[len(diff)-60:])
 		}
+	}
+}
+
+// TestDriftAgainstAMissingWorkspaceIsDriftNotGateFailure proves the outcome
+// names what actually failed: the source passed the gate and the workspace
+// is what is missing, so every generated path classifies as missing and the
+// run ends in the ordinary drift outcome rather than claiming the source is
+// invalid.
+//
+// The agent carries a real authored tool on purpose. Tool preparation runs
+// its language host as a subprocess, and a host launched with its working
+// directory set to a workspace that does not exist cannot start at all — so
+// a tool-free agent would pass this test over the exact gap it is meant to
+// close, reporting tool.inspect.failed and gate_failed for a workspace whose
+// only problem is that it is missing.
+func TestDriftAgainstAMissingWorkspaceIsDriftNotGateFailure(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	writeGoTool(t, agent, goToolFile)
+	missing := filepath.Join(t.TempDir(), "never-applied")
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"drift", agent, "--harness", "claude", "--workspace", missing, "--format", "jsonl"}, nil, &stdout, &stderr); code != 1 {
+		t.Fatalf("drift against a missing workspace must exit 1, got %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+	}
+	assertOneOutcome(t, stdout.String())
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if lines[len(lines)-1] != `{"outcome":"drift"}` {
+		t.Fatalf("the stream must end with the drift outcome: %q", stdout.String())
+	}
+	diags := parseDiagLines(t, strings.Join(lines[:len(lines)-1], "\n"))
+	if len(diags) < 2 {
+		t.Fatalf("expected every owned path reported missing: %q", stdout.String())
+	}
+	for _, d := range diags {
+		if d.ID != "drift.file.missing" {
+			t.Fatalf("every finding against a missing workspace is a missing file, got %+v", d)
+		}
+	}
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Fatalf("drift must not create the workspace it reports on: %v", err)
+	}
+}
+
+// TestDriftAgainstAFileWorkspaceIsAUsageError proves the third case is told
+// apart from the other two: a workspace that exists but is a regular file is
+// neither drift nor a gate failure but a mistake in the invocation, so it
+// exits 2 with a usage message and no outcome object at all — the same shape
+// every other usage error has.
+func TestDriftAgainstAFileWorkspaceIsAUsageError(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	file := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(file, []byte("workspace?\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"drift", agent, "--harness", "claude", "--workspace", file, "--format", "jsonl"}, nil, &stdout, &stderr); code != 2 {
+		t.Fatalf("a file passed as --workspace must exit 2, got %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("a usage error carries no outcome object: %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "--workspace must be a directory (found a file)") ||
+		!strings.Contains(stderr.String(), file) {
+		t.Fatalf("the usage error must name the rule and the path: %q", stderr.String())
+	}
+}
+
+// TestDriftAgainstADanglingSymlinkWorkspaceReportsDrift settles what a
+// --workspace that is a symlink to nothing means. It is deliberately the
+// missing-workspace answer and not the not-a-directory one: os.Stat follows
+// the link and reports the target, which does not exist, so the path names
+// no directory and no file — nothing exists there to have been applied. The
+// source is fine, the environment is what is missing, and every generated
+// path is missing, which is the ordinary drift outcome. The alternative,
+// treating it as the usage error a regular file gets, would claim the
+// operator pointed at the wrong kind of thing when they pointed at
+// something that is not there at all.
+func TestDriftAgainstADanglingSymlinkWorkspaceReportsDrift(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	dir := t.TempDir()
+	ws := filepath.Join(dir, "workspace")
+	if err := os.Symlink(filepath.Join(dir, "no-such-target"), ws); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"drift", agent, "--harness", "claude", "--workspace", ws, "--format", "jsonl"}, nil, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("drift exit %d, want 1\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+	}
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	var final struct {
+		Outcome string `json:"outcome"`
+	}
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &final); err != nil || final.Outcome != "drift" {
+		t.Fatalf("the stream must end with the drift outcome, got %q", lines[len(lines)-1])
+	}
+	for _, d := range parseDiagLines(t, stdout.String()) {
+		if d.Path == "CLAUDE.md" && d.ID == "drift.file.missing" {
+			return
+		}
+	}
+	t.Fatalf("every generated path must report missing, got %s", stdout.String())
+}
+
+// TestDriftRefusesAWorkspaceThatIsAFile is the contrast: a --workspace that
+// exists and is a regular file is not drift and not a gate failure, but a
+// mistake in the invocation, and it exits 2 with no outcome object at all.
+func TestDriftRefusesAWorkspaceThatIsAFile(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	file := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(file, []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"drift", agent, "--harness", "claude", "--workspace", file, "--format", "jsonl"}, nil, &stdout, &stderr); code != 2 {
+		t.Fatalf("drift exit %d, want 2\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), `"outcome"`) {
+		t.Fatalf("a usage error must emit no outcome object, got %q", stdout.String())
 	}
 }

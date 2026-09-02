@@ -62,9 +62,9 @@ There are two units:
   deterministic, content-addressed digest per apply, over all authored
   inputs. It is *commit-free* — defined on the working tree with no commit
   or staging, exactly when a mid-revision loop has no git identity to use —
-  and *gate-proven*: a fingerprint is only reported for a project that
-  loads and whose tools prepare, so it certifies a runnable agent existed,
-  which a tree hash does not.
+  and *gate-proven*: `tenon check` reports a fingerprint only for a project
+  that loads and whose tools prepare, so it certifies a runnable agent
+  existed, which a tree hash does not.
 - **The stable diagnostic identifier is the unit of revision rejection.**
   A revision that never becomes a fingerprint is named by the identifier
   set that rejected it — stable across releases, matching apply's own
@@ -90,16 +90,20 @@ The loop runs the same cycle a person runs, without hands:
 1. **Mutate.** Edit the authored files — add a skill directory, rewrite
    `instructions.md`, add a typed tool. The folder is the inventory; an
    empty `instructions.md` is a legitimate candidate.
-2. **Validate.** `tenon validate . --harness claude --diagnostics jsonl`
-   emits one JSON line per failure with the stable identifier and authored
-   path; on success the stream ends with the agent name and fingerprint.
-   The loop self-corrects against identifiers, not prose.
+2. **Gate.** `tenon check . --harness claude --format jsonl` emits one
+   JSON line per failure with the stable identifier and authored path; the
+   stream always ends with a final object carrying the run's `outcome` and,
+   on success, the agent name and `fingerprint`. The loop self-corrects
+   against identifiers, not prose.
 3. **Apply.** `tenon apply` compiles the folder to native harness files and
    records the fingerprint. Identical source reapplies deterministically.
 4. **Run and attribute.** Interactive, headless (`tenon run`), or
    scheduled — every dispatch event carries the fingerprint and, when a
-   manifest is supplied, the pinned harness version, model, and package
-   identities.
+   pin set is supplied, the pinned harness version, model, and package
+   identities. A headless run's stream ends with a terminal `run.completed`
+   event carrying the same envelope, the run's `outcome`, and `turns`: the
+   outcome says whether the dispatcher finished the work it was given, the
+   counts say how those turns went, and the loop scores the counts.
 5. **Verify and select — outside tenon.** The loop's evaluator scores the
    run and keeps or discards the revision, building its lineage from the
    units above. See
@@ -112,7 +116,7 @@ The loop runs the same cycle a person runs, without hands:
 | --- | --- |
 | File-represented editable components | The agent is a folder; capability is added by adding a file, never by registering anything ([product spec](product-spec.md#the-authored-project)). |
 | Bounded editable surfaces | Every surface has a safety ceiling and symlinks are rejected, so the loop's search space is finite and knowable. |
-| Attribution of gains to exact configurations | The fingerprint on every apply and dispatch event; the optional [agent manifest](product-spec.md#agent-manifest) pins what the directory cannot express. |
+| Attribution of gains to exact configurations | The fingerprint on every apply and dispatch event; the optional [pin set](product-spec.md#pins) pins what the directory cannot express. |
 | Permission control outside the loop | Apply, acquisition, trust, and credentials stay deliberate human acts; nothing mutates a workspace unvalidated. |
 
 A fifth property matters most for a *cheap* loop: well-formedness is
@@ -143,11 +147,11 @@ model loop.
 
 Two guarantees keep the experiment honest:
 
-- **The agent is not told how it was set up.** The manifest, its pins, and
+- **The agent is not told how it was set up.** The pin set, its pins, and
   the fingerprint are never rendered into model-facing content, so a
   revision cannot condition on its own identity.
 - **A pin is an axis, not an editable surface.** The loop tries a
-  different model or harness version by changing a manifest pin; what it
+  different model or harness version by changing a pin; what it
   *edits* stays the authored files. The two axes remain separable.
 
 ## What tenon deliberately does not do

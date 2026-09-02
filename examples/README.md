@@ -1,7 +1,7 @@
 # Examples
 
 Runnable agent projects that exercise tenon end to end. Each subdirectory is
-an ordinary authored agent project — `tenon apply` and `tenon validate` run
+an ordinary authored agent project — `tenon apply` and `tenon check` run
 against it exactly as they would against your own.
 
 ## `mixed-tools`

@@ -32,29 +32,29 @@ type Resolver struct {
 // empty: tenon does not discover or verify which model served a turn.
 func Resolve(p *agentproject.Project, harness, tenonVersion string, r Resolver) (*Manifest, error) {
 	if p == nil {
-		return nil, errorf("manifest.resolve.project", "resolving a manifest requires a loaded project")
+		return nil, errorf("pins.resolve.project", "resolving a pin set requires a loaded project")
 	}
 	if !harnessNames[harness] {
-		return nil, errorf("manifest.resolve.harness",
-			"resolving a manifest requires a supported harness; got %q", harness)
+		return nil, errorf("pins.resolve.harness",
+			"resolving a pin set requires a supported harness; got %q", harness)
 	}
 	if r.HarnessVersion == nil || r.ToolRuntimes == nil || r.PackageIdentities == nil {
-		return nil, errorf("manifest.resolve.resolver", "the manifest resolver is incomplete")
+		return nil, errorf("pins.resolve.resolver", "the pin set resolver is incomplete")
 	}
 
 	harnessVersion, err := r.HarnessVersion(harness)
 	if err != nil {
-		return nil, errorf("manifest.resolve.harness-version",
+		return nil, errorf("pins.resolve.harness-version",
 			"the %s harness version could not be resolved: %v", harness, err)
 	}
 	deno, uv, goVer, python, err := r.ToolRuntimes()
 	if err != nil {
-		return nil, errorf("manifest.resolve.tool-runtimes",
+		return nil, errorf("pins.resolve.tool-runtimes",
 			"the authored tool runtimes could not be resolved: %v", err)
 	}
 	packages, err := r.PackageIdentities(harness)
 	if err != nil {
-		return nil, errorf("manifest.resolve.packages",
+		return nil, errorf("pins.resolve.packages",
 			"the integration package identities could not be resolved: %v", err)
 	}
 	packages = append([]PackageIdentity(nil), packages...)
@@ -84,20 +84,20 @@ func Resolve(p *agentproject.Project, harness, tenonVersion string, r Resolver) 
 // typed *Error with a stable code.
 func Verify(supplied, current *Manifest) error {
 	if supplied == nil || current == nil {
-		return errorf("manifest.verify.nil", "verification requires both a supplied and a current manifest")
+		return errorf("pins.verify.nil", "verification requires both a supplied and a current pin set")
 	}
 	if supplied.Agent != current.Agent {
-		return errorf("manifest.drift.agent",
-			"manifest agent drift: supplied %q, current %q", supplied.Agent, current.Agent)
+		return errorf("pins.drift.agent",
+			"pins agent drift: supplied %q, current %q", supplied.Agent, current.Agent)
 	}
 	if supplied.SourceFingerprint != current.SourceFingerprint {
-		return errorf("manifest.drift.source-fingerprint",
-			"manifest source fingerprint drift: supplied %s, current %s",
+		return errorf("pins.drift.source-fingerprint",
+			"pins source fingerprint drift: supplied %s, current %s",
 			supplied.SourceFingerprint, current.SourceFingerprint)
 	}
 	if supplied.TenonVersion != current.TenonVersion {
-		return errorf("manifest.drift.tenon-version",
-			"manifest tenon version drift: supplied %s, current %s",
+		return errorf("pins.drift.tenon-version",
+			"pins tenon version drift: supplied %s, current %s",
 			supplied.TenonVersion, current.TenonVersion)
 	}
 
@@ -106,15 +106,15 @@ func Verify(supplied, current *Manifest) error {
 	// it. Resolve always injects one, so this is defense against a hand-built
 	// or future caller.
 	if len(current.Harnesses) == 0 {
-		return errorf("manifest.verify.no-harness",
+		return errorf("pins.verify.no-harness",
 			"the current closure pins no harness to verify against")
 	}
 	// verify the supplied manifest's entry for that same harness.
 	for name, cur := range current.Harnesses {
 		sup, ok := supplied.Harnesses[name]
 		if !ok {
-			return errorf("manifest.drift.harness-missing",
-				"manifest does not pin harness %q, which the current closure resolves", name)
+			return errorf("pins.drift.harness-missing",
+				"the supplied pins do not pin harness %q, which the current closure resolves", name)
 		}
 		if err := verifyHarness(name, sup, cur); err != nil {
 			return err
@@ -127,8 +127,8 @@ func Verify(supplied, current *Manifest) error {
 // Model is ignored by design.
 func verifyHarness(name string, sup, cur HarnessPins) error {
 	if sup.HarnessVersion != cur.HarnessVersion {
-		return errorf("manifest.drift.harness-version",
-			"manifest harness %q version drift: supplied %s, current %s",
+		return errorf("pins.drift.harness-version",
+			"pins harness %q version drift: supplied %s, current %s",
 			name, sup.HarnessVersion, cur.HarnessVersion)
 	}
 	if err := verifyPackages(name, sup.IntegrationPackages, cur.IntegrationPackages); err != nil {
@@ -152,19 +152,19 @@ func verifyPackages(name string, supplied, current []PackageIdentity) error {
 	for _, p := range sortedIDs(suppliedByID) {
 		curHash, ok := currentByID[p]
 		if !ok {
-			return errorf("manifest.drift.package-missing",
-				"manifest harness %q pins package %q, which the current closure no longer selects", name, p)
+			return errorf("pins.drift.package-missing",
+				"pins harness %q names package %q, which the current closure no longer selects", name, p)
 		}
 		if suppliedByID[p] != curHash {
-			return errorf("manifest.drift.package-hash",
-				"manifest harness %q package %q manifest hash drift: supplied %s, current %s",
+			return errorf("pins.drift.package-hash",
+				"pins harness %q package %q manifest hash drift: supplied %s, current %s",
 				name, p, suppliedByID[p], curHash)
 		}
 	}
 	for _, p := range sortedIDs(currentByID) {
 		if _, ok := suppliedByID[p]; !ok {
-			return errorf("manifest.drift.package-added",
-				"manifest harness %q does not pin package %q, which the current closure now selects", name, p)
+			return errorf("pins.drift.package-added",
+				"pins harness %q does not name package %q, which the current closure now selects", name, p)
 		}
 	}
 	return nil
@@ -184,8 +184,8 @@ func verifyRuntimes(name string, sup, cur ToolRuntimes) error {
 		{"python", sup.Python, cur.Python},
 	} {
 		if rt.supplied != rt.current {
-			return errorf("manifest.drift.tool-runtime",
-				"manifest harness %q %s runtime drift: supplied %q, current %q",
+			return errorf("pins.drift.tool-runtime",
+				"pins harness %q %s runtime drift: supplied %q, current %q",
 				name, rt.lang, rt.supplied, rt.current)
 		}
 	}

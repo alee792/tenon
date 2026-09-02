@@ -85,8 +85,9 @@ type dispatcher struct {
 	mode         Mode
 	turnTimeout  time.Duration
 
-	enc *json.Encoder
-	seq int
+	enc   *json.Encoder
+	seq   int
+	turns Turns
 
 	// per-turn state, valid only while turnActive
 	turnActive    bool
@@ -127,27 +128,35 @@ type submission struct {
 // Run executes the dispatch loop until input is exhausted, the context is done,
 // or a fatal input or state error occurs. It fails closed at startup if the
 // workspace's generated setup is stale or missing.
-func Run(ctx context.Context, opts Options) error {
+//
+// A clean run ends the stream itself with the terminal run.completed event
+// carrying outcome "ok" and the turn counts. "ok" means the dispatcher
+// completed every turn it was given, whatever those turns' own statuses: a
+// loop reads the counts to score, and reads the outcome only to learn
+// whether the dispatch itself finished. The returned Summary lets a caller
+// that must write its own terminator — Run returned an error, or never ran
+// at all — continue this stream's sequence numbering.
+func Run(ctx context.Context, opts Options) (Summary, error) {
 	if opts.Project == nil {
-		return errors.New("dispatch: a loaded agent project is required")
+		return Summary{}, errors.New("dispatch: a loaded agent project is required")
 	}
 	if opts.Driver == nil {
-		return errors.New("dispatch: a harness driver is required")
+		return Summary{}, errors.New("dispatch: a harness driver is required")
 	}
 
 	// Fail closed on stale or missing generated setup, exactly as mcp serve
 	// does: a dispatcher started against drifted setup would serve an agent
 	// nobody applied.
 	if err := apply.Verify(opts.Project, opts.Workspace, opts.Harness); err != nil {
-		return fmt.Errorf("dispatch: %w", err)
+		return Summary{}, fmt.Errorf("dispatch: %w", err)
 	}
 	if err := opts.Driver.Verify(ctx); err != nil {
-		return fmt.Errorf("dispatch: the %s harness could not be verified: %w", opts.Harness, err)
+		return Summary{}, fmt.Errorf("dispatch: the %s harness could not be verified: %w", opts.Harness, err)
 	}
 
 	store, err := dispatchstate.Open(opts.Workspace)
 	if err != nil {
-		return fmt.Errorf("dispatch: %w", err)
+		return Summary{}, fmt.Errorf("dispatch: %w", err)
 	}
 
 	conversation := opts.Conversation
@@ -177,12 +186,27 @@ func Run(ctx context.Context, opts Options) error {
 	}
 
 	if err := d.recover(); err != nil {
-		return err
+		return d.summary(), err
 	}
 
 	subCh := make(chan submission)
 	go readInput(ctx, opts.In, subCh)
-	return d.loop(ctx, subCh)
+	if err := d.loop(ctx, subCh); err != nil {
+		return d.summary(), err
+	}
+	// The stream terminates the way every other command's does — with one
+	// object carrying an outcome — except that here it is also an event, so
+	// the envelope invariant holds for the last line as much as the first.
+	if err := d.emit(event{Type: typeRunCompleted, Outcome: "ok", Turns: &d.turns}); err != nil {
+		return d.summary(), err
+	}
+	return d.summary(), nil
+}
+
+// summary reports the sequence reached and the turn counts, for a caller
+// that must continue or terminate this stream itself.
+func (d *dispatcher) summary() Summary {
+	return Summary{Sequence: d.seq, Turns: d.turns}
 }
 
 // recover terminalizes any turn left active by a prior dispatcher and reports
@@ -366,6 +390,7 @@ func (d *dispatcher) finishTurn(out turnOutcome) error {
 		if err := d.store.Complete(d.ref, id, dispatchstate.Uncertain, "deadline_exceeded", task); err != nil {
 			return fmt.Errorf("dispatch: %w", err)
 		}
+		d.turns.Uncertain++
 		return d.emit(event{Type: typeTurnUncertain, InputID: id, Reason: "deadline_exceeded"})
 	}
 	if out.err != nil {
@@ -381,6 +406,7 @@ func (d *dispatcher) finishTurn(out turnOutcome) error {
 	if err := d.store.Complete(d.ref, id, status, out.result.Reason, task); err != nil {
 		return fmt.Errorf("dispatch: %w", err)
 	}
+	d.count(status)
 	return d.emit(event{
 		Type:      "turn." + string(status),
 		InputID:   id,
@@ -396,7 +422,25 @@ func (d *dispatcher) processFailed(id string, cause error) error {
 	if err := d.store.Complete(d.ref, id, dispatchstate.Uncertain, reason, d.mode == Task); err != nil {
 		return fmt.Errorf("dispatch: %w", err)
 	}
+	d.turns.ProcessFailed++
 	return d.emit(event{Type: typeDriverProcessed, InputID: id, Reason: reason})
+}
+
+// count records one turn's terminal status. Only turns this dispatcher ran
+// are counted: an input recovered as uncertain at startup belongs to the
+// dispatcher that abandoned it, and counting it here would attribute another
+// run's work to this one.
+func (d *dispatcher) count(status dispatchstate.Status) {
+	switch status {
+	case dispatchstate.Completed:
+		d.turns.Completed++
+	case dispatchstate.Failed:
+		d.turns.Failed++
+	case dispatchstate.Cancelled:
+		d.turns.Cancelled++
+	default:
+		d.turns.Uncertain++
+	}
 }
 
 // abortActiveTurn interrupts the running turn and drains it without recording a

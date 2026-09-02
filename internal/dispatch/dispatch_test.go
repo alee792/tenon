@@ -71,7 +71,7 @@ func options(p *agentproject.Project, ws string, in io.Reader, out io.Writer) Op
 // the decoded wire events.
 func runCollect(t *testing.T, opts Options) []event {
 	t.Helper()
-	if err := Run(context.Background(), opts); err != nil {
+	if _, err := Run(context.Background(), opts); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	return decodeEvents(t, opts.Out.(*bytes.Buffer).Bytes())
@@ -130,7 +130,7 @@ func TestFIFOAcrossInputs(t *testing.T) {
 		`{"input_id":"c","text":"3"}`,
 	), &out)
 	opts.Driver = fake
-	if err := Run(context.Background(), opts); err != nil {
+	if _, err := Run(context.Background(), opts); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if got := fake.Inputs(); !equal(got, []string{"a", "b", "c"}) {
@@ -176,7 +176,7 @@ func TestAcceptWhileTurnActive(t *testing.T) {
 
 	runErr := make(chan error, 1)
 	go func() {
-		err := Run(context.Background(), opts)
+		_, err := Run(context.Background(), opts)
 		pw.Close()
 		runErr <- err
 	}()
@@ -258,7 +258,7 @@ func TestInteractiveResumesSession(t *testing.T) {
 		`{"input_id":"b","text":"2"}`,
 	), &out)
 	opts.Driver = fake
-	if err := Run(context.Background(), opts); err != nil {
+	if _, err := Run(context.Background(), opts); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	opens := fake.Opens()
@@ -289,7 +289,7 @@ func TestTaskModeOpensFresh(t *testing.T) {
 	), &out)
 	opts.Driver = fake
 	opts.Mode = Task
-	if err := Run(context.Background(), opts); err != nil {
+	if _, err := Run(context.Background(), opts); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	for i, o := range fake.Opens() {
@@ -390,7 +390,7 @@ func TestOverLimitLineIsFatal(t *testing.T) {
 	huge := strings.Repeat("x", dispatchstate.MaxInputBytes+4096+100)
 	var out bytes.Buffer
 	opts := options(p, ws, strings.NewReader(huge+"\n"), &out)
-	err := Run(context.Background(), opts)
+	_, err := Run(context.Background(), opts)
 	if err == nil || !strings.Contains(err.Error(), "bounded JSONL line size") {
 		t.Fatalf("want bounded-line fatal error, got %v", err)
 	}
@@ -515,7 +515,7 @@ func TestVerifyGuardFailsClosed(t *testing.T) {
 	}
 	var out bytes.Buffer
 	opts := options(p, t.TempDir(), strings.NewReader(""), &out) // never applied
-	err = Run(context.Background(), opts)
+	_, err = Run(context.Background(), opts)
 	if err == nil || !strings.Contains(err.Error(), "tenon apply") {
 		t.Fatalf("want fail-closed apply guard, got %v", err)
 	}
@@ -592,7 +592,7 @@ func TestManifestIdentityOnEveryEvent(t *testing.T) {
 	opts := options(p, ws, lines(`{"input_id":"a","text":"1"}`), &out)
 	opts.Driver = fake
 	opts.Manifest = "sha256:deadbeef"
-	if err := Run(context.Background(), opts); err != nil {
+	if _, err := Run(context.Background(), opts); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	events := decodeEvents(t, out.Bytes())
@@ -614,7 +614,7 @@ func TestManifestIdentityOnEveryEvent(t *testing.T) {
 	var out2 bytes.Buffer
 	opts2 := options(p, ws, lines(`{"input_id":"b","text":"2"}`), &out2)
 	opts2.Driver = &harness.FakeDriver{Default: harness.FakeTurn{Result: harness.TurnResult{Status: harness.StatusCompleted}}}
-	if err := Run(context.Background(), opts2); err != nil {
+	if _, err := Run(context.Background(), opts2); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if strings.Contains(out2.String(), "manifest") {
@@ -625,5 +625,93 @@ func TestManifestIdentityOnEveryEvent(t *testing.T) {
 		if e.Fingerprint != p.Fingerprint {
 			t.Fatalf("event %s missing source fingerprint without a manifest: %+v", e.Type, e)
 		}
+	}
+}
+
+// TestRunEndsWithACompletedEvent proves the stream's terminator is an event
+// like every line before it — full envelope, next sequence — and that run's
+// outcome answers only whether the dispatcher finished the work it was
+// given. A run whose every turn failed is a run that finished: it ends ok,
+// and what a loop scores is the turn counts, which is the one place the
+// failure is visible.
+func TestRunEndsWithACompletedEvent(t *testing.T) {
+	p, ws := appliedWorkspace(t)
+	fake := &harness.FakeDriver{}
+	fake.Push(harness.FakeTurn{Result: harness.TurnResult{Status: harness.StatusCompleted}})
+	fake.Push(harness.FakeTurn{Result: harness.TurnResult{Status: harness.StatusFailed, Reason: "tool_error"}})
+	var out bytes.Buffer
+	opts := options(p, ws, lines(
+		`{"input_id":"a","text":"1"}`,
+		`{"input_id":"b","text":"2"}`,
+	), &out)
+	opts.Driver = fake
+	events := runCollect(t, opts)
+
+	last := events[len(events)-1]
+	if last.Type != typeRunCompleted {
+		t.Fatalf("the stream must end with %s, got %q: %+v", typeRunCompleted, last.Type, events)
+	}
+	// The terminator is a valid event: it carries the envelope every other
+	// line carries, and continues the sequence rather than restarting it.
+	if last.SchemaVersion != schemaVersion || last.Sequence != len(events) {
+		t.Fatalf("the terminator must carry the envelope and the next sequence: %+v", last)
+	}
+	if last.Harness != "claude" || last.Conversation != "local" || last.Fingerprint != p.Fingerprint {
+		t.Fatalf("the terminator must carry the wire envelope: %+v", last)
+	}
+	if last.Outcome != "ok" {
+		t.Fatalf("a dispatch that completed every turn it was given ends ok, got %q", last.Outcome)
+	}
+	if last.Turns == nil || last.Turns.Failed < 1 || last.Turns.Completed != 1 {
+		t.Fatalf("the counts must report the turns' own statuses: %+v", last.Turns)
+	}
+	// No other event carries an outcome: that field is what tells the
+	// terminator apart from the lines before it.
+	for _, e := range events[:len(events)-1] {
+		if e.Outcome != "" || e.Turns != nil {
+			t.Fatalf("only the terminator carries an outcome: %+v", e)
+		}
+	}
+}
+
+// TestRunSummaryContinuesTheSequence proves the summary a failing Run hands
+// back lets the caller terminate the stream itself without restarting the
+// numbering a consumer relies on being monotonic.
+func TestRunSummaryContinuesTheSequence(t *testing.T) {
+	p, ws := appliedWorkspace(t)
+	fake := &harness.FakeDriver{Default: harness.FakeTurn{Result: harness.TurnResult{Status: harness.StatusCompleted}}}
+	var out bytes.Buffer
+	opts := options(p, ws, lines(`{"input_id":"a","text":"1"}`), &out)
+	opts.Driver = fake
+	summary, err := Run(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	events := decodeEvents(t, out.Bytes())
+	if summary.Sequence != len(events) {
+		t.Fatalf("summary sequence = %d, want the last emitted %d", summary.Sequence, len(events))
+	}
+	if summary.Turns.Completed != 1 {
+		t.Fatalf("summary turns = %+v, want one completed", summary.Turns)
+	}
+
+	// A caller writing its own terminator continues that numbering.
+	var tail bytes.Buffer
+	if err := WriteCompleted(&tail, Completion{
+		Sequence:     summary.Sequence + 1,
+		Harness:      "claude",
+		Conversation: "local",
+		Outcome:      "error",
+		Turns:        summary.Turns,
+		Error:        "the harness could not be verified",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	written := decodeEvents(t, tail.Bytes())
+	if len(written) != 1 || written[0].Sequence != len(events)+1 || written[0].Type != typeRunCompleted {
+		t.Fatalf("a caller-written terminator must be one run.completed event at the next sequence: %+v", written)
+	}
+	if written[0].Outcome != "error" || written[0].Error == "" {
+		t.Fatalf("the error terminator must carry its reason: %+v", written[0])
 	}
 }

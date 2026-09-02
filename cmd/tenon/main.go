@@ -44,27 +44,28 @@ import (
 const prepareBudget = 5 * time.Minute
 
 const usage = `usage:
-  tenon apply AGENT --harness <claude|codex> [--workspace DIR] [--manifest PATH] [--diagnostics <prose|jsonl>] [--discard-local]
-  tenon validate AGENT --harness <claude|codex> [--manifest PATH] [--diagnostics <prose|jsonl>]
-  tenon drift AGENT --workspace DIR --harness <claude|codex> [--manifest PATH] [--diagnostics <prose|jsonl>]
-  tenon fingerprint show AGENT [--diagnostics <prose|jsonl>]
-  tenon manifest write AGENT --harness <claude|codex> [--output PATH] [--manifest PATH] [--model VALUE]
-  tenon mcp serve AGENT --harness <claude|codex> [--workspace DIR] [--manifest PATH]
-  tenon run AGENT --workspace DIR --harness <claude|codex> [--conversation ID] [--input jsonl] [--manifest PATH] [--timeout DUR] [--turn-timeout DUR]
-  tenon schedule trigger AGENT NAME --workspace DIR --harness <claude|codex> --input-id ID [--manifest PATH] [--turn-timeout DUR] [--timeout DUR]
-  tenon schedule run AGENT --workspace DIR --harness <claude|codex> [--manifest PATH] [--turn-timeout DUR] [--max-active-turns N]
-  tenon stage AGENT --harness <claude|codex> --output DIR
-  tenon stage verify --artifact PATH [--prefix DIR]
-  tenon mcp add AGENT NAME --url HTTPS_URL [--header 'K: V'] [--context TEXT] [--manifest PATH]
-  tenon mcp status AGENT [NAME] [--manifest PATH]
-  tenon mcp remove AGENT NAME [--manifest PATH]
+  tenon apply AGENT --harness <claude|codex> [--workspace DIR] [--pins FILE] [--format <prose|jsonl>] [--discard-local]
+  tenon check AGENT [--harness <claude|codex>] [--emit files,catalog] [--pins FILE] [--write-pins FILE] [--model VALUE] [--format <prose|jsonl>]
+  tenon drift AGENT --workspace DIR --harness <claude|codex> [--pins FILE] [--format <prose|jsonl>]
+  tenon clean --workspace DIR [--harness <claude|codex>] [--force] [--format <prose|jsonl>]
+  tenon mcp serve AGENT --harness <claude|codex> [--workspace DIR] [--pins FILE]
+  tenon run AGENT --workspace DIR --harness <claude|codex> [--conversation ID] [--input jsonl] [--pins FILE] [--timeout DUR] [--turn-timeout DUR]
+  tenon schedule trigger AGENT NAME --workspace DIR --harness <claude|codex> --input-id ID [--pins FILE] [--turn-timeout DUR] [--timeout DUR]
+  tenon schedule run AGENT --workspace DIR --harness <claude|codex> [--pins FILE] [--turn-timeout DUR] [--max-active-turns N]
+  tenon stage AGENT --harness <claude|codex> --output DIR [--format <prose|jsonl>]
+  tenon stage verify --artifact PATH [--prefix DIR] [--format <prose|jsonl>]
+  tenon mcp add AGENT NAME --url HTTPS_URL [--header 'K: V'] [--context TEXT] [--pins FILE]
+  tenon mcp status AGENT [NAME] [--pins FILE]
+  tenon mcp remove AGENT NAME [--pins FILE]
   tenon integration install SOURCE --trust operator
   tenon integration inspect|verify|list|enable|disable|remove [ID]
   tenon integration update ID SOURCE --trust operator
-  tenon plugin fetch AGENT [NAME] [--manifest PATH]
-  tenon plugin update AGENT NAME --rev REV [--manifest PATH]
-  tenon plugin status AGENT [NAME] [--manifest PATH]
+  tenon plugin fetch AGENT [NAME] [--pins FILE]
+  tenon plugin update AGENT NAME --rev REV [--pins FILE]
+  tenon plugin status AGENT [NAME] [--pins FILE]
   tenon version
+
+  TENON_HARNESS supplies --harness where it is omitted; the flag wins. clean ignores it.
 `
 
 func main() {
@@ -85,18 +86,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "apply":
 		return runApply(args[1:], stdout, stderr)
-	case "validate":
-		return runValidate(args[1:], stdout, stderr)
+	case "check":
+		return runCheck(args[1:], stdout, stderr)
 	case "drift":
 		return runDrift(args[1:], stdout, stderr)
-	case "fingerprint":
-		if len(args) < 2 || args[1] != "show" {
-			fmt.Fprintf(stderr, "tenon fingerprint: the only subcommand is show\n%s", usage)
-			return 2
-		}
-		return runFingerprintShow(args[2:], stdout, stderr)
-	case "manifest":
-		return runManifest(args[1:], stdout, stderr)
+	case "clean":
+		return runClean(args[1:], stdout, stderr)
 	case "mcp":
 		return runMCP(args[1:], stdin, stdout, stderr)
 	case "run":
@@ -129,8 +124,35 @@ func runVersion(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// resolveHarness applies TENON_HARNESS as the fallback for an unset --harness
+// flag: the explicit flag always wins. A flag.FlagSet cannot distinguish "not
+// passed" from "passed as empty string", so an empty flag with the env var
+// set defers to it — every caller that reaches this treats that as
+// indistinguishable from an explicit --harness. It does not itself validate
+// the result; callers still switch on claude/codex, using fromEnv to name the
+// actual source (TENON_HARNESS vs --harness) in their error.
+func resolveHarness(flagValue string) (value string, fromEnv bool) {
+	if flagValue != "" {
+		return flagValue, false
+	}
+	if env := os.Getenv("TENON_HARNESS"); env != "" {
+		return env, true
+	}
+	return "", false
+}
+
+// harnessFlagError formats the --harness/TENON_HARNESS validation error,
+// naming whichever source actually produced the invalid value so the error
+// stays honest about where a bad value came from.
+func harnessFlagError(cmd, value string, fromEnv bool) string {
+	if fromEnv {
+		return fmt.Sprintf("tenon %s: TENON_HARNESS must be claude or codex (found %q)\n", cmd, value)
+	}
+	return fmt.Sprintf("tenon %s: --harness must be exactly claude or codex\n", cmd)
+}
+
 // commonFlags parses the shared AGENT positional and flag set. It returns
-// the agent path, the selected driver, and the diagnostics mode. When
+// the agent path, the selected driver, and the output format. When
 // withDiscardLocal is true (apply only), it also accepts --discard-local and
 // returns whether it was set; every other caller gets discardLocal=false
 // unconditionally, since the flag is not registered on their FlagSet.
@@ -138,8 +160,8 @@ func commonFlags(name string, args []string, stderr io.Writer, withWorkspace, wi
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	harness := fs.String("harness", "", "target harness: claude or codex")
-	mode := fs.String("diagnostics", "prose", "diagnostic rendering: prose or jsonl")
-	manifest := fs.String("manifest", "", "optional supplied agent manifest to verify")
+	mode := fs.String("format", "prose", "output rendering: prose or jsonl")
+	manifest := fs.String("pins", "", "supplied pin set to verify against the current runtime closure; fails closed naming the first drifted pin")
 	var ws *string
 	if withWorkspace {
 		ws = fs.String("workspace", "", "workspace directory (defaults to the agent directory)")
@@ -174,13 +196,14 @@ func commonFlags(name string, args []string, stderr io.Writer, withWorkspace, wi
 	}
 	agent = positional[0]
 
-	switch *harness {
+	harnessValue, harnessFromEnv := resolveHarness(*harness)
+	switch harnessValue {
 	case "claude":
 		driver = claude.Driver{}
 	case "codex":
 		driver = codex.Driver{}
 	default:
-		fmt.Fprintf(stderr, "tenon %s: --harness must be exactly claude or codex\n", name)
+		fmt.Fprint(stderr, harnessFlagError(name, harnessValue, harnessFromEnv))
 		return "", "", nil, false, "", false, false
 	}
 	switch *mode {
@@ -188,7 +211,7 @@ func commonFlags(name string, args []string, stderr io.Writer, withWorkspace, wi
 	case "jsonl":
 		jsonl = true
 	default:
-		fmt.Fprintf(stderr, "tenon %s: --diagnostics must be prose or jsonl\n", name)
+		fmt.Fprintf(stderr, "tenon %s: --format must be prose or jsonl\n", name)
 		return "", "", nil, false, "", false, false
 	}
 	workspace = agent
@@ -209,18 +232,80 @@ func render(diags *diagnostics.List, jsonl bool, stdout, stderr io.Writer) {
 	_ = diags.WriteProse(stderr)
 }
 
-// validateResult is the jsonl-mode result summary for a successful validate.
-type validateResult struct {
-	Agent       string `json:"agent"`
-	Fingerprint string `json:"fingerprint"`
+// writeGateFailed terminates the jsonl stream with check's own gate_failed
+// object (defined in check.go) when apply's gate rejects the project — the
+// same gate check runs, so apply's failure stream ends exactly as check's
+// does. digest is the source digest naming the bytes that failed, empty
+// when there is no source to name (stage verify) or when the root itself
+// could not be read. A no-op in prose mode.
+func writeGateFailed(jsonl bool, stdout, stderr io.Writer, cmd, digest string) {
+	if !jsonl {
+		return
+	}
+	if err := writeResult(stdout, gateFailedResult{Outcome: "gate_failed", SourceDigest: digest}); err != nil {
+		fmt.Fprintln(stderr, "tenon "+cmd+":", err)
+	}
+}
+
+// errorOutcome is the final jsonl-mode object for a run that could not
+// complete for a reason that is not the source's fault: an unreadable pin
+// set, an unwritable path, a closure that would not resolve, an os error
+// mid-clean, a harness that would not start. It is deliberately NOT
+// gate_failed, drift, or blocked — those three are findings about the
+// source or the workspace, and a consumer scores them. An error is a
+// statement about the environment: the loop retries or escalates, and never
+// scores it. Error carries the same prose stderr already carries, bounded,
+// so a consumer reading only the stream still learns what went wrong.
+type errorOutcome struct {
+	Outcome string `json:"outcome"`
+	Error   string `json:"error"`
+}
+
+// noJSONL names the commands that have no machine-readable stream at all —
+// schedule trigger and schedule run, whose output is prose lifecycle lines,
+// and which therefore have no stream for an outcome object to terminate.
+// They still route their failures through failEnv so the classification of
+// every exit lives in one place. mcp serve is the other exemption, for the
+// opposite reason: its stdout carries the MCP protocol, so it refuses
+// --format jsonl outright rather than write an outcome into a protocol
+// stream.
+const noJSONL = false
+
+// writeErrorOutcome terminates the jsonl stream with that object. A no-op in
+// prose mode, where the prose on stderr is the whole report.
+func writeErrorOutcome(jsonl bool, stdout, stderr io.Writer, msg string) {
+	if !jsonl {
+		return
+	}
+	if err := writeResult(stdout, errorOutcome{Outcome: "error", Error: diagnostics.Bound(msg, 512)}); err != nil {
+		fmt.Fprintln(stderr, "tenon:", err)
+	}
+}
+
+// failEnv is the single environment-failure exit: the prose goes to stderr
+// exactly as it always has, the jsonl stream ends with the error outcome,
+// and the process exits 1. Every non-usage, non-gate failure path returns
+// through it so no jsonl stream can end in silence.
+func failEnv(jsonl bool, stdout, stderr io.Writer, cmd string, v any) int {
+	return failEnvf(jsonl, stdout, stderr, cmd, "%v", v)
+}
+
+// failEnvf is failEnv for a formatted message.
+func failEnvf(jsonl bool, stdout, stderr io.Writer, cmd, format string, args ...any) int {
+	msg := fmt.Sprintf(format, args...)
+	fmt.Fprintf(stderr, "tenon %s: %s\n", cmd, msg)
+	writeErrorOutcome(jsonl, stdout, stderr, msg)
+	return 1
 }
 
 // applyResult is the jsonl-mode result summary for a successful apply. Field
 // names follow apply.Record's existing json tags (snake_case). ManagedTools
 // names only the tools exposed through tenon's managed MCP boundary — native
 // harness tools are never included and always remain unmanaged, regardless
-// of this list's contents.
+// of this list's contents. Outcome is first, matching checkResult/
+// driftResult/clean's own result shapes.
 type applyResult struct {
+	Outcome      string   `json:"outcome"`
 	Agent        string   `json:"agent"`
 	Harness      string   `json:"harness"`
 	Workspace    string   `json:"workspace"`
@@ -262,81 +347,6 @@ func resolveExecutable() (string, error) {
 	return resolved, nil
 }
 
-func runValidate(args []string, stdout, stderr io.Writer) int {
-	agent, _, driver, jsonl, manifestPath, _, ok := commonFlags("validate", args, stderr, false, false)
-	if !ok {
-		return 2
-	}
-	supplied, err := readSuppliedManifest(manifestPath)
-	if err != nil {
-		fmt.Fprintln(stderr, "tenon validate:", err)
-		return 1
-	}
-	p, diags, err := agentproject.LoadWithManifest(agent, expectedFingerprint(supplied))
-	if err != nil {
-		fmt.Fprintln(stderr, "tenon validate:", err)
-		return 1
-	}
-	// When a manifest is supplied, validate reports the same closure drift apply
-	// would, before any generation, so validate and apply fail identically.
-	if p != nil && !diags.HasErrors() && supplied != nil {
-		if err := verifyManifestDiag(p, driver.Harness(), resolveIntegrationStoreBase(), supplied, diags); err != nil {
-			fmt.Fprintln(stderr, "tenon validate:", err)
-			return 1
-		}
-	}
-	if p != nil && !diags.HasErrors() {
-		// Validate resolves exactly what apply would — the same executable
-		// and apply's default workspace — so generation and its warnings are
-		// identical; the files themselves are discarded.
-		executable, err := resolveExecutable()
-		if err != nil {
-			fmt.Fprintln(stderr, "tenon validate:", err)
-			return 1
-		}
-		workspace, err := filepath.Abs(agent)
-		if err != nil {
-			fmt.Fprintln(stderr, "tenon validate:", err)
-			return 1
-		}
-		// Tool preparation is the same work apply does, in the same order,
-		// against a throwaway cache that is deleted afterwards: validate
-		// reports apply's tool failures while writing nothing to the
-		// workspace.
-		cache := ""
-		if len(p.Tools) > 0 {
-			cache, err = os.MkdirTemp("", "tenon-tools-")
-			if err != nil {
-				fmt.Fprintln(stderr, "tenon validate:", err)
-				return 1
-			}
-			defer os.RemoveAll(cache)
-		}
-		if prepareTools(p, workspace, cache, diags) {
-			_ = driver.Generate(p, apply.Target{
-				Workspace:        workspace,
-				Executable:       executable,
-				IntegrationStore: resolveIntegrationStoreBase(),
-				TenonVersion:     version.Version,
-				Model:            manifestModel(supplied, driver.Harness()),
-			}, diags)
-		}
-	}
-	render(diags, jsonl, stdout, stderr)
-	if p == nil || diags.HasErrors() {
-		return 1
-	}
-	if jsonl {
-		if err := writeResult(stdout, validateResult{Agent: p.Name, Fingerprint: p.Fingerprint}); err != nil {
-			fmt.Fprintln(stderr, "tenon validate:", err)
-			return 1
-		}
-	} else {
-		fmt.Fprintf(stdout, "valid: agent %s (fingerprint %s)\n", p.Name, p.Fingerprint)
-	}
-	return 0
-}
-
 func runApply(args []string, stdout, stderr io.Writer) int {
 	agent, workspace, driver, jsonl, manifestPath, discardLocal, ok := commonFlags("apply", args, stderr, true, true)
 	if !ok {
@@ -344,16 +354,15 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 	}
 	supplied, err := readSuppliedManifest(manifestPath)
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon apply:", err)
-		return 1
+		return failEnv(jsonl, stdout, stderr, "apply", err)
 	}
 	p, diags, err := agentproject.LoadWithManifest(agent, expectedFingerprint(supplied))
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon apply:", err)
-		return 1
+		return failEnv(jsonl, stdout, stderr, "apply", err)
 	}
 	if p == nil || diags.HasErrors() {
 		render(diags, jsonl, stdout, stderr)
+		writeGateFailed(jsonl, stdout, stderr, "apply", sourceDigest(agent, p))
 		return 1
 	}
 	storeBase := resolveIntegrationStoreBase()
@@ -361,25 +370,25 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 	// tools are prepared and before generation — so drift writes nothing: no
 	// .tenon, no generated files.
 	if supplied != nil {
-		if err := verifyManifestDiag(p, driver.Harness(), storeBase, supplied, diags); err != nil {
-			fmt.Fprintln(stderr, "tenon apply:", err)
-			return 1
+		if _, err := verifyManifestDiag(p, driver.Harness(), storeBase, supplied, diags); err != nil {
+			return failEnv(jsonl, stdout, stderr, "apply", err)
 		}
 		if diags.HasErrors() {
 			render(diags, jsonl, stdout, stderr)
+			writeGateFailed(jsonl, stdout, stderr, "apply", sourceDigest(agent, p))
 			return 1
 		}
 	}
 	executable, err := resolveExecutable()
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon apply:", err)
-		return 1
+		return failEnv(jsonl, stdout, stderr, "apply", err)
 	}
 	// Tools are prepared and inspected once, before anything in the
 	// workspace is mutated: a project whose tools cannot be built is not
 	// half-applied.
 	if !prepareTools(p, workspace, "", diags) {
 		render(diags, jsonl, stdout, stderr)
+		writeGateFailed(jsonl, stdout, stderr, "apply", sourceDigest(agent, p))
 		return 1
 	}
 
@@ -397,14 +406,15 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 	}
 	render(diags, jsonl, stdout, stderr)
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon apply:", err)
-		return 1
+		return failEnv(jsonl, stdout, stderr, "apply", err)
 	}
 	if result == nil || diags.HasErrors() {
+		writeGateFailed(jsonl, stdout, stderr, "apply", sourceDigest(agent, p))
 		return 1
 	}
 	if jsonl {
 		res := applyResult{
+			Outcome:      "ok",
 			Agent:        p.Name,
 			Harness:      driver.Harness(),
 			Workspace:    workspace,
@@ -414,8 +424,7 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 			ManagedTools: managedTools(p),
 		}
 		if err := writeResult(stdout, res); err != nil {
-			fmt.Fprintln(stderr, "tenon apply:", err)
-			return 1
+			return failEnv(jsonl, stdout, stderr, "apply", err)
 		}
 		return 0
 	}
@@ -430,91 +439,6 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "managed tools: %s via MCP; native harness tools remain unmanaged\n",
 		strings.Join(managedTools(p), ", "))
 	fmt.Fprintf(stdout, "start %s normally in %s\n", driver.Harness(), workspace)
-	return 0
-}
-
-// fingerprintRollupJSON is the jsonl rendering of the final rolled-up
-// fingerprint line.
-type fingerprintRollupJSON struct {
-	Fingerprint string `json:"fingerprint"`
-}
-
-// runFingerprintShow prints every authored file that feeds AGENT's
-// fingerprint — its path, its own content hash, and its executable bit —
-// sorted the same way the rollup sorts them, then the rolled-up fingerprint
-// itself. It never recomputes a hash: agentproject.Load already built the
-// per-file list, and this only renders what Load returned. Tool preparation
-// runs first, exactly as validate and apply require it, so a project whose
-// tools cannot be built never reports a fingerprint as though it were clean.
-func runFingerprintShow(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("fingerprint show", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	diagMode := fs.String("diagnostics", "prose", "diagnostic rendering: prose or jsonl")
-	positional, ok := parsePositional(fs, args)
-	if !ok || len(positional) != 1 {
-		fmt.Fprintf(stderr, "tenon fingerprint show: usage: tenon fingerprint show AGENT [--diagnostics <prose|jsonl>]\n")
-		return 2
-	}
-	agent := positional[0]
-	jsonl := false
-	switch *diagMode {
-	case "prose":
-	case "jsonl":
-		jsonl = true
-	default:
-		fmt.Fprintf(stderr, "tenon fingerprint show: --diagnostics must be prose or jsonl\n")
-		return 2
-	}
-
-	p, diags, err := agentproject.Load(agent)
-	if err != nil {
-		fmt.Fprintln(stderr, "tenon fingerprint show:", err)
-		return 1
-	}
-	if p != nil && !diags.HasErrors() {
-		workspace, err := filepath.Abs(agent)
-		if err != nil {
-			fmt.Fprintln(stderr, "tenon fingerprint show:", err)
-			return 1
-		}
-		cache := ""
-		if len(p.Tools) > 0 {
-			cache, err = os.MkdirTemp("", "tenon-tools-")
-			if err != nil {
-				fmt.Fprintln(stderr, "tenon fingerprint show:", err)
-				return 1
-			}
-			defer os.RemoveAll(cache)
-		}
-		prepareTools(p, workspace, cache, diags)
-	}
-	render(diags, jsonl, stdout, stderr)
-	if p == nil || diags.HasErrors() {
-		return 1
-	}
-
-	if jsonl {
-		for _, e := range p.FingerprintEntries {
-			if err := writeResult(stdout, e); err != nil {
-				fmt.Fprintln(stderr, "tenon fingerprint show:", err)
-				return 1
-			}
-		}
-		if err := writeResult(stdout, fingerprintRollupJSON{Fingerprint: p.Fingerprint}); err != nil {
-			fmt.Fprintln(stderr, "tenon fingerprint show:", err)
-			return 1
-		}
-		return 0
-	}
-
-	for _, e := range p.FingerprintEntries {
-		bit := "-"
-		if e.Executable {
-			bit = "x"
-		}
-		fmt.Fprintf(stdout, "%s %s %s\n", e.Path, e.Hash, bit)
-	}
-	fmt.Fprintf(stdout, "fingerprint: %s\n", p.Fingerprint)
 	return 0
 }
 
@@ -533,7 +457,7 @@ func managedTools(p *agentproject.Project) []string {
 
 // toolConfig describes the project's tool runtime. cacheRoot is empty for the
 // workspace cache apply writes and serving reads, and a throwaway directory
-// for validate.
+// for check.
 func toolConfig(p *agentproject.Project, workspace, cacheRoot string) (toolruntime.Config, error) {
 	ws, err := filepath.Abs(workspace)
 	if err != nil {
@@ -589,7 +513,7 @@ func closureCacheRoot(workspace, harnessName string) (string, error) {
 
 // prepareTools prepares and inspects the project's authored tools, reporting
 // every failure as a diagnostic. A project without tools prepares nothing, so
-// apply and validate behave exactly as before for it.
+// apply and check behave exactly as before for it.
 func prepareTools(p *agentproject.Project, workspace, cacheRoot string, diags *diagnostics.List) bool {
 	if len(p.Tools) == 0 {
 		return true
@@ -636,8 +560,17 @@ func (c toolCaller) Call(name string, arguments json.RawMessage) (json.RawMessag
 // generated setup this agent source applied: a harness starting a stale
 // managed server would otherwise serve an agent nobody applied.
 func runMCPServe(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	agent, workspace, driver, _, manifestPath, _, ok := commonFlags("mcp serve", args, stderr, true, false)
+	agent, workspace, driver, jsonl, manifestPath, _, ok := commonFlags("mcp serve", args, stderr, true, false)
 	if !ok {
+		return 2
+	}
+	// mcp serve is the one command with no outcome to promise: its stdout is
+	// the MCP protocol stream, and an outcome object written there would
+	// corrupt the protocol its consumer is parsing. Accepting the flag and
+	// silently ignoring it would promise a terminator that never comes, so
+	// the flag is refused as the usage error it is.
+	if jsonl {
+		fmt.Fprintln(stderr, "tenon mcp serve: --format jsonl is not available for mcp serve: stdout carries the MCP protocol")
 		return 2
 	}
 	supplied, err := readSuppliedManifest(manifestPath)
@@ -737,13 +670,13 @@ func newHarnessDriver(name string) (harness.Driver, error) {
 func runRun(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	harnessName := fs.String("harness", "", "target harness: claude or codex")
+	harness := fs.String("harness", "", "target harness: claude or codex")
 	workspace := fs.String("workspace", "", "workspace directory (required)")
 	conversation := fs.String("conversation", "", "conversation id (defaults to local)")
 	input := fs.String("input", "jsonl", "input format: jsonl")
 	timeout := fs.Duration("timeout", 2*time.Minute, "whole-process deadline")
 	turnTimeout := fs.Duration("turn-timeout", 0, "per-turn deadline (task mode; 0 disables)")
-	manifestPath := fs.String("manifest", "", "optional supplied agent manifest to verify")
+	manifestPath := fs.String("pins", "", "supplied pin set to verify against the current runtime closure; fails closed naming the first drifted pin")
 
 	positional, ok := parsePositional(fs, args)
 	if !ok || len(positional) != 1 {
@@ -752,10 +685,11 @@ func runRun(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	agent := positional[0]
 
-	switch *harnessName {
+	harnessName, harnessFromEnv := resolveHarness(*harness)
+	switch harnessName {
 	case "claude", "codex":
 	default:
-		fmt.Fprintln(stderr, "tenon run: --harness must be exactly claude or codex")
+		fmt.Fprint(stderr, harnessFlagError("run", harnessName, harnessFromEnv))
 		return 2
 	}
 	if *workspace == "" {
@@ -775,51 +709,97 @@ func runRun(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	driver, err := newHarnessDriver(*harnessName)
+	// run has no --format flag: its stdout IS the jsonl wire event stream,
+	// so every terminator below is written unconditionally. Unlike every
+	// other command's bare final object, run's terminator is itself an
+	// event — type run.completed, the next sequence number, the same
+	// envelope every line before it carries — because a stream whose last
+	// line broke its own event shape is a stream a consumer must special-case
+	// to decode at all. What distinguishes it is the outcome field, which no
+	// other event carries.
+	envelope := dispatch.Completion{
+		Sequence:     1,
+		Harness:      harnessName,
+		Conversation: *conversation,
+	}
+	if envelope.Conversation == "" {
+		envelope.Conversation = "local"
+	}
+
+	driver, err := newHarnessDriver(harnessName)
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon run:", err)
-		return 1
+		return failRun(stdout, stderr, envelope, err)
 	}
 
 	supplied, err := readSuppliedManifest(*manifestPath)
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon run:", err)
-		return 1
+		return failRun(stdout, stderr, envelope, err)
 	}
+	envelope.Manifest = manifestIdentity(supplied)
 	// Load the project and dispatch under the whole-process deadline.
 	p, diags, err := agentproject.LoadWithManifest(agent, expectedFingerprint(supplied))
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon run:", err)
-		return 1
+		return failRun(stdout, stderr, envelope, err)
 	}
 	if p == nil || diags.HasErrors() {
+		// The source itself is invalid — the same gate check and apply run —
+		// so the stream ends gate_failed, not error: this is a finding about
+		// the source, and the digest names the bytes it was found in. The
+		// event carries no fingerprint: the gate minted none, and an empty
+		// field is the honest report of that.
 		_ = diags.WriteProse(stderr)
 		fmt.Fprintln(stderr, "tenon run: the agent project is invalid; run tenon apply")
-		return 1
+		envelope.Outcome = "gate_failed"
+		envelope.SourceDigest = sourceDigest(agent, p)
+		return writeRunCompleted(stdout, stderr, envelope)
 	}
+	envelope.Fingerprint = p.Fingerprint
 	// A supplied manifest gates the process open: on drift, open nothing.
-	if err := checkManifest(p, *harnessName, resolveIntegrationStoreBase(), supplied); err != nil {
-		fmt.Fprintln(stderr, "tenon run:", err)
-		return 1
+	if err := checkManifest(p, harnessName, resolveIntegrationStoreBase(), supplied); err != nil {
+		return failRun(stdout, stderr, envelope, err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
-	if err := dispatch.Run(ctx, dispatch.Options{
+	// A clean dispatch writes its own terminator through the dispatcher's
+	// emitter, which owns the sequence; only the failure paths terminate the
+	// stream here, continuing the numbering the summary reports.
+	summary, err := dispatch.Run(ctx, dispatch.Options{
 		Project:      p,
 		Driver:       driver,
 		Workspace:    *workspace,
-		Harness:      *harnessName,
+		Harness:      harnessName,
 		Conversation: *conversation,
 		Mode:         dispatch.Interactive,
 		In:           stdin,
 		Out:          stdout,
 		TurnTimeout:  *turnTimeout,
 		Manifest:     manifestIdentity(supplied),
-	}); err != nil {
-		fmt.Fprintln(stderr, "tenon run:", err)
-		return 1
+	})
+	envelope.Sequence = summary.Sequence + 1
+	envelope.Turns = summary.Turns
+	if err != nil {
+		return failRun(stdout, stderr, envelope, err)
 	}
 	return 0
+}
+
+// failRun is run's environment-failure exit: the prose goes to stderr exactly
+// as failEnv writes it for every other command, and the stream ends with the
+// run.completed event carrying the error outcome and the same bounded text.
+func failRun(stdout, stderr io.Writer, envelope dispatch.Completion, cause error) int {
+	fmt.Fprintf(stderr, "tenon run: %v\n", cause)
+	envelope.Outcome = "error"
+	envelope.Error = diagnostics.Bound(fmt.Sprintf("%v", cause), 512)
+	return writeRunCompleted(stdout, stderr, envelope)
+}
+
+// writeRunCompleted writes run's terminator and exits 1: every caller is a
+// failure path, a clean dispatch having written its own.
+func writeRunCompleted(stdout, stderr io.Writer, envelope dispatch.Completion) int {
+	if err := dispatch.WriteCompleted(stdout, envelope); err != nil {
+		fmt.Fprintln(stderr, "tenon run:", err)
+	}
+	return 1
 }
 
 // runSchedule dispatches the "tenon schedule" subcommands (ADR 0008, ADR 0011).
@@ -864,12 +844,12 @@ func loadScheduleProject(agent, cmdName, expectedFingerprint string, stderr io.W
 func runScheduleTrigger(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("schedule trigger", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	harnessName := fs.String("harness", "", "target harness: claude or codex")
+	harness := fs.String("harness", "", "target harness: claude or codex")
 	workspace := fs.String("workspace", "", "workspace directory (required)")
 	inputID := fs.String("input-id", "", "caller-owned stable occurrence id (required)")
 	turnTimeout := fs.Duration("turn-timeout", 90*time.Second, "per-turn deadline (0 disables)")
 	timeout := fs.Duration("timeout", 2*time.Minute, "whole-process deadline")
-	manifestPath := fs.String("manifest", "", "optional supplied agent manifest to verify")
+	manifestPath := fs.String("pins", "", "supplied pin set to verify against the current runtime closure; fails closed naming the first drifted pin")
 
 	positional, ok := parsePositional(fs, args)
 	if !ok || len(positional) != 2 {
@@ -878,10 +858,11 @@ func runScheduleTrigger(args []string, stdout, stderr io.Writer) int {
 	}
 	agent, name := positional[0], positional[1]
 
-	switch *harnessName {
+	harnessName, harnessFromEnv := resolveHarness(*harness)
+	switch harnessName {
 	case "claude", "codex":
 	default:
-		fmt.Fprintln(stderr, "tenon schedule trigger: --harness must be exactly claude or codex")
+		fmt.Fprint(stderr, harnessFlagError("schedule trigger", harnessName, harnessFromEnv))
 		return 2
 	}
 	if *workspace == "" {
@@ -903,8 +884,7 @@ func runScheduleTrigger(args []string, stdout, stderr io.Writer) int {
 
 	supplied, err := readSuppliedManifest(*manifestPath)
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon schedule trigger:", err)
-		return 1
+		return failEnv(noJSONL, stdout, stderr, "schedule trigger", err)
 	}
 	p, ok := loadScheduleProject(agent, "schedule trigger", expectedFingerprint(supplied), stderr)
 	if !ok {
@@ -918,29 +898,25 @@ func runScheduleTrigger(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	if target == nil {
-		fmt.Fprintf(stderr, "tenon schedule trigger: no schedule named %q in this agent\n", name)
-		return 1
+		return failEnvf(noJSONL, stdout, stderr, "schedule trigger", "no schedule named %q in this agent", name)
 	}
 
-	driver, err := newHarnessDriver(*harnessName)
+	driver, err := newHarnessDriver(harnessName)
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon schedule trigger:", err)
-		return 1
+		return failEnv(noJSONL, stdout, stderr, "schedule trigger", err)
 	}
 	// Triggering requires the workspace to carry the applied setup: fail closed
 	// on stale or missing generated setup rather than dispatch against drift.
-	if err := apply.Verify(p, *workspace, *harnessName); err != nil {
-		fmt.Fprintln(stderr, "tenon schedule trigger:", err)
-		return 1
+	if err := apply.Verify(p, *workspace, harnessName); err != nil {
+		return failEnv(noJSONL, stdout, stderr, "schedule trigger", err)
 	}
 	// Take the same exclusive lock the clock uses so a trigger never races a
 	// running clock or a concurrent trigger for the same setup — both would
 	// rewrite the single dispatch file under last-writer-wins. Fail closed if
 	// held; the caller can retry.
-	release, err := schedule.Lock(*workspace, p.Name, *harnessName)
+	release, err := schedule.Lock(*workspace, p.Name, harnessName)
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon schedule trigger:", err)
-		return 1
+		return failEnv(noJSONL, stdout, stderr, "schedule trigger", err)
 	}
 	defer release()
 
@@ -948,28 +924,25 @@ func runScheduleTrigger(args []string, stdout, stderr io.Writer) int {
 	defer cancel()
 	// A supplied manifest gates this process open before any harness
 	// invocation, matching run and mcp serve: on drift, open nothing.
-	if err := checkManifest(p, *harnessName, resolveIntegrationStoreBase(), supplied); err != nil {
-		fmt.Fprintln(stderr, "tenon schedule trigger:", err)
-		return 1
+	if err := checkManifest(p, harnessName, resolveIntegrationStoreBase(), supplied); err != nil {
+		return failEnv(noJSONL, stdout, stderr, "schedule trigger", err)
 	}
 	if err := driver.Verify(ctx); err != nil {
-		fmt.Fprintf(stderr, "tenon schedule trigger: the %s harness could not be verified: %v\n", *harnessName, err)
-		return 1
+		return failEnvf(noJSONL, stdout, stderr, "schedule trigger", "the %s harness could not be verified: %v", harnessName, err)
 	}
 
 	outcome, err := dispatch.RunTask(ctx, dispatch.Options{
 		Project:      p,
 		Driver:       driver,
 		Workspace:    *workspace,
-		Harness:      *harnessName,
+		Harness:      harnessName,
 		Conversation: schedule.ConversationID(name),
 		Mode:         dispatch.Task,
 		TurnTimeout:  *turnTimeout,
 		Manifest:     manifestIdentity(supplied),
 	}, *inputID, target.Prompt)
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon schedule trigger:", err)
-		return 1
+		return failEnv(noJSONL, stdout, stderr, "schedule trigger", err)
 	}
 
 	line := fmt.Sprintf("schedule=%q input_id=%q status=%s duplicate=%t",
@@ -995,11 +968,11 @@ func runScheduleTrigger(args []string, stdout, stderr io.Writer) int {
 func runScheduleRun(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("schedule run", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	harnessName := fs.String("harness", "", "target harness: claude or codex")
+	harness := fs.String("harness", "", "target harness: claude or codex")
 	workspace := fs.String("workspace", "", "workspace directory (required)")
 	turnTimeout := fs.Duration("turn-timeout", 90*time.Second, "per-turn deadline (0 disables)")
 	maxActive := fs.Int("max-active-turns", schedule.DefaultMaxActive, "concurrent occurrences across distinct schedules")
-	manifestPath := fs.String("manifest", "", "optional supplied agent manifest to verify")
+	manifestPath := fs.String("pins", "", "supplied pin set to verify against the current runtime closure; fails closed naming the first drifted pin")
 
 	positional, ok := parsePositional(fs, args)
 	if !ok || len(positional) != 1 {
@@ -1008,10 +981,11 @@ func runScheduleRun(args []string, stdout, stderr io.Writer) int {
 	}
 	agent := positional[0]
 
-	switch *harnessName {
+	harnessName, harnessFromEnv := resolveHarness(*harness)
+	switch harnessName {
 	case "claude", "codex":
 	default:
-		fmt.Fprintln(stderr, "tenon schedule run: --harness must be exactly claude or codex")
+		fmt.Fprint(stderr, harnessFlagError("schedule run", harnessName, harnessFromEnv))
 		return 2
 	}
 	if *workspace == "" {
@@ -1032,17 +1006,15 @@ func runScheduleRun(args []string, stdout, stderr io.Writer) int {
 
 	supplied, err := readSuppliedManifest(*manifestPath)
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon schedule run:", err)
-		return 1
+		return failEnv(noJSONL, stdout, stderr, "schedule run", err)
 	}
 	p, ok := loadScheduleProject(agent, "schedule run", expectedFingerprint(supplied), stderr)
 	if !ok {
 		return 1
 	}
-	driver, err := newHarnessDriver(*harnessName)
+	driver, err := newHarnessDriver(harnessName)
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon schedule run:", err)
-		return 1
+		return failEnv(noJSONL, stdout, stderr, "schedule run", err)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -1053,7 +1025,7 @@ func runScheduleRun(args []string, stdout, stderr io.Writer) int {
 		Project:     p,
 		Driver:      driver,
 		Workspace:   *workspace,
-		Harness:     *harnessName,
+		Harness:     harnessName,
 		TurnTimeout: *turnTimeout,
 		MaxActive:   *maxActive,
 		Out:         stdout,
@@ -1063,12 +1035,11 @@ func runScheduleRun(args []string, stdout, stderr io.Writer) int {
 	// process; drift fails the occurrence closed and ends admission.
 	if supplied != nil {
 		opts.VerifyOccurrence = func() error {
-			return checkManifest(p, *harnessName, storeBase, supplied)
+			return checkManifest(p, harnessName, storeBase, supplied)
 		}
 	}
 	if err := schedule.Run(ctx, opts); err != nil {
-		fmt.Fprintln(stderr, "tenon schedule run:", err)
-		return 1
+		return failEnv(noJSONL, stdout, stderr, "schedule run", err)
 	}
 	return 0
 }
@@ -1174,7 +1145,7 @@ func parsePositional(fs *flag.FlagSet, args []string) ([]string, bool) {
 
 // proveAgentRoot resolves agent to an absolute path and proves it an agent
 // project by either proof the specification's Instructions section names: a
-// present real regular instructions.md, or a supplied agent manifest whose
+// present real regular instructions.md, or a supplied pin set whose
 // expected source fingerprint matches the directory. expectedFingerprint
 // carries that supplied fingerprint (empty when none), exactly as
 // agentproject.LoadWithManifest takes it; the fingerprint proof necessarily
@@ -1197,7 +1168,7 @@ func proveAgentRoot(agent, cmdName, expectedFingerprint string, stderr io.Writer
 		return root, true
 	}
 	if expectedFingerprint == "" {
-		fmt.Fprintf(stderr, "tenon %s: %s is not a proven agent project; instructions.md must be present as a real regular file, or --manifest must supply a manifest whose expected source fingerprint matches the directory\n", cmdName, agent)
+		fmt.Fprintf(stderr, "tenon %s: %s is not a proven agent project; instructions.md must be present as a real regular file, or --pins must supply a pin set whose expected source fingerprint matches the directory\n", cmdName, agent)
 		return "", false
 	}
 	p, diags, err := agentproject.LoadWithManifest(agent, expectedFingerprint)
@@ -1268,7 +1239,7 @@ func runMCPAdd(args []string, stdout, stderr io.Writer) int {
 	contextFlag := fs.String("context", "", "optional model-facing usage context")
 	packageFlag := fs.String("package", "", "installed package identifier (not supported yet)")
 	capabilityFlag := fs.String("capability", "", "installed capability identifier (not supported yet)")
-	manifestPath := fs.String("manifest", "", "optional supplied agent manifest proving an instructions-free root")
+	manifestPath := fs.String("pins", "", "supplied pin set to verify against the current runtime closure; fails closed naming the first drifted pin")
 
 	positional, ok := parsePositional(fs, args)
 	if !ok || len(positional) != 2 {
@@ -1298,7 +1269,7 @@ func runMCPAdd(args []string, stdout, stderr io.Writer) int {
 	}
 
 	// Load proves the root — by instructions.md or by the supplied manifest's
-	// matching fingerprint, exactly as validate and apply do — and supplies the
+	// matching fingerprint, exactly as check and apply do — and supplies the
 	// exact offline collision space (existing connections and accepted plugin
 	// MCP servers) add must check. Its proven root is the one add writes into,
 	// so add needs no separate root proof.
@@ -1493,10 +1464,10 @@ func printRequiredEnv(stdout io.Writer, names []string) {
 func runMCPStatus(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("mcp status", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	manifestPath := fs.String("manifest", "", "optional supplied agent manifest proving an instructions-free root")
+	manifestPath := fs.String("pins", "", "supplied pin set to verify against the current runtime closure; fails closed naming the first drifted pin")
 	positional, ok := parsePositional(fs, args)
 	if !ok || len(positional) < 1 || len(positional) > 2 {
-		fmt.Fprintf(stderr, "tenon mcp status: usage: tenon mcp status AGENT [NAME] [--manifest PATH]\n")
+		fmt.Fprintf(stderr, "tenon mcp status: usage: tenon mcp status AGENT [NAME] [--pins FILE]\n")
 		return 2
 	}
 	agent := positional[0]
@@ -1650,10 +1621,10 @@ func installedConnectionHealth(store *integration.Store, c agentproject.Connecti
 func runMCPRemove(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("mcp remove", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	manifestPath := fs.String("manifest", "", "optional supplied agent manifest proving an instructions-free root")
+	manifestPath := fs.String("pins", "", "supplied pin set to verify against the current runtime closure; fails closed naming the first drifted pin")
 	positional, ok := parsePositional(fs, args)
 	if !ok || len(positional) != 2 {
-		fmt.Fprintf(stderr, "tenon mcp remove: usage: tenon mcp remove AGENT NAME [--manifest PATH]\n")
+		fmt.Fprintf(stderr, "tenon mcp remove: usage: tenon mcp remove AGENT NAME [--pins FILE]\n")
 		return 2
 	}
 	agent, name := positional[0], positional[1]

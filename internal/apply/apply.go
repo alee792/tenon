@@ -214,12 +214,34 @@ func ApplyWithTarget(p *agentproject.Project, target Target, driver Driver) (*Re
 	generated := map[string]bool{}
 	for _, f := range files {
 		generated[f.Path] = true
+		// A generated path is workspace-relative by construction, but the
+		// workspace it lands in is not: a parent directory can be replaced
+		// with a symlink out of the workspace between one apply and the
+		// next, and writeAtomic would follow it and rewrite a file tenon
+		// does not own. Containment is proven for every write exactly as it
+		// is for every removal, and it refuses the whole apply — a partial
+		// tree is not what apply promises.
+		if issue := CheckContainment(ws, f.Path); issue != ContainmentOK {
+			diags.Errorf("apply.workspace.unsafe-path", f.Path,
+				"the workspace path tenon would write is not reachable through real directories inside the workspace (%s); tenon only ever writes inside the workspace, reached through real directories", issue)
+			continue
+		}
 		checkOwnership(ws, f.Path, previous, target.DiscardLocal, diags)
 	}
 	var stale []string
 	if previous != nil {
 		for path := range previous.Files {
 			if generated[path] {
+				continue
+			}
+			// The record is durable state on disk, so a path it names is an
+			// input like any other: one that escapes the workspace or whose
+			// parent chain crosses a symlink is refused here, before the
+			// removal pass, so a corrupted record can never make apply
+			// delete outside the workspace it was handed.
+			if issue := CheckContainment(ws, path); issue != ContainmentOK {
+				diags.Errorf("apply.record.unsafe-path", path,
+					"the apply record names a path tenon refuses to act on (%s); tenon only ever removes files inside the workspace, reached through real directories", issue)
 				continue
 			}
 			stale = append(stale, path)
@@ -248,6 +270,13 @@ func ApplyWithTarget(p *agentproject.Project, target Target, driver Driver) (*Re
 	for _, f := range files {
 		desired := OwnedFile{Hash: hashBytes(f.Content), Executable: f.Executable}
 		record.Files[f.Path] = desired
+		// Re-checked immediately before the write itself, for the same
+		// reason the removal pass re-checks: the plan pass above proved
+		// containment, and this holds the guarantee against anything that
+		// changed the workspace since.
+		if issue := CheckContainment(ws, f.Path); issue != ContainmentOK {
+			return nil, diags, fmt.Errorf("refusing to write %s: %s", f.Path, issue)
+		}
 		full := filepath.Join(ws, f.Path)
 		current, err := os.ReadFile(full)
 		if err == nil && hashBytes(current) == desired.Hash {
@@ -266,11 +295,18 @@ func ApplyWithTarget(p *agentproject.Project, target Target, driver Driver) (*Re
 		result.Written = append(result.Written, f.Path)
 	}
 	for _, path := range stale {
+		// Re-checked immediately before the removal itself: the plan pass
+		// above refuses an unsafe recorded path, and this is the guard that
+		// holds even if a future edit ever reaches this loop by another
+		// route.
+		if issue := CheckContainment(ws, path); issue != ContainmentOK {
+			return nil, diags, fmt.Errorf("refusing to remove recorded %s: %s", path, issue)
+		}
 		if err := os.Remove(filepath.Join(ws, path)); err != nil && !os.IsNotExist(err) {
 			return nil, diags, fmt.Errorf("removing stale generated %s: %w", path, err)
 		}
 		result.Removed = append(result.Removed, path)
-		removeEmptyParents(ws, path)
+		PruneEmptyParents(ws, path)
 	}
 
 	recordBytes, err := json.MarshalIndent(record, "", "  ")
@@ -479,16 +515,47 @@ func isExecutable(mode os.FileMode) bool {
 	return mode.Perm()&0o111 != 0
 }
 
-// removeEmptyParents removes directories left empty by a stale removal,
-// walking the workspace-relative parent chain upward. os.Remove refuses a
-// non-empty directory, so the first failure is the stop condition; the
-// workspace root ("." relative) and .tenon are never candidates.
-func removeEmptyParents(ws, path string) {
-	for dir := filepath.Dir(path); dir != "." && dir != ".tenon" && dir != string(filepath.Separator); dir = filepath.Dir(dir) {
-		if os.Remove(filepath.Join(ws, dir)) != nil {
+// PruneEmptyParents removes the directories left empty by removing the
+// recorded file at path, walking the workspace-relative parent chain upward
+// from the file's own parent. os.Remove refuses a non-empty directory, so
+// the first failure is the stop condition.
+//
+// The walk is bounded by the workspace itself: every candidate is compared
+// against ws after cleaning both, and anything that is not strictly inside
+// ws — the workspace root included — stops the walk instead of being
+// removed. Bounding by comparison rather than by string-matching "." or
+// ".." is what keeps a corrupted record naming "../x" from walking out of
+// the workspace and removing its parent: filepath.Dir reaches ".." before
+// it ever reaches ".". .tenon is never a candidate either; it is removed
+// separately, once every record it holds is gone.
+func PruneEmptyParents(ws, path string) {
+	wsRoot, err := filepath.Abs(ws)
+	if err != nil {
+		return
+	}
+	wsRoot = filepath.Clean(wsRoot)
+	if !filepath.IsLocal(path) {
+		return
+	}
+	for dir := filepath.Dir(filepath.Clean(path)); dir != "." && dir != ".tenon"; dir = filepath.Dir(dir) {
+		candidate := filepath.Clean(filepath.Join(wsRoot, dir))
+		if !strictlyInside(wsRoot, candidate) {
+			return
+		}
+		if os.Remove(candidate) != nil {
 			return
 		}
 	}
+}
+
+// strictlyInside reports whether candidate lies below root — never root
+// itself, and never anywhere outside it.
+func strictlyInside(root, candidate string) bool {
+	rel, err := filepath.Rel(root, candidate)
+	if err != nil {
+		return false
+	}
+	return rel != "." && filepath.IsLocal(rel)
 }
 
 func readRecord(path string) (*Record, error) {
@@ -563,4 +630,69 @@ func writeAtomic(path string, content []byte, mode os.FileMode) error {
 		return err
 	}
 	return os.Rename(tmp.Name(), path)
+}
+
+// ContainmentIssue names the reason a recorded workspace-relative path
+// cannot be acted on safely. ContainmentOK is the empty value, so a caller
+// reads `if issue := CheckContainment(...); issue != ContainmentOK`.
+type ContainmentIssue string
+
+const (
+	// ContainmentOK: the path is workspace-relative and every parent
+	// directory that exists is a real directory inside the workspace.
+	ContainmentOK ContainmentIssue = ""
+	// ContainmentEscapes: the recorded path is not workspace-local — it is
+	// absolute, or it climbs out of the workspace with "..". Acting on it
+	// would touch a file the workspace does not contain.
+	ContainmentEscapes ContainmentIssue = "escapes-workspace"
+	// ContainmentSymlinkParent: some parent component of the path exists
+	// but is a symlink, or is not a directory. Removing or writing the leaf
+	// would traverse it, so the effective target may lie outside the
+	// workspace even though the recorded path looks local.
+	ContainmentSymlinkParent ContainmentIssue = "symlink-parent"
+	// ContainmentUnreadableParent: some parent component could not be
+	// stat'd for a reason other than not existing — a permission denial,
+	// most often. Containment cannot be proven, so it is refused; saying
+	// "symlink-parent" here would name a cause nothing observed.
+	ContainmentUnreadableParent ContainmentIssue = "unreadable-parent"
+)
+
+// CheckContainment reports whether the workspace-relative path is safe to
+// act on inside ws. A record is durable state on disk and can be corrupted,
+// hand-edited, or written by an older tenon, so nothing that removes or
+// replaces a recorded path may trust it verbatim: an absolute or "../" path
+// escapes the workspace outright, and a path whose parent chain crosses a
+// symlink resolves somewhere the workspace does not own even though every
+// component reads as local. Leaf-only Lstat (what ClassifyOwnership does) is
+// not enough for either case, so every caller that is about to mutate checks
+// this first.
+//
+// A parent that does not exist is not an issue: nothing can exist below it,
+// so there is nothing to act on.
+func CheckContainment(ws, path string) ContainmentIssue {
+	if !filepath.IsLocal(path) {
+		return ContainmentEscapes
+	}
+	dir := filepath.Dir(filepath.Clean(path))
+	if dir == "." {
+		return ContainmentOK
+	}
+	current := ws
+	for _, component := range strings.Split(dir, string(filepath.Separator)) {
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return ContainmentOK
+			}
+			// Failing closed is the right call, but the reason has to be
+			// honest: nothing here observed a symlink, only an unreadable
+			// component.
+			return ContainmentUnreadableParent
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return ContainmentSymlinkParent
+		}
+	}
+	return ContainmentOK
 }
