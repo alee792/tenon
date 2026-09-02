@@ -179,12 +179,29 @@ carries the same text, bounded, so a consumer reading only the stream still
 learns what went wrong. Usage errors keep emitting nothing (exit 2): a
 malformed invocation never ran, and an outcome object would report on a run
 that did not happen. `run` is included, its stdout being the wire event
-stream itself: it ends with `{"outcome":"ok"}` after a clean dispatch and
-with the error or `gate_failed` object otherwise, in each case an object
-carrying none of a wire event's envelope fields, which is how every other
-command's terminator is told apart from the lines before it. `schedule` has
-no machine-readable stream to terminate, so it emits no outcome object at
-all.
+stream itself — and there the terminator is an event rather than a bare
+object. A bare `{"outcome":"ok"}` on a stream where every other line carries
+`schema_version`, `sequence`, `type`, `harness`, `conversation`, and
+`fingerprint` forces a consumer to special-case its own stream's last line
+to decode it at all. So run ends with a `run.completed` event: the next
+sequence number, the full envelope, and the `outcome` field no other event
+carries, which is what distinguishes it. It also carries `turns` — the
+counts of the turns the dispatch ran by terminal status — because run's
+`ok` means only that **the dispatcher completed every turn it was given**,
+whatever those turns' own statuses. A run whose every turn failed is a run
+that finished; it ends `ok`, and a loop scores it from `turns`, not from the
+outcome. The failure paths are `run.completed` events too, `gate_failed`
+with the source digest and no fingerprint (the gate minted none, and an
+empty field says so honestly) or `error` with the bounded prose.
+
+Two commands are exempt, for opposite reasons. `schedule` has no
+`--format` and no machine-readable stream to terminate — its output is a
+prose lifecycle stream — so it emits no outcome object at all. `mcp serve`
+does have a stream, and that is the problem: its stdout is the MCP protocol,
+so an outcome object written there would corrupt what its consumer is
+parsing. It therefore refuses `--format jsonl` as a usage error rather than
+accept the flag and silently ignore it, which would promise a terminator
+that never comes.
 
 **A failed gate emits a `source_digest`.** Rejected candidates are data: a
 loop that discards a mutation still wants to name it, and until now the only

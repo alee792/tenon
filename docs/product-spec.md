@@ -462,7 +462,19 @@ the loop retries or escalates and never scores. An `error` object carries
 an `error` field with the same prose stderr carries, bounded, so a consumer
 reading only the stream still learns what went wrong. The one deliberate
 silence is a usage error: exit 2, no outcome object, because a malformed
-invocation never ran. The `outcome` field is
+invocation never ran. `run` is included in the contract, with the one
+difference its stdout demands: its stream is the wire event stream, so its
+terminator is itself an event — `run.completed`, carrying the next sequence
+number and the same envelope every line before it carries — distinguished
+from the lines before it by the `outcome` field no other event carries. Its
+`ok` means the dispatcher completed every turn it was given, whatever those
+turns' own statuses; the accompanying `turns` counts are what a loop scores.
+Two commands are exempt. `schedule` has no `--format` at all — its output is
+a prose lifecycle stream — so there is no machine-readable stream for an
+outcome object to terminate. `mcp serve` rejects `--format jsonl` as a usage
+error, because its stdout carries the MCP protocol and an outcome object
+written there would corrupt the very stream its consumer is parsing. The
+`outcome` field is
 the authoritative machine signal; the process exit code is its coarse
 projection.
 
@@ -704,6 +716,24 @@ to a resumable native session; ordered JSONL events are emitted. A repeated
 input ID deduplicates within its conversation. After restart, active work
 without a proven terminal result is uncertain and never silently retried.
 Dispatch state is one owner-only file per workspace.
+
+The stream always ends with one terminal `run.completed` event. It is an
+event like every other line — `schema_version`, the next `sequence`, `type`,
+`harness`, `conversation`, `fingerprint`, and `manifest` when one was
+supplied — and it alone carries `outcome`, plus `turns`, the counts of the
+turns this dispatch ran by their terminal status
+(`completed`, `failed`, `uncertain`, `process_failed`, `cancelled`). The
+outcome answers one question and only that one: `ok` means the dispatcher
+completed every turn it was given, whatever those turns' own statuses, so a
+run in which every turn failed still ends `ok` and is told apart from a clean
+one by `turns` — which is what a loop scores. The failure outcomes are
+`gate_failed`, when the source itself does not load, carrying the
+`source_digest` that names the bytes that failed and no fingerprint, since
+the gate minted none; and `error`, when the run could not start or could not
+finish for a reason that is not the source's fault, carrying the same
+bounded prose stderr carries. Both are `run.completed` events with the full
+envelope, so a consumer decodes every line the same way and reads the last
+one's outcome rather than inferring an ending from silence.
 
 Schedules execute two ways, both requiring current generated setup:
 

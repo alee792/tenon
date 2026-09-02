@@ -94,8 +94,23 @@ The first release, v0.1.0, ships the core described in
   still learns what went wrong. Usage errors remain the one deliberate
   exception: exit 2, and no outcome object at all, because a malformed
   invocation never ran. `tenon run`, whose stdout IS the wire event stream,
-  ends it the same way — `{"outcome":"ok"}` after a clean dispatch, and the
-  error or `gate_failed` object on failure. Check's success object keeps `agent` and `fingerprint` and
+  ends it with a terminal `run.completed` **event**: the next sequence
+  number and the same `schema_version`/`type`/`harness`/`conversation`/
+  `fingerprint` envelope every line before it carries, plus the `outcome`
+  field no other event carries and `turns`, the counts of the turns the
+  dispatch ran by terminal status (`completed`, `failed`, `uncertain`,
+  `process_failed`, `cancelled`). Run's `ok` means the dispatcher completed
+  every turn it was given, whatever those turns' own statuses — a run whose
+  every turn failed still ends `ok`, and a loop scores it from `turns` — and
+  its failure paths (`error`, `gate_failed`, the latter carrying the source
+  digest and no fingerprint) are `run.completed` events with the same
+  envelope. Previously run appended a bare `{"outcome":"ok"}` that broke its
+  own stream's event shape and reported `ok` even when every turn had
+  failed. Two commands are exempt from the outcome contract: `schedule`,
+  which has no `--format` and emits a prose lifecycle stream with no
+  machine-readable stream to terminate, and `mcp serve`, which now rejects
+  `--format jsonl` with a usage error — its stdout carries the MCP protocol,
+  and an outcome object written there would corrupt it. Check's success object keeps `agent` and `fingerprint` and
   adds `pins_written` when `--write-pins` wrote one; `outcome` is the only
   field every result object carries, and the rest vary by command. `stage`
   honors `--format` too, ending a jsonl run with its own result object

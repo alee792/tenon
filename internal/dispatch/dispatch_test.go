@@ -71,7 +71,7 @@ func options(p *agentproject.Project, ws string, in io.Reader, out io.Writer) Op
 // the decoded wire events.
 func runCollect(t *testing.T, opts Options) []event {
 	t.Helper()
-	if err := Run(context.Background(), opts); err != nil {
+	if _, err := Run(context.Background(), opts); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	return decodeEvents(t, opts.Out.(*bytes.Buffer).Bytes())
@@ -130,7 +130,7 @@ func TestFIFOAcrossInputs(t *testing.T) {
 		`{"input_id":"c","text":"3"}`,
 	), &out)
 	opts.Driver = fake
-	if err := Run(context.Background(), opts); err != nil {
+	if _, err := Run(context.Background(), opts); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if got := fake.Inputs(); !equal(got, []string{"a", "b", "c"}) {
@@ -176,7 +176,7 @@ func TestAcceptWhileTurnActive(t *testing.T) {
 
 	runErr := make(chan error, 1)
 	go func() {
-		err := Run(context.Background(), opts)
+		_, err := Run(context.Background(), opts)
 		pw.Close()
 		runErr <- err
 	}()
@@ -258,7 +258,7 @@ func TestInteractiveResumesSession(t *testing.T) {
 		`{"input_id":"b","text":"2"}`,
 	), &out)
 	opts.Driver = fake
-	if err := Run(context.Background(), opts); err != nil {
+	if _, err := Run(context.Background(), opts); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	opens := fake.Opens()
@@ -289,7 +289,7 @@ func TestTaskModeOpensFresh(t *testing.T) {
 	), &out)
 	opts.Driver = fake
 	opts.Mode = Task
-	if err := Run(context.Background(), opts); err != nil {
+	if _, err := Run(context.Background(), opts); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	for i, o := range fake.Opens() {
@@ -390,7 +390,7 @@ func TestOverLimitLineIsFatal(t *testing.T) {
 	huge := strings.Repeat("x", dispatchstate.MaxInputBytes+4096+100)
 	var out bytes.Buffer
 	opts := options(p, ws, strings.NewReader(huge+"\n"), &out)
-	err := Run(context.Background(), opts)
+	_, err := Run(context.Background(), opts)
 	if err == nil || !strings.Contains(err.Error(), "bounded JSONL line size") {
 		t.Fatalf("want bounded-line fatal error, got %v", err)
 	}
@@ -515,7 +515,7 @@ func TestVerifyGuardFailsClosed(t *testing.T) {
 	}
 	var out bytes.Buffer
 	opts := options(p, t.TempDir(), strings.NewReader(""), &out) // never applied
-	err = Run(context.Background(), opts)
+	_, err = Run(context.Background(), opts)
 	if err == nil || !strings.Contains(err.Error(), "tenon apply") {
 		t.Fatalf("want fail-closed apply guard, got %v", err)
 	}
@@ -592,7 +592,7 @@ func TestManifestIdentityOnEveryEvent(t *testing.T) {
 	opts := options(p, ws, lines(`{"input_id":"a","text":"1"}`), &out)
 	opts.Driver = fake
 	opts.Manifest = "sha256:deadbeef"
-	if err := Run(context.Background(), opts); err != nil {
+	if _, err := Run(context.Background(), opts); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	events := decodeEvents(t, out.Bytes())
@@ -614,7 +614,7 @@ func TestManifestIdentityOnEveryEvent(t *testing.T) {
 	var out2 bytes.Buffer
 	opts2 := options(p, ws, lines(`{"input_id":"b","text":"2"}`), &out2)
 	opts2.Driver = &harness.FakeDriver{Default: harness.FakeTurn{Result: harness.TurnResult{Status: harness.StatusCompleted}}}
-	if err := Run(context.Background(), opts2); err != nil {
+	if _, err := Run(context.Background(), opts2); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if strings.Contains(out2.String(), "manifest") {

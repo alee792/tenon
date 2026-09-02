@@ -100,7 +100,10 @@ The loop runs the same cycle a person runs, without hands:
 4. **Run and attribute.** Interactive, headless (`tenon run`), or
    scheduled — every dispatch event carries the fingerprint and, when a
    pin set is supplied, the pinned harness version, model, and package
-   identities.
+   identities. A headless run's stream ends with a terminal `run.completed`
+   event carrying the same envelope, the run's `outcome`, and `turns`: the
+   outcome says whether the dispatcher finished the work it was given, the
+   counts say how those turns went, and the loop scores the counts.
 5. **Verify and select — outside tenon.** The loop's evaluator scores the
    run and keeps or discards the revision, building its lineage from the
    units above. See

@@ -261,18 +261,14 @@ type errorOutcome struct {
 	Error   string `json:"error"`
 }
 
-// okOutcome is the bare final object for a stream whose success carries
-// nothing else to report — run's, whose product is the event stream that
-// precedes it rather than a summary of it.
-type okOutcome struct {
-	Outcome string `json:"outcome"`
-}
-
 // noJSONL names the commands that have no machine-readable stream at all —
 // schedule trigger and schedule run, whose output is prose lifecycle lines,
 // and which therefore have no stream for an outcome object to terminate.
 // They still route their failures through failEnv so the classification of
-// every exit lives in one place.
+// every exit lives in one place. mcp serve is the other exemption, for the
+// opposite reason: its stdout carries the MCP protocol, so it refuses
+// --format jsonl outright rather than write an outcome into a protocol
+// stream.
 const noJSONL = false
 
 // writeErrorOutcome terminates the jsonl stream with that object. A no-op in
@@ -564,8 +560,17 @@ func (c toolCaller) Call(name string, arguments json.RawMessage) (json.RawMessag
 // generated setup this agent source applied: a harness starting a stale
 // managed server would otherwise serve an agent nobody applied.
 func runMCPServe(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	agent, workspace, driver, _, manifestPath, _, ok := commonFlags("mcp serve", args, stderr, true, false)
+	agent, workspace, driver, jsonl, manifestPath, _, ok := commonFlags("mcp serve", args, stderr, true, false)
 	if !ok {
+		return 2
+	}
+	// mcp serve is the one command with no outcome to promise: its stdout is
+	// the MCP protocol stream, and an outcome object written there would
+	// corrupt the protocol its consumer is parsing. Accepting the flag and
+	// silently ignoring it would promise a terminator that never comes, so
+	// the flag is refused as the usage error it is.
+	if jsonl {
+		fmt.Fprintln(stderr, "tenon mcp serve: --format jsonl is not available for mcp serve: stdout carries the MCP protocol")
 		return 2
 	}
 	supplied, err := readSuppliedManifest(manifestPath)
@@ -705,43 +710,60 @@ func runRun(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	// run has no --format flag: its stdout IS the jsonl wire event stream,
-	// so every outcome object below is written unconditionally. The
-	// terminator carries only an outcome and none of a wire event's
-	// envelope fields (no schema_version, no sequence), which is exactly
-	// how every other command's final object is distinguished from the
-	// lines before it.
-	const jsonl = true
+	// so every terminator below is written unconditionally. Unlike every
+	// other command's bare final object, run's terminator is itself an
+	// event — type run.completed, the next sequence number, the same
+	// envelope every line before it carries — because a stream whose last
+	// line broke its own event shape is a stream a consumer must special-case
+	// to decode at all. What distinguishes it is the outcome field, which no
+	// other event carries.
+	envelope := dispatch.Completion{
+		Sequence:     1,
+		Harness:      harnessName,
+		Conversation: *conversation,
+	}
+	if envelope.Conversation == "" {
+		envelope.Conversation = "local"
+	}
 
 	driver, err := newHarnessDriver(harnessName)
 	if err != nil {
-		return failEnv(jsonl, stdout, stderr, "run", err)
+		return failRun(stdout, stderr, envelope, err)
 	}
 
 	supplied, err := readSuppliedManifest(*manifestPath)
 	if err != nil {
-		return failEnv(jsonl, stdout, stderr, "run", err)
+		return failRun(stdout, stderr, envelope, err)
 	}
+	envelope.Manifest = manifestIdentity(supplied)
 	// Load the project and dispatch under the whole-process deadline.
 	p, diags, err := agentproject.LoadWithManifest(agent, expectedFingerprint(supplied))
 	if err != nil {
-		return failEnv(jsonl, stdout, stderr, "run", err)
+		return failRun(stdout, stderr, envelope, err)
 	}
 	if p == nil || diags.HasErrors() {
 		// The source itself is invalid — the same gate check and apply run —
 		// so the stream ends gate_failed, not error: this is a finding about
-		// the source, and the digest names the bytes it was found in.
+		// the source, and the digest names the bytes it was found in. The
+		// event carries no fingerprint: the gate minted none, and an empty
+		// field is the honest report of that.
 		_ = diags.WriteProse(stderr)
 		fmt.Fprintln(stderr, "tenon run: the agent project is invalid; run tenon apply")
-		writeGateFailed(jsonl, stdout, stderr, "run", sourceDigest(agent, p))
-		return 1
+		envelope.Outcome = "gate_failed"
+		envelope.SourceDigest = sourceDigest(agent, p)
+		return writeRunCompleted(stdout, stderr, envelope)
 	}
+	envelope.Fingerprint = p.Fingerprint
 	// A supplied manifest gates the process open: on drift, open nothing.
 	if err := checkManifest(p, harnessName, resolveIntegrationStoreBase(), supplied); err != nil {
-		return failEnv(jsonl, stdout, stderr, "run", err)
+		return failRun(stdout, stderr, envelope, err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
-	if err := dispatch.Run(ctx, dispatch.Options{
+	// A clean dispatch writes its own terminator through the dispatcher's
+	// emitter, which owns the sequence; only the failure paths terminate the
+	// stream here, continuing the numbering the summary reports.
+	summary, err := dispatch.Run(ctx, dispatch.Options{
 		Project:      p,
 		Driver:       driver,
 		Workspace:    *workspace,
@@ -752,17 +774,32 @@ func runRun(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		Out:          stdout,
 		TurnTimeout:  *turnTimeout,
 		Manifest:     manifestIdentity(supplied),
-	}); err != nil {
-		return failEnv(jsonl, stdout, stderr, "run", err)
-	}
-	// A dispatched run that ends cleanly ends its stream the way every other
-	// command does, so a consumer reading objects until end of stream never
-	// has to tell a finished run from a truncated one.
-	if err := writeResult(stdout, okOutcome{Outcome: "ok"}); err != nil {
-		fmt.Fprintln(stderr, "tenon run:", err)
-		return 1
+	})
+	envelope.Sequence = summary.Sequence + 1
+	envelope.Turns = summary.Turns
+	if err != nil {
+		return failRun(stdout, stderr, envelope, err)
 	}
 	return 0
+}
+
+// failRun is run's environment-failure exit: the prose goes to stderr exactly
+// as failEnv writes it for every other command, and the stream ends with the
+// run.completed event carrying the error outcome and the same bounded text.
+func failRun(stdout, stderr io.Writer, envelope dispatch.Completion, cause error) int {
+	fmt.Fprintf(stderr, "tenon run: %v\n", cause)
+	envelope.Outcome = "error"
+	envelope.Error = diagnostics.Bound(fmt.Sprintf("%v", cause), 512)
+	return writeRunCompleted(stdout, stderr, envelope)
+}
+
+// writeRunCompleted writes run's terminator and exits 1: every caller is a
+// failure path, a clean dispatch having written its own.
+func writeRunCompleted(stdout, stderr io.Writer, envelope dispatch.Completion) int {
+	if err := dispatch.WriteCompleted(stdout, envelope); err != nil {
+		fmt.Fprintln(stderr, "tenon run:", err)
+	}
+	return 1
 }
 
 // runSchedule dispatches the "tenon schedule" subcommands (ADR 0008, ADR 0011).
