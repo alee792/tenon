@@ -125,10 +125,25 @@ func runClean(args []string, stdout, stderr io.Writer) int {
 				return 1
 			}
 		} else {
+			ownership, containment := false, false
 			for _, b := range blocked {
 				fmt.Fprintln(stdout, b.prose)
+				if b.reason == string(apply.ContainmentEscapes) || b.reason == string(apply.ContainmentSymlinkParent) {
+					containment = true
+					continue
+				}
+				ownership = true
 			}
-			fmt.Fprintln(stderr, "tenon clean: refusing to remove files modified or unowned since apply; rerun with --force to remove modified files (files without a record entry are never touched)")
+			// The two refusals have different remedies, so a run blocked only
+			// on containment is never told to rerun with --force, which would
+			// not help and would read as an invitation to force a removal
+			// outside the workspace.
+			if ownership {
+				fmt.Fprintln(stderr, "tenon clean: refusing to remove files modified or unowned since apply; rerun with --force to remove modified files (files without a record entry are never touched)")
+			}
+			if containment {
+				fmt.Fprintln(stderr, "tenon clean: refusing to act on recorded paths that leave the workspace or are reached through a symlinked parent; --force does not override this, because it widens what tenon removes inside a workspace and never where it removes")
+			}
 		}
 		return 1
 	}

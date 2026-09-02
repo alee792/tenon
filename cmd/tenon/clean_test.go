@@ -390,6 +390,27 @@ func TestCleanRefusesRecordedPathsThatEscapeTheWorkspace(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(ws, "CLAUDE.md")); err != nil {
 		t.Fatalf("a refused clean removes nothing at all: %v", err)
 	}
+
+	// Prose mode names the containment refusal and does not offer --force,
+	// which would not help and would read as an invitation to force a
+	// removal outside the workspace.
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"clean", "--workspace", ws, "--harness", "claude", "--force"}, nil, &stdout, &stderr); code != 1 {
+		t.Fatalf("--force must not override containment, got exit %d", code)
+	}
+	if !strings.Contains(stdout.String(), "escapes the workspace: ../victim/secret.txt") {
+		t.Fatalf("prose mode must name the escaping path: %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "--force does not override this") {
+		t.Fatalf("the refusal must say --force does not help: %q", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "rerun with --force") {
+		t.Fatalf("a containment-only refusal must not offer --force: %q", stderr.String())
+	}
+	if got, err := os.ReadFile(secret); err != nil || string(got) != string(secretContent) {
+		t.Fatalf("--force must not reach outside the workspace: got %q err %v", got, err)
+	}
 }
 
 // TestCleanPrunesEmptyParentsButNeverTheWorkspace proves the pruning bound:
