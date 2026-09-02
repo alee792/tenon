@@ -751,3 +751,29 @@ func TestReadRecordAcceptsPreGitCommitRecords(t *testing.T) {
 		t.Fatalf("record = %+v, want the legacy fields to still decode", record)
 	}
 }
+
+// TestStrictlyInsideRejectsWhatIsNotBelowRoot covers strictlyInside's false
+// branch directly. PruneEmptyParents only ever hands it paths CheckContainment
+// has already vouched for, so nothing reaches the guard through that route
+// today — it is defense in depth, and defense in depth that is never executed
+// is a claim rather than a guarantee.
+func TestStrictlyInsideRejectsWhatIsNotBelowRoot(t *testing.T) {
+	root := t.TempDir()
+	for _, tc := range []struct {
+		name      string
+		candidate string
+		want      bool
+	}{
+		{"a directory below root", filepath.Join(root, ".claude", "skills"), true},
+		{"root itself", root, false},
+		{"a sibling of root", filepath.Join(filepath.Dir(root), "elsewhere"), false},
+		{"an unrelated absolute path", string(filepath.Separator) + "etc", false},
+		{"a parent of root", filepath.Dir(root), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := strictlyInside(root, tc.candidate); got != tc.want {
+				t.Fatalf("strictlyInside(%q, %q) = %v, want %v", root, tc.candidate, got, tc.want)
+			}
+		})
+	}
+}

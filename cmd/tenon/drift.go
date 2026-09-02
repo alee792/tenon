@@ -155,9 +155,29 @@ func runDrift(args []string, stdout, stderr io.Writer) int {
 	// is — every generated path missing — and the run ends "drift", the same
 	// outcome as any other workspace that no longer matches. Nothing below
 	// writes to the workspace, so there is nothing to create either.
+	//
+	// A workspace that exists but is a regular file is a different thing
+	// entirely: not drift, not a gate failure, but a usage mistake, and it
+	// is reported as one — exit 2, no outcome object, like every other
+	// usage error.
+	if info, err := os.Stat(ws); err == nil && !info.IsDir() {
+		fmt.Fprintf(stderr, "tenon drift: --workspace must be a directory (found a file): %s\n", ws)
+		return 2
+	}
 
 	// Tool preparation runs against a throwaway cache exactly as check
 	// does: drift writes nothing to the workspace or a persistent cache.
+	// It also prepares against the SOURCE, not against --workspace, exactly
+	// as check does: drift's gate is about the source, and a tool host
+	// launched in a workspace that does not exist yet cannot start at all —
+	// which would report a tool failure and gate_failed for a workspace
+	// whose only problem is that it is missing. The real --workspace is
+	// still what generation targets and what classification reads below.
+	prepWorkspace, err := filepath.Abs(agent)
+	if err != nil {
+		fmt.Fprintln(stderr, "tenon drift:", err)
+		return 1
+	}
 	cache := ""
 	if len(p.Tools) > 0 {
 		cache, err = os.MkdirTemp("", "tenon-tools-")
@@ -167,7 +187,7 @@ func runDrift(args []string, stdout, stderr io.Writer) int {
 		}
 		defer os.RemoveAll(cache)
 	}
-	if !prepareTools(p, ws, cache, diags) {
+	if !prepareTools(p, prepWorkspace, cache, diags) {
 		render(diags, jsonl, stdout, stderr)
 		writeDriftOutcome(jsonl, stdout, stderr, "gate_failed")
 		return 1

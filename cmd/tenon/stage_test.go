@@ -70,6 +70,73 @@ func TestStageCLIJourney(t *testing.T) {
 	}
 }
 
+// TestStageVerifyFormatJSONL proves stage verify honors --format like every
+// other command that has one: a passing verification ends the stream with a
+// single ok object naming the artifact it verified, a failing one with the
+// gate_failed object, and the prose line is printed in neither case.
+func TestStageVerifyFormatJSONL(t *testing.T) {
+	agent := writeAgent(t, "verify-format-agent", validInstructions)
+	out := filepath.Join(t.TempDir(), "staged")
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"stage", agent, "--harness", "codex", "--output", out}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("stage exit %d\nstderr: %s", code, stderr.String())
+	}
+	artifact := filepath.Join(out, "opt", "tenon", "artifact.json")
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"stage", "verify", "--artifact", artifact, "--prefix", out, "--format", "jsonl"},
+		nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("verify of a clean tree exit %d\nstderr: %s", code, stderr.String())
+	}
+	var ok struct {
+		Outcome  string `json:"outcome"`
+		Artifact string `json:"artifact"`
+	}
+	line := strings.TrimSpace(stdout.String())
+	if err := json.Unmarshal([]byte(line), &ok); err != nil {
+		t.Fatalf("jsonl mode must emit one object and no prose: %q (%v)", stdout.String(), err)
+	}
+	if ok.Outcome != "ok" || ok.Artifact != artifact {
+		t.Fatalf("the result object must carry the outcome and the artifact verified: %q", line)
+	}
+
+	// A tampered tree ends the same stream with the gate failure, so a
+	// consumer never has to infer failure from the absence of a summary.
+	config := filepath.Join(out, "workspace", ".codex", "config.toml")
+	data, err := os.ReadFile(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config, append(data, []byte("\n# tampered\n")...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"stage", "verify", "--artifact", artifact, "--prefix", out, "--format", "jsonl"},
+		nil, &stdout, &stderr); code != 1 {
+		t.Fatalf("verify of a tampered tree must exit 1, got %d", code)
+	}
+	if strings.TrimSpace(stdout.String()) != `{"outcome":"gate_failed"}` {
+		t.Fatalf("a failing verification must end the stream with gate_failed: %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "stage verify") {
+		t.Fatalf("the reason stays on stderr: %q", stderr.String())
+	}
+
+	// An unknown rendering is a usage error, exactly as it is for stage.
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"stage", "verify", "--artifact", artifact, "--prefix", out, "--format", "yaml"},
+		nil, &stdout, &stderr); code != 2 {
+		t.Fatalf("an unknown --format must exit 2, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "--format must be prose or jsonl") {
+		t.Fatalf("the usage error must name the rule: %q", stderr.String())
+	}
+}
+
 // TestStageUnderGithubStyledPathStagesCleanly proves the build-machine-path
 // scan does not false-positive on an entirely ordinary agent location: a
 // path under a "github.com/<owner>/" directory, the shape any agent

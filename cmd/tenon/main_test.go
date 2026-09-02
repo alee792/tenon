@@ -2819,6 +2819,62 @@ func TestCleanIgnoresTenonHarnessEnv(t *testing.T) {
 	}
 }
 
+// TestApplyRefusesToWriteThroughASymlinkedParent proves the containment guard
+// covers apply's writes and not only its removals. A generated path is
+// workspace-relative by construction, but the directory it lands in is not:
+// replacing a generated parent directory with a symlink out of the workspace
+// makes the atomic write follow it and rewrite a file tenon does not own.
+// Apply refuses the whole run instead, and the file outside is untouched.
+func TestApplyRefusesToWriteThroughASymlinkedParent(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	writeFile(t, agent, "skills/echo/SKILL.md", []byte(echoSkillMD), 0o644)
+	ws := t.TempDir()
+	outside := t.TempDir()
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("apply exit %d: %s", code, stderr.String())
+	}
+	// The generated tree is moved out of the workspace and a symlink is left
+	// in its place: every generated .claude path still classifies as owned
+	// and unmodified through the link, so nothing but a containment check
+	// stops the rewrite.
+	stolen := filepath.Join(outside, "claude")
+	if err := os.Rename(filepath.Join(ws, ".claude"), stolen); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(stolen, filepath.Join(ws, ".claude")); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(stolen, "skills", "echo", "SKILL.md")
+	before, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The source changes so the second apply genuinely has new bytes to
+	// write. The file outside is still exactly what the record recorded, so
+	// ownership vouches for it and only containment stands between the
+	// atomic write and a file the workspace does not contain.
+	writeFile(t, agent, "skills/echo/SKILL.md",
+		[]byte(strings.Replace(echoSkillMD, "Echoes input back.", "Echoes input back, loudly.", 1)), 0o644)
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--format", "jsonl"}, nil, &stdout, &stderr); code == 0 {
+		t.Fatalf("apply must refuse to write through a symlinked parent: %s", stdout.String())
+	}
+	diags := filterDiags(parseDiagLines(t, stdout.String()), "apply.workspace.unsafe-path")
+	if len(diags) == 0 {
+		t.Fatalf("the refusal must carry the stable identifier: %q", stdout.String())
+	}
+	if !strings.Contains(diags[0].Rule, "symlink-parent") {
+		t.Fatalf("the refusal must name what is wrong with the path: %+v", diags[0])
+	}
+	if got, err := os.ReadFile(victim); err != nil || string(got) != string(before) {
+		t.Fatalf("the file outside the workspace must be untouched: got %q err %v", got, err)
+	}
+}
+
 // TestApplyRefusesStaleRecordPathsOutsideTheWorkspace proves the containment
 // guard on apply's own removal pass: a record naming a path that escapes the
 // workspace, or one reached through a symlinked parent, is refused with a

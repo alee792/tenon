@@ -698,31 +698,61 @@ func TestUnifiedDiffBoundsTotalBytes(t *testing.T) {
 // is what is missing, so every generated path classifies as missing and the
 // run ends in the ordinary drift outcome rather than claiming the source is
 // invalid.
+//
+// The agent carries a real authored tool on purpose. Tool preparation runs
+// its language host as a subprocess, and a host launched with its working
+// directory set to a workspace that does not exist cannot start at all — so
+// a tool-free agent would pass this test over the exact gap it is meant to
+// close, reporting tool.inspect.failed and gate_failed for a workspace whose
+// only problem is that it is missing.
 func TestDriftAgainstAMissingWorkspaceIsDriftNotGateFailure(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
+	writeGoTool(t, agent, goToolFile)
 	missing := filepath.Join(t.TempDir(), "never-applied")
 
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"drift", agent, "--harness", "claude", "--workspace", missing, "--format", "jsonl"}, nil, &stdout, &stderr); code != 1 {
-		t.Fatalf("drift against a missing workspace must exit 1, got %d\nstdout: %s", code, stdout.String())
+		t.Fatalf("drift against a missing workspace must exit 1, got %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
 	}
 	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
 	if lines[len(lines)-1] != `{"outcome":"drift"}` {
 		t.Fatalf("the stream must end with the drift outcome: %q", stdout.String())
 	}
 	diags := parseDiagLines(t, strings.Join(lines[:len(lines)-1], "\n"))
-	if len(diags) == 0 {
-		t.Fatalf("expected one missing finding per generated path: %q", stdout.String())
+	if len(diags) < 2 {
+		t.Fatalf("expected every owned path reported missing: %q", stdout.String())
 	}
 	for _, d := range diags {
 		if d.ID != "drift.file.missing" {
 			t.Fatalf("every finding against a missing workspace is a missing file, got %+v", d)
 		}
 	}
-	if len(filterDiags(diags, "drift.file.missing")) < 2 {
-		t.Fatalf("expected every owned path reported missing: %q", stdout.String())
-	}
 	if _, err := os.Stat(missing); !os.IsNotExist(err) {
 		t.Fatalf("drift must not create the workspace it reports on: %v", err)
+	}
+}
+
+// TestDriftAgainstAFileWorkspaceIsAUsageError proves the third case is told
+// apart from the other two: a workspace that exists but is a regular file is
+// neither drift nor a gate failure but a mistake in the invocation, so it
+// exits 2 with a usage message and no outcome object at all — the same shape
+// every other usage error has.
+func TestDriftAgainstAFileWorkspaceIsAUsageError(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	file := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(file, []byte("workspace?\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"drift", agent, "--harness", "claude", "--workspace", file, "--format", "jsonl"}, nil, &stdout, &stderr); code != 2 {
+		t.Fatalf("a file passed as --workspace must exit 2, got %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("a usage error carries no outcome object: %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "--workspace must be a directory (found a file)") ||
+		!strings.Contains(stderr.String(), file) {
+		t.Fatalf("the usage error must name the rule and the path: %q", stderr.String())
 	}
 }

@@ -214,6 +214,18 @@ func ApplyWithTarget(p *agentproject.Project, target Target, driver Driver) (*Re
 	generated := map[string]bool{}
 	for _, f := range files {
 		generated[f.Path] = true
+		// A generated path is workspace-relative by construction, but the
+		// workspace it lands in is not: a parent directory can be replaced
+		// with a symlink out of the workspace between one apply and the
+		// next, and writeAtomic would follow it and rewrite a file tenon
+		// does not own. Containment is proven for every write exactly as it
+		// is for every removal, and it refuses the whole apply — a partial
+		// tree is not what apply promises.
+		if issue := CheckContainment(ws, f.Path); issue != ContainmentOK {
+			diags.Errorf("apply.workspace.unsafe-path", f.Path,
+				"the workspace path tenon would write is not reachable through real directories inside the workspace (%s); tenon only ever writes inside the workspace, reached through real directories", issue)
+			continue
+		}
 		checkOwnership(ws, f.Path, previous, target.DiscardLocal, diags)
 	}
 	var stale []string
@@ -258,6 +270,13 @@ func ApplyWithTarget(p *agentproject.Project, target Target, driver Driver) (*Re
 	for _, f := range files {
 		desired := OwnedFile{Hash: hashBytes(f.Content), Executable: f.Executable}
 		record.Files[f.Path] = desired
+		// Re-checked immediately before the write itself, for the same
+		// reason the removal pass re-checks: the plan pass above proved
+		// containment, and this holds the guarantee against anything that
+		// changed the workspace since.
+		if issue := CheckContainment(ws, f.Path); issue != ContainmentOK {
+			return nil, diags, fmt.Errorf("refusing to write %s: %s", f.Path, issue)
+		}
 		full := filepath.Join(ws, f.Path)
 		current, err := os.ReadFile(full)
 		if err == nil && hashBytes(current) == desired.Hash {
@@ -631,6 +650,11 @@ const (
 	// would traverse it, so the effective target may lie outside the
 	// workspace even though the recorded path looks local.
 	ContainmentSymlinkParent ContainmentIssue = "symlink-parent"
+	// ContainmentUnreadableParent: some parent component could not be
+	// stat'd for a reason other than not existing — a permission denial,
+	// most often. Containment cannot be proven, so it is refused; saying
+	// "symlink-parent" here would name a cause nothing observed.
+	ContainmentUnreadableParent ContainmentIssue = "unreadable-parent"
 )
 
 // CheckContainment reports whether the workspace-relative path is safe to
@@ -661,7 +685,10 @@ func CheckContainment(ws, path string) ContainmentIssue {
 			if os.IsNotExist(err) {
 				return ContainmentOK
 			}
-			return ContainmentSymlinkParent
+			// Failing closed is the right call, but the reason has to be
+			// honest: nothing here observed a symlink, only an unreadable
+			// component.
+			return ContainmentUnreadableParent
 		}
 		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 			return ContainmentSymlinkParent

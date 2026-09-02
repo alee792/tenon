@@ -129,20 +129,50 @@ func runStageVerify(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	artifact := fs.String("artifact", "", "path to the artifact manifest to verify")
 	prefix := fs.String("prefix", "", "physical prefix prepended to canonical final paths")
+	mode := fs.String("format", "prose", "output rendering: prose or jsonl")
 
 	positional, ok := parsePositional(fs, args)
 	if !ok || len(positional) != 0 {
-		fmt.Fprintf(stderr, "tenon stage verify: usage: tenon stage verify --artifact PATH [--prefix DIR]\n")
+		fmt.Fprintf(stderr, "tenon stage verify: usage: tenon stage verify --artifact PATH [--prefix DIR] [--format <prose|jsonl>]\n")
+		return 2
+	}
+	jsonl := false
+	switch *mode {
+	case "prose":
+	case "jsonl":
+		jsonl = true
+	default:
+		fmt.Fprintf(stderr, "tenon stage verify: --format must be prose or jsonl\n")
 		return 2
 	}
 	if *artifact == "" {
 		fmt.Fprintf(stderr, "tenon stage verify: --artifact PATH is required\n")
 		return 2
 	}
+	// Verification failure is a gate failure like any other: the tree does
+	// not match what it claims to be. The reason is prose on stderr either
+	// way — jsonl mode adds the machine-readable outcome so a consumer
+	// reading the stream never has to infer failure from silence.
 	if err := stage.Verify(*artifact, *prefix); err != nil {
 		fmt.Fprintln(stderr, "tenon stage verify:", err)
+		writeGateFailed(jsonl, stdout, stderr, "stage verify")
 		return 1
+	}
+	if jsonl {
+		if err := writeResult(stdout, stageVerifyResult{Outcome: "ok", Artifact: *artifact}); err != nil {
+			fmt.Fprintln(stderr, "tenon stage verify:", err)
+			return 1
+		}
+		return 0
 	}
 	fmt.Fprintln(stdout, "verified: the staged tree matches its artifact manifest")
 	return 0
+}
+
+// stageVerifyResult is the jsonl-mode result object for a passing
+// verification: the outcome every command's final object carries, plus the
+// artifact manifest that was verified — which is all verify itself reports.
+type stageVerifyResult struct {
+	Outcome  string `json:"outcome"`
+	Artifact string `json:"artifact"`
 }

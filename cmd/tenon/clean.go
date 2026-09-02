@@ -128,7 +128,8 @@ func runClean(args []string, stdout, stderr io.Writer) int {
 			ownership, containment := false, false
 			for _, b := range blocked {
 				fmt.Fprintln(stdout, b.prose)
-				if b.reason == string(apply.ContainmentEscapes) || b.reason == string(apply.ContainmentSymlinkParent) {
+				if b.reason == string(apply.ContainmentEscapes) || b.reason == string(apply.ContainmentSymlinkParent) ||
+					b.reason == string(apply.ContainmentUnreadableParent) {
 					containment = true
 					continue
 				}
@@ -142,7 +143,7 @@ func runClean(args []string, stdout, stderr io.Writer) int {
 				fmt.Fprintln(stderr, "tenon clean: refusing to remove files modified or unowned since apply; rerun with --force to remove modified files (files without a record entry are never touched)")
 			}
 			if containment {
-				fmt.Fprintln(stderr, "tenon clean: refusing to act on recorded paths that leave the workspace or are reached through a symlinked parent; --force does not override this, because it widens what tenon removes inside a workspace and never where it removes")
+				fmt.Fprintln(stderr, "tenon clean: refusing to act on recorded paths that leave the workspace, are reached through a symlinked parent, or whose parent chain could not be read; --force does not override this, because it widens what tenon removes inside a workspace and never where it removes")
 			}
 		}
 		return 1
@@ -273,7 +274,7 @@ type harnessPlan struct {
 
 // blockedPath is one recorded path clean refuses to remove: reason is the
 // jsonl-mode value ("modified", "non-regular", "escapes-workspace", or
-// "symlink-parent"); prose is the human line.
+// "symlink-parent", or "unreadable-parent"); prose is the human line.
 type blockedPath struct {
 	path   string
 	reason string
@@ -374,8 +375,11 @@ func removableNow(ws, path string, record *apply.Record, force bool) string {
 // containment grounds, naming what is wrong with the recorded path rather
 // than only that it was refused.
 func containmentProse(issue apply.ContainmentIssue, path string) string {
-	if issue == apply.ContainmentEscapes {
+	switch issue {
+	case apply.ContainmentEscapes:
 		return fmt.Sprintf("escapes the workspace: %s", path)
+	case apply.ContainmentUnreadableParent:
+		return fmt.Sprintf("a parent directory could not be read, so containment could not be proven: %s", path)
 	}
 	return fmt.Sprintf("reached through a symlinked or non-directory parent: %s", path)
 }
