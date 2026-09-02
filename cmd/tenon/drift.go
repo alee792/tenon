@@ -123,7 +123,7 @@ func runDrift(args []string, stdout, stderr io.Writer) int {
 	// check and apply would, rather than silently regenerating against a
 	// pin the closure no longer matches.
 	if p != nil && !diags.HasErrors() && supplied != nil {
-		if err := verifyManifestDiag(p, driver.Harness(), resolveIntegrationStoreBase(), supplied, diags); err != nil {
+		if _, err := verifyManifestDiag(p, driver.Harness(), resolveIntegrationStoreBase(), supplied, diags); err != nil {
 			fmt.Fprintln(stderr, "tenon drift:", err)
 			return 1
 		}
@@ -148,13 +148,13 @@ func runDrift(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "tenon drift:", err)
 		return 1
 	}
-	if info, err := os.Stat(ws); err != nil || !info.IsDir() {
-		diags.Errorf("apply.workspace.missing", ".",
-			"the workspace must be an existing directory: %s", *workspace)
-		render(diags, jsonl, stdout, stderr)
-		writeDriftOutcome(jsonl, stdout, stderr, "gate_failed")
-		return 1
-	}
+	// A workspace that does not exist is not a gate failure: the source is
+	// fine, the environment is what is missing, and gate_failed says the
+	// opposite of the truth about the source. A nonexistent workspace holds
+	// no apply record and no owned file, so it classifies exactly as what it
+	// is — every generated path missing — and the run ends "drift", the same
+	// outcome as any other workspace that no longer matches. Nothing below
+	// writes to the workspace, so there is nothing to create either.
 
 	// Tool preparation runs against a throwaway cache exactly as check
 	// does: drift writes nothing to the workspace or a persistent cache.

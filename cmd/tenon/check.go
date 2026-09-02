@@ -53,8 +53,18 @@ type (
 		Source   string `json:"source"`
 	}
 	catalogMCP struct {
-		Kind      string `json:"kind"`
-		Name      string `json:"name"`
+		Kind string `json:"kind"`
+		Name string `json:"name"`
+		// Transport is the wire transport the server speaks, in ONE
+		// vocabulary across both entry sources: "stdio" for a locally
+		// spawned process, "streamable-http" for a remote HTTPS endpoint,
+		// and "installed" for a server tenon relays through an installed
+		// integration package's shim. An authored connection's kind is
+		// mapped onto it (remote → streamable-http; stdio and installed
+		// pass through) and a plugin-declared server's transport already
+		// speaks it, so a consumer never has to know which of the two
+		// authored an entry to read this field. Source carries that
+		// distinction, as it does for every other catalog kind.
 		Transport string `json:"transport"`
 		Source    string `json:"source"`
 	}
@@ -177,8 +187,13 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 	}
 	// A supplied pin set reports its closure drift before any generation, so
 	// check and apply fail identically.
+	// resolved is the closure the verification above read, kept so
+	// --write-pins writes exactly what was verified instead of resolving the
+	// environment a second time.
+	var resolved *manifest.Manifest
 	if p != nil && !diags.HasErrors() && supplied != nil {
-		if err := verifyManifestDiag(p, driver.Harness(), resolveIntegrationStoreBase(), supplied, diags); err != nil {
+		resolved, err = verifyManifestDiag(p, driver.Harness(), resolveIntegrationStoreBase(), supplied, diags)
+		if err != nil {
 			fmt.Fprintln(stderr, "tenon check:", err)
 			return 1
 		}
@@ -232,11 +247,17 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 	// ordinary versioned file. --model records the operator's advisory choice
 	// for the selected harness; the gate never resolves a model itself.
 	if *writePins != "" {
-		storeBase := resolveIntegrationStoreBase()
-		current, err := manifest.Resolve(p, harnessValue, version.Version, manifestResolverFor(p, harnessValue, storeBase))
-		if err != nil {
-			fmt.Fprintln(stderr, "tenon check:", err)
-			return 1
+		// With --pins, the closure was already resolved and verified above;
+		// reusing it is what makes the written pin set the closure that
+		// passed rather than a second, unverified read of the environment.
+		current := resolved
+		if current == nil {
+			storeBase := resolveIntegrationStoreBase()
+			current, err = manifest.Resolve(p, harnessValue, version.Version, manifestResolverFor(p, harnessValue, storeBase))
+			if err != nil {
+				fmt.Fprintln(stderr, "tenon check:", err)
+				return 1
+			}
 		}
 		if *model != "" {
 			pins := current.Harnesses[harnessValue]
@@ -333,9 +354,10 @@ func emitCapabilityCatalog(p *agentproject.Project, jsonl bool, stdout io.Writer
 		}
 	}
 	for _, c := range p.Connections {
+		transport := connectionTransport(c.Kind)
 		if err := emit(
-			catalogMCP{Kind: "mcp", Name: c.Name, Transport: c.Kind, Source: c.SourcePath},
-			fmt.Sprintf("mcp %s (%s, %s)", c.Name, c.Kind, c.SourcePath),
+			catalogMCP{Kind: "mcp", Name: c.Name, Transport: transport, Source: c.SourcePath},
+			fmt.Sprintf("mcp %s (%s, %s)", c.Name, transport, c.SourcePath),
 		); err != nil {
 			return err
 		}
@@ -369,4 +391,20 @@ func emitCapabilityCatalog(p *agentproject.Project, jsonl bool, stdout io.Writer
 		}
 	}
 	return nil
+}
+
+// connectionTransport maps an authored connection's kind onto the catalog's
+// single transport vocabulary. A connection kind names how tenon reaches the
+// server; a plugin server's transport names what the server speaks. Those
+// were two vocabularies in one field, so a consumer reading "remote" beside
+// "streamable-http" could not tell whether it was looking at two transports
+// or at one transport named twice. Only "remote" needs translating: it is
+// the spec transport ADR 0026 makes tenon's remote default, so it is emitted
+// under that transport's own name. stdio and installed already say exactly
+// what they are.
+func connectionTransport(kind string) string {
+	if kind == agentproject.ConnectionKindRemote {
+		return "streamable-http"
+	}
+	return kind
 }

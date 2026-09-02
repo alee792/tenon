@@ -33,7 +33,7 @@ func runStagePrepare(args []string, stdout, stderr io.Writer) int {
 
 	positional, ok := parsePositional(fs, args)
 	if !ok || len(positional) != 1 {
-		fmt.Fprintf(stderr, "tenon stage: usage: tenon stage AGENT --harness <claude|codex> --output DIR\n")
+		fmt.Fprintf(stderr, "tenon stage: usage: tenon stage AGENT --harness <claude|codex> --output DIR [--format <prose|jsonl>]\n")
 		return 2
 	}
 	agent := positional[0]
@@ -84,7 +84,21 @@ func runStagePrepare(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if result == nil || diags.HasErrors() {
+		writeGateFailed(jsonl, stdout, stderr, "stage")
 		return 1
+	}
+	// --format governs all output, not only diagnostics: in jsonl mode the
+	// run ends with one final object carrying the outcome, exactly as every
+	// other command's does, and the prose lines below — which are prose, and
+	// carry no outcome a consumer can read — are not printed at all.
+	if jsonl {
+		if err := writeResult(stdout, stageResult{
+			Outcome: "ok", Agent: result.Agent, Fingerprint: result.Fingerprint, Output: result.Output,
+		}); err != nil {
+			fmt.Fprintln(stderr, "tenon stage:", err)
+			return 1
+		}
+		return 0
 	}
 	fmt.Fprintf(stdout, "staged: agent %s for %s at %s (fingerprint %s)\n",
 		result.Agent, harnessValue, result.Output, result.Fingerprint)
@@ -95,6 +109,16 @@ func runStagePrepare(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintln(stdout, "  the native harness runtime is not bundled; provide it on the base image PATH")
 	return 0
+}
+
+// stageResult is the jsonl-mode result summary for a successful stage: the
+// agent and the fingerprint every result object carries, plus the directory
+// the tree was published to, which is what a downstream builder consumes.
+type stageResult struct {
+	Outcome     string `json:"outcome"`
+	Agent       string `json:"agent"`
+	Fingerprint string `json:"fingerprint"`
+	Output      string `json:"output"`
 }
 
 // runStageVerify verifies a staged tree against its artifact manifest offline.

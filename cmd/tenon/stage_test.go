@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -177,5 +178,59 @@ func TestStageUnderGithubStyledPathStagesCleanlyWithATypeScriptClosure(t *testin
 	stderr.Reset()
 	if code := run([]string{"stage", "verify", "--artifact", artifact, "--prefix", out}, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("a staged typescript-closure tree under a github.com/-styled path must verify: exit %d\nstderr: %s", code, stderr.String())
+	}
+}
+
+// TestStageHonorsFormat proves --format governs all of stage's output, not
+// only its diagnostics: jsonl mode ends with exactly one result object
+// carrying the outcome and no prose at all, and prose mode is unchanged.
+func TestStageHonorsFormat(t *testing.T) {
+	agent := writeAgent(t, "format-stage-agent", validInstructions)
+	base := t.TempDir()
+
+	var stdout, stderr bytes.Buffer
+	out := filepath.Join(base, "jsonl")
+	if code := run([]string{"stage", agent, "--harness", "codex", "--output", out, "--format", "jsonl"}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("stage exit %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+	}
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("jsonl mode must emit the result object alone: %q", stdout.String())
+	}
+	var result struct {
+		Outcome     string `json:"outcome"`
+		Agent       string `json:"agent"`
+		Fingerprint string `json:"fingerprint"`
+		Output      string `json:"output"`
+	}
+	if err := json.Unmarshal([]byte(lines[0]), &result); err != nil {
+		t.Fatalf("line %q is not one JSON object: %v", lines[0], err)
+	}
+	if result.Outcome != "ok" || result.Agent != "format-stage-agent" || result.Fingerprint == "" || result.Output == "" {
+		t.Fatalf("result = %+v, want the outcome, agent, fingerprint, and output directory", result)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	prose := filepath.Join(base, "prose")
+	if code := run([]string{"stage", agent, "--harness", "codex", "--output", prose}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("stage exit %d: %s", code, stderr.String())
+	}
+	if !strings.HasPrefix(stdout.String(), "staged: agent format-stage-agent for codex at ") {
+		t.Fatalf("prose mode is unchanged: %q", stdout.String())
+	}
+	if strings.Contains(stdout.String(), `"outcome"`) {
+		t.Fatalf("prose mode emits no result object: %q", stdout.String())
+	}
+
+	// A gate failure ends the jsonl stream with the shared gate_failed object.
+	broken := writeAgent(t, "broken-stage-agent", "no frontmatter\n")
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"stage", broken, "--harness", "codex", "--output", filepath.Join(base, "broken"), "--format", "jsonl"}, nil, &stdout, &stderr); code == 0 {
+		t.Fatal("a failing gate must not stage")
+	}
+	if !strings.HasSuffix(strings.TrimSpace(stdout.String()), `{"outcome":"gate_failed"}`) {
+		t.Fatalf("a failing stage must end with gate_failed: %q", stdout.String())
 	}
 }

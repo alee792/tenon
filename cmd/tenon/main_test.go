@@ -304,8 +304,11 @@ func TestEmitCatalogReportsResolvedCapabilities(t *testing.T) {
 	writeFile(t, agent, "skills/vendor/SKILL.md", []byte(vendorSkillMD), 0o644)
 	writeFile(t, agent, "subagents/reviewer/instructions.md", []byte(subagentInstructionsWithEffort), 0o644)
 	writeFile(t, agent, "schedules/digest.md", []byte("---\ncron: 0 9 * * 1\n---\n\nSummarize the week.\n"), 0o644)
+	writeFile(t, agent, "mcp/catalog.md",
+		[]byte("---\ntype: streamable-http\nurl: https://example.com/mcp\n---\n"), 0o644)
 
 	var stdout, stderr bytes.Buffer
+	t.Setenv("TENON_HARNESS", "")
 	if code := run([]string{"check", agent, "--emit", "catalog,files", "--format", "jsonl"}, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("check --emit exit %d: %s", code, stderr.String())
 	}
@@ -339,6 +342,13 @@ func TestEmitCatalogReportsResolvedCapabilities(t *testing.T) {
 	sub, ok := byName["subagent/reviewer"]
 	if !ok || sub.Effort != "high" || sub.Description == "" {
 		t.Fatalf("subagent entry = %+v, want the effort and description", sub)
+	}
+	// An authored connection's kind is reported in the transport vocabulary
+	// a plugin-declared server already speaks, so the two are comparable:
+	// this remote connection reads as streamable-http, not as "remote".
+	server, ok := byName["mcp/catalog"]
+	if !ok || server.Transport != "streamable-http" || server.Source != "mcp/catalog.md" {
+		t.Fatalf("mcp entry = %+v, want the normalized transport and source path", server)
 	}
 	sched, ok := byName["schedule/digest"]
 	if !ok || sched.Cron != "0 9 * * 1" || sched.Source != "schedules/digest.md" {

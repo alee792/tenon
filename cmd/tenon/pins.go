@@ -64,23 +64,33 @@ func readSuppliedManifest(path string) (*manifest.Manifest, error) {
 // stable typed-error code so check and apply report identical, machine-
 // readable failures. A nil pin set is a no-op. The returned error is reserved
 // for an unresolvable closure (an environment failure), never for drift.
-func verifyManifestDiag(p *agentproject.Project, harnessName, storeBase string, supplied *manifest.Manifest, diags *diagnostics.List) error {
+//
+// The resolved closure is returned so a caller that also writes pins writes
+// the very closure it just verified, rather than resolving a second time:
+// two resolutions of the same closure are two reads of a moving environment,
+// and the pin set written would be the second one, which nothing verified.
+// It is nil when no pins were supplied, and nil when resolution failed.
+func verifyManifestDiag(p *agentproject.Project, harnessName, storeBase string, supplied *manifest.Manifest, diags *diagnostics.List) (*manifest.Manifest, error) {
 	if supplied == nil {
-		return nil
+		return nil, nil
 	}
 	current, err := manifest.Resolve(p, harnessName, version.Version, manifestResolverFor(p, harnessName, storeBase))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := manifest.Verify(supplied, current); err != nil {
+		// Verify's contract is that every drift it reports is a
+		// *manifest.Error carrying the stable identifier. Anything else is a
+		// bug in this process, not drift in the operator's environment, and
+		// it is returned as an internal error rather than minted into an
+		// identifier the specification never documented.
 		var me *manifest.Error
-		if errors.As(err, &me) {
-			diags.Errorf(me.Code, ".", "%s", me.Message)
-		} else {
-			diags.Errorf("pins.drift", ".", "%s", err.Error())
+		if !errors.As(err, &me) {
+			return nil, fmt.Errorf("internal: pin verification returned an untyped error: %w", err)
 		}
+		diags.Errorf(me.Code, ".", "%s", me.Message)
 	}
-	return nil
+	return current, nil
 }
 
 // checkManifest resolves the current closure and verifies the supplied pin set

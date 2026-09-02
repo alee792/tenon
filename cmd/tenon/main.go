@@ -52,7 +52,7 @@ const usage = `usage:
   tenon run AGENT --workspace DIR --harness <claude|codex> [--conversation ID] [--input jsonl] [--pins FILE] [--timeout DUR] [--turn-timeout DUR]
   tenon schedule trigger AGENT NAME --workspace DIR --harness <claude|codex> --input-id ID [--pins FILE] [--turn-timeout DUR] [--timeout DUR]
   tenon schedule run AGENT --workspace DIR --harness <claude|codex> [--pins FILE] [--turn-timeout DUR] [--max-active-turns N]
-  tenon stage AGENT --harness <claude|codex> --output DIR
+  tenon stage AGENT --harness <claude|codex> --output DIR [--format <prose|jsonl>]
   tenon stage verify --artifact PATH [--prefix DIR]
   tenon mcp add AGENT NAME --url HTTPS_URL [--header 'K: V'] [--context TEXT] [--pins FILE]
   tenon mcp status AGENT [NAME] [--pins FILE]
@@ -317,7 +317,7 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 	// tools are prepared and before generation — so drift writes nothing: no
 	// .tenon, no generated files.
 	if supplied != nil {
-		if err := verifyManifestDiag(p, driver.Harness(), storeBase, supplied, diags); err != nil {
+		if _, err := verifyManifestDiag(p, driver.Harness(), storeBase, supplied, diags); err != nil {
 			fmt.Fprintln(stderr, "tenon apply:", err)
 			return 1
 		}

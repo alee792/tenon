@@ -692,3 +692,37 @@ func TestUnifiedDiffBoundsTotalBytes(t *testing.T) {
 		}
 	}
 }
+
+// TestDriftAgainstAMissingWorkspaceIsDriftNotGateFailure proves the outcome
+// names what actually failed: the source passed the gate and the workspace
+// is what is missing, so every generated path classifies as missing and the
+// run ends in the ordinary drift outcome rather than claiming the source is
+// invalid.
+func TestDriftAgainstAMissingWorkspaceIsDriftNotGateFailure(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	missing := filepath.Join(t.TempDir(), "never-applied")
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"drift", agent, "--harness", "claude", "--workspace", missing, "--format", "jsonl"}, nil, &stdout, &stderr); code != 1 {
+		t.Fatalf("drift against a missing workspace must exit 1, got %d\nstdout: %s", code, stdout.String())
+	}
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if lines[len(lines)-1] != `{"outcome":"drift"}` {
+		t.Fatalf("the stream must end with the drift outcome: %q", stdout.String())
+	}
+	diags := parseDiagLines(t, strings.Join(lines[:len(lines)-1], "\n"))
+	if len(diags) == 0 {
+		t.Fatalf("expected one missing finding per generated path: %q", stdout.String())
+	}
+	for _, d := range diags {
+		if d.ID != "drift.file.missing" {
+			t.Fatalf("every finding against a missing workspace is a missing file, got %+v", d)
+		}
+	}
+	if len(filterDiags(diags, "drift.file.missing")) < 2 {
+		t.Fatalf("expected every owned path reported missing: %q", stdout.String())
+	}
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Fatalf("drift must not create the workspace it reports on: %v", err)
+	}
+}

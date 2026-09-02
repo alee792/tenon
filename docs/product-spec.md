@@ -398,7 +398,13 @@ source that may not run at all.
 - `--emit catalog` reports the resolved capability inventory: skills
   (including plugin-merged ones, with their descriptions), tools with their
   language, MCP servers, subagents, and schedules, exactly as the load
-  resolved them. The catalog is a projection of the gate's own working set;
+  resolved them. An MCP entry's `transport` speaks one vocabulary whichever
+  side declared the server — `stdio` for a locally spawned process,
+  `streamable-http` for a remote HTTPS endpoint, `installed` for a server
+  relayed through an installed integration package — so an authored
+  connection's kind and a plugin-declared server's transport are directly
+  comparable; `source` is what distinguishes where an entry came from, as it
+  does for every other kind. The catalog is a projection of the gate's own working set;
   tenon never accepts one as input, because an authored capability
   inventory is exactly the second inventory principle 9 forbids.
 
@@ -413,10 +419,14 @@ gate mints the very pin set that later proves that root. Both flags require
 named harness resolves.
 
 On success, in the machine-readable mode, every command emits one further
-JSON object after any diagnostic and inventory lines: a result summary
-carrying an `outcome` field plus the agent name and source fingerprint
-(check's also carries the path `--write-pins` wrote; apply's carries the
-harness, workspace, and the written/removed/managed-tool lists). This
+JSON object after any diagnostic and inventory lines: a result summary. Its
+one constant field is `outcome`; the rest describe what that command
+produced and therefore vary by command. Check's carries the agent name, the
+source fingerprint, and the path `--write-pins` wrote; apply's adds the
+harness, workspace, and the written/removed/managed-tool lists; stage's
+carries the agent, the fingerprint, and the output directory; clean's
+carries only the number of files removed, because clean has no agent and no
+source to name. This
 object is shaped differently from a diagnostic line — it has no `id`,
 `path`, or `rule` field — so a consumer parsing the stream must expect it
 as the stream's final, distinct object rather than mistake it for a
@@ -441,7 +451,11 @@ apply's own generation path, then compares each against both the workspace
 and the apply record — the same ownership rule apply's conflict check
 enforces, not merely a byte comparison against the fresh regeneration — and
 reports it unchanged, modified on disk (with a unified diff), missing, or
-stale (recorded by a previous apply but no longer generated). Drift
+stale (recorded by a previous apply but no longer generated). A workspace
+that does not exist is not a gate failure — the source is fine, the
+environment is what is missing — so it classifies as what it is: no record,
+every generated path missing, and the run ends in the ordinary `drift`
+outcome. Drift
 deliberately never adopts a workspace edit back into source: generation is
 lossy in reverse, so tenon never guesses author intent from a diff. Drift
 only shows the diff; the author edits source and reapplies, optionally with
@@ -654,7 +668,8 @@ daemon, missed-run replay, or hosted delivery runtime.
 
 ## Staged agent filesystems
 
-`tenon stage AGENT --harness <claude|codex> --output DIR` prepares one
+`tenon stage AGENT --harness <claude|codex> --output DIR [--format
+<prose|jsonl>]` prepares one
 complete runnable filesystem tree at canonical paths for an existing OCI
 builder:
 
