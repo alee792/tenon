@@ -123,7 +123,11 @@ and implemented, along with three smaller decisions the review raised.
    `error` outcome. A bare clean over an unapplied workspace still succeeds
    trivially.
 
-## Next
+## Deferred to a follow-up PR (decided)
+
+The item below is a settled decision, not an open question and not a
+rejected proposal. It is deferred purely for reviewability: it lands in its
+own PR rather than this one.
 
 **Extract the shared gate.** Check, drift, and apply each open with the same
 sequence — read the supplied pins, load with the expected fingerprint,
@@ -133,9 +137,10 @@ times. Lift it to one `runGate(agent, driver, supplied) (*Project,
 contract ("check and apply fail identically on the same source") becomes
 structural rather than test-enforced.
 
-Deliberately not in this PR: it touches every failure path in three
-commands at once, and interleaving it with the outcome and digest work
-above would make a diff nobody can review. The parity tests are the guard
+Deliberately not in this PR — the extraction is decided, the timing is
+what was deferred: it touches every failure path in three commands at once,
+and interleaving it with the outcome and digest work above would make a diff
+nobody can review. The parity tests are the guard
 until then — they are the reason the divergence would be caught, and they
 are also the reason the extraction is safe to do later rather than never.
 

@@ -118,6 +118,7 @@ func TestStageVerifyFormatJSONL(t *testing.T) {
 		nil, &stdout, &stderr); code != 1 {
 		t.Fatalf("verify of a tampered tree must exit 1, got %d", code)
 	}
+	assertOneOutcome(t, stdout.String())
 	if strings.TrimSpace(stdout.String()) != `{"outcome":"gate_failed"}` {
 		t.Fatalf("a failing verification must end the stream with gate_failed: %q", stdout.String())
 	}

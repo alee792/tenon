@@ -714,6 +714,7 @@ func TestDriftAgainstAMissingWorkspaceIsDriftNotGateFailure(t *testing.T) {
 	if code := run([]string{"drift", agent, "--harness", "claude", "--workspace", missing, "--format", "jsonl"}, nil, &stdout, &stderr); code != 1 {
 		t.Fatalf("drift against a missing workspace must exit 1, got %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
 	}
+	assertOneOutcome(t, stdout.String())
 	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
 	if lines[len(lines)-1] != `{"outcome":"drift"}` {
 		t.Fatalf("the stream must end with the drift outcome: %q", stdout.String())

@@ -325,6 +325,7 @@ func TestCleanJSONLShapes(t *testing.T) {
 // asserts the stream ends with the blocked outcome object.
 func blockedLines(t *testing.T, out string) map[string]string {
 	t.Helper()
+	assertOneOutcome(t, out)
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	if len(lines) == 0 || lines[len(lines)-1] != `{"outcome":"blocked"}` {
 		t.Fatalf("a refused clean must end with the blocked outcome object: %q", out)
@@ -697,16 +698,61 @@ func emptyRecordFiles(t *testing.T, ws, harness string) {
 // TestCleanRefusesPathsWithAnUnreadableParent is the third containment
 // refusal — a recorded path whose parent chain cannot be read at all, so
 // containment can be neither proven nor disproven and clean fails closed
-// (ContainmentUnreadableParent, reason "unreadable-parent"). It is skipped
-// rather than written against the filesystem because the only portable way
-// to make a parent unreadable is to strip its permission bits, and this
-// suite runs as root in CI, where CAP_DAC_OVERRIDE makes a 0o000 directory
-// traversable anyway: the setup would produce an ordinary successful clean
-// and the test would assert nothing it claims to. Dropping privileges or
-// mounting a filesystem to reproduce it is a heavier apparatus than the
-// branch is worth, and the same branch is exercised through
-// apply.CheckContainment's own escaping-path and symlink-parent cases,
-// which share every line but the classification.
+// (ContainmentUnreadableParent, reason "unreadable-parent"). The parent's
+// permission bits are stripped to reproduce it, which is exactly what an
+// unprivileged process sees: GitHub's hosted ubuntu-24.04 runner runs the
+// suite as a normal user, so a 0o000 directory does deny traversal there.
+// The one environment where it cannot be reproduced is root, whose
+// CAP_DAC_OVERRIDE walks through the bits as if they were not set; there,
+// and only there, the case is skipped rather than assert something it did
+// not prove.
 func TestCleanRefusesPathsWithAnUnreadableParent(t *testing.T) {
-	t.Skip("cannot be reproduced as root: permission bits do not stop a CAP_DAC_OVERRIDE traversal")
+	if os.Geteuid() == 0 {
+		t.Skip("root traverses a 0o000 directory via CAP_DAC_OVERRIDE, so the refusal cannot be provoked")
+	}
+	agent := writeAgent(t, "my-agent", validInstructions)
+	writeFile(t, agent, "skills/echo/SKILL.md", []byte(echoSkillMD), 0o644)
+	ws := t.TempDir()
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("apply exit %d: %s", code, stderr.String())
+	}
+	// Strip the parent directory's bits so resolving the recorded path
+	// under it returns EACCES rather than an answer. The bits go back in
+	// Cleanup, or TempDir's own removal would fail on the same denial.
+	unreadable := filepath.Join(ws, ".claude")
+	if err := os.Chmod(unreadable, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(unreadable, 0o755) })
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"clean", "--workspace", ws, "--harness", "claude", "--format", "jsonl"}, nil, &stdout, &stderr); code != 1 {
+		t.Fatalf("clean through an unreadable parent must be refused, got exit %d\nstdout: %s", code, stdout.String())
+	}
+	blocked := blockedLines(t, stdout.String())
+	if blocked[".claude/skills/echo/SKILL.md"] != "unreadable-parent" {
+		t.Fatalf("an unprovable containment must block as unreadable-parent: %v", blocked)
+	}
+
+	// The prose says the same thing, so an operator reading stderr learns
+	// why nothing was removed.
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"clean", "--workspace", ws, "--harness", "claude"}, nil, &stdout, &stderr); code != 1 {
+		t.Fatalf("the prose run must be refused too, got exit %d\nstderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String()+stderr.String(), "a parent directory could not be read") {
+		t.Fatalf("the refusal must say the parent could not be read:\nstdout: %s\nstderr: %s", stdout.String(), stderr.String())
+	}
+
+	// All-or-nothing, as with every other containment refusal.
+	if _, err := os.Stat(filepath.Join(ws, "CLAUDE.md")); err != nil {
+		t.Fatalf("a refused clean removes nothing at all: %v", err)
+	}
+	if _, err := os.Stat(apply.RecordPath(ws, "claude")); err != nil {
+		t.Fatalf("a refused clean keeps the record: %v", err)
+	}
 }

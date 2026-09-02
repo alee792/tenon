@@ -312,8 +312,15 @@ func TestWritePinsNeverWritesWhenTheGateFails(t *testing.T) {
 	if code := run([]string{"check", agent, "--harness", "claude", "--write-pins", path, "--format", "jsonl"}, nil, &out, &errb); code != 1 {
 		t.Fatalf("a failing gate must exit 1, got %d: %s", code, out.String())
 	}
-	if !strings.Contains(strings.TrimSpace(out.String()), `{"outcome":"gate_failed","source_digest":"sha256:`) {
-		t.Fatalf("the stream must end with gate_failed and its source digest: %q", out.String())
+	// Terminality is the property: the gate_failed object is the LAST line,
+	// not merely a line somewhere in the stream.
+	assertOneOutcome(t, out.String())
+	failed := finalOutcome(t, out.String())
+	if failed.Outcome != "gate_failed" {
+		t.Fatalf("the stream must end with gate_failed: %q", out.String())
+	}
+	if !strings.HasPrefix(failed.SourceDigest, "sha256:") {
+		t.Fatalf("the gate_failed object must name the bytes that failed, got %q", failed.SourceDigest)
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("a failing gate must write no pin set: %v", err)

@@ -37,6 +37,22 @@ growth requires stated payment.
   differs from that tree's fingerprint. Both render as `sha256:` plus 64 hex
   characters, so the field a value arrives in carries the meaning, never the
   value alone.
+- **Outcome** — the field every machine-readable stream's final object
+  carries, from the vocabulary `ok / gate_failed / drift / blocked / error`.
+  `ok`: the command did what it was asked (for `run`, that the dispatcher
+  completed every turn it was given — the accompanying `turns` counts, not
+  the outcome, say how those turns went). `gate_failed`: the source itself
+  is invalid, and the object names the bytes that failed with a source
+  digest. `drift`: the source is fine but the workspace no longer matches a
+  fresh apply. `blocked`: clean refused to remove what it found. `error`:
+  the run could not complete for a reason that is not the source's fault —
+  an unreadable pin set, an unwritable path, a closure that would not
+  resolve, a harness that would not start. The first four are findings a
+  loop scores; **`error` is never scored** — it is a statement about the
+  environment, which the loop retries or escalates. The field is the
+  authoritative machine signal; the process exit code is a coarse
+  projection of it, since one integer cannot carry both what happened and
+  what was produced.
 - **Improvement loop** — an agent or optimizer revising an agent's files; an
   author coequal with the person. Tenon is its substrate — the gate
   (`tenon check`), reproducible application, and attribution — never the

@@ -34,6 +34,32 @@ func finalOutcome(t *testing.T, stream string) struct {
 	return final
 }
 
+// assertOneOutcome proves the outcome contract's other half: a stream ends
+// with an outcome object, and carries exactly one. Two would leave a
+// consumer to decide which run it was told about; zero is the silence the
+// contract exists to abolish. It counts decoded objects carrying an outcome
+// key rather than matching text, so a diagnostic that merely mentions the
+// word is not miscounted.
+func assertOneOutcome(t *testing.T, stream string) {
+	t.Helper()
+	found := 0
+	for _, line := range strings.Split(strings.TrimSpace(stream), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var object map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(line), &object); err != nil {
+			t.Fatalf("every line of a jsonl stream must be one JSON object, got %q: %v", line, err)
+		}
+		if _, ok := object["outcome"]; ok {
+			found++
+		}
+	}
+	if found != 1 {
+		t.Fatalf("a jsonl stream must carry exactly one outcome object, found %d:\n%s", found, stream)
+	}
+}
+
 // TestEnvironmentFailureEndsTheStreamWithAnError proves the outcome contract
 // covers environment failures, not only findings: a run that cannot complete
 // for a reason that is not the source's fault ends the jsonl stream with
@@ -98,6 +124,7 @@ func TestEnvironmentFailureEndsTheStreamWithAnError(t *testing.T) {
 			if code := run(tc.args, nil, &stdout, &stderr); code != 1 {
 				t.Fatalf("exit = %d, want 1\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
 			}
+			assertOneOutcome(t, stdout.String())
 			final := finalOutcome(t, stdout.String())
 			if final.Outcome != "error" {
 				t.Fatalf("outcome = %q, want error\nstdout: %s", final.Outcome, stdout.String())

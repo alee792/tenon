@@ -2597,6 +2597,81 @@ func TestRunConstructsRealDriver(t *testing.T) {
 	if !strings.Contains(stderr.String(), "carries no claude apply record") {
 		t.Fatalf("want a fail-closed unapplied-workspace error, got: %s", stderr.String())
 	}
+	// The stream still ends the way run's stream always ends: one
+	// run.completed event carrying the outcome and the reason.
+	assertOneOutcome(t, stdout.String())
+	last := lastRunEvent(t, stdout.String())
+	if last.Type != "run.completed" || last.Outcome != "error" {
+		t.Fatalf("an environment failure must end the stream with a run.completed error event: %+v", last)
+	}
+	if !strings.Contains(last.Error, "apply record") {
+		t.Fatalf("the terminator must carry the reason, got %q", last.Error)
+	}
+}
+
+// runEvent is one decoded line of run's wire stream, envelope fields and
+// all: the terminator is an event like every line before it, so a consumer
+// decodes the whole stream one way.
+type runEvent struct {
+	SchemaVersion int    `json:"schema_version"`
+	Sequence      int    `json:"sequence"`
+	Type          string `json:"type"`
+	Harness       string `json:"harness"`
+	Conversation  string `json:"conversation"`
+	Fingerprint   string `json:"fingerprint"`
+	Outcome       string `json:"outcome"`
+	Error         string `json:"error"`
+	SourceDigest  string `json:"source_digest"`
+	Turns         *struct {
+		Completed     int `json:"completed"`
+		Failed        int `json:"failed"`
+		Uncertain     int `json:"uncertain"`
+		ProcessFailed int `json:"process_failed"`
+		Cancelled     int `json:"cancelled"`
+	} `json:"turns"`
+}
+
+// lastRunEvent decodes the final line of run's stream as an event.
+func lastRunEvent(t *testing.T, stream string) runEvent {
+	t.Helper()
+	lines := strings.Split(strings.TrimSpace(stream), "\n")
+	last := strings.TrimSpace(lines[len(lines)-1])
+	if last == "" {
+		t.Fatal("run's stream ended with nothing; a consumer cannot tell that from a truncated pipe")
+	}
+	var e runEvent
+	if err := json.Unmarshal([]byte(last), &e); err != nil {
+		t.Fatalf("run's last line must be one JSON event, got %q: %v", last, err)
+	}
+	return e
+}
+
+// TestRunGateFailureIsACompletedEvent proves run's failure terminator keeps
+// the stream's own shape. An invalid source ends the stream with a
+// run.completed event carrying gate_failed and the digest that names the
+// bytes that failed — and no fingerprint, because the gate minted none.
+func TestRunGateFailureIsACompletedEvent(t *testing.T) {
+	agent := writeAgent(t, "my-agent", "no frontmatter, so this root does not load\n")
+	ws := t.TempDir()
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"run", agent, "--workspace", ws, "--harness", "claude"}, nil, &stdout, &stderr); code != 1 {
+		t.Fatalf("an invalid source must exit 1, got %d\nstderr: %s", code, stderr.String())
+	}
+	assertOneOutcome(t, stdout.String())
+	last := lastRunEvent(t, stdout.String())
+	if last.Type != "run.completed" || last.Outcome != "gate_failed" {
+		t.Fatalf("an invalid source must end the stream with a run.completed gate_failed event: %+v", last)
+	}
+	if last.SchemaVersion != 1 || last.Sequence < 1 || last.Harness != "claude" || last.Conversation != "local" {
+		t.Fatalf("the terminator must carry the wire envelope: %+v", last)
+	}
+	if !strings.HasPrefix(last.SourceDigest, "sha256:") {
+		t.Fatalf("a gate failure must name the bytes that failed, got %q", last.SourceDigest)
+	}
+	if last.Fingerprint != "" {
+		t.Fatalf("a gate that minted no fingerprint must report none, got %q", last.Fingerprint)
+	}
 }
 
 // TestRunFlagValidation proves the run command rejects malformed invocations
