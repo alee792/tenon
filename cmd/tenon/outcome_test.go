@@ -46,6 +46,10 @@ func TestEnvironmentFailureEndsTheStreamWithAnError(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
 	ws := t.TempDir()
 	missingPins := filepath.Join(t.TempDir(), "no-such-pins.json")
+	// The write-pins case must reach the write to fail there. Without a fake
+	// resolver, closure resolution fails first on any machine lacking a claude
+	// binary — still an error outcome, but not the one this case names.
+	withFakeResolver(t, "2.1.240", nil)
 
 	cases := []struct {
 		name string
