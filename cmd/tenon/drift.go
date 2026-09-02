@@ -150,7 +150,7 @@ func runDrift(args []string, stdout, stderr io.Writer) int {
 				fmt.Fprintf(stderr, "tenon drift: --workspace must be a directory (found a file): %s\n", ws)
 				return 2
 			}
-			return -1
+			return 0
 		},
 	})
 	defer gate.cleanup()

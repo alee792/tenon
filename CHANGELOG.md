@@ -7,6 +7,13 @@ All notable changes to this project are documented in this file.
 The first release, v0.1.0, ships the core described in
 [the product specification](docs/product-spec.md).
 
+Entries below are written as of the change they record. Where an older
+entry names `tenon validate`, `tenon fingerprint show`, `--diagnostics`,
+or `tenon manifest`, read `tenon check`, `tenon check --emit files`,
+`--format`, and `tenon pins`: the read surface was consolidated in
+[ADR 0027](docs/adr/0027-consolidate-the-read-surface.md) before the cut,
+and the first entries under *Added* describe the shipped commands.
+
 ### Added
 
 - `tenon check` is now the single gate over an agent project, absorbing
@@ -499,7 +506,7 @@ See [the specification's known limitations](docs/product-spec.md#known-limitatio
 for the full list. Notably:
 
 - Locked Python dependencies (`uv export`/`uv pip install`) and TypeScript
-  type-checking (`deno check`) still run on every `validate`/`apply`, since
+  type-checking (`deno check`) still run on every `check`/`apply`, since
   they are specific to each project's own source; only the pinned CPython
   interpreter and `deno` executable themselves are shared machine-wide
   (issue #38), not a project's locked dependencies.

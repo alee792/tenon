@@ -69,8 +69,10 @@ type gateInput struct {
 	// beforeTools runs after verification and before anything is prepared,
 	// for a caller whose own precondition must be decided before the gate
 	// pays for tool preparation — drift's "--workspace is a regular file"
-	// usage error is the only one. It returns the exit code to stop with,
-	// or -1 to continue.
+	// usage error is the only one. It returns the nonzero exit code to stop
+	// with, or 0 to continue; a precondition can only ever stop the gate by
+	// failing, so the convention matches what every caller already does
+	// with runGate's own return.
 	beforeTools func() int
 }
 
@@ -95,9 +97,6 @@ type gateResult struct {
 	// files is what generation produced, nil when the gate did not
 	// generate. Unsorted, in driver order.
 	files []apply.GeneratedFile
-	// generated reports whether the generation pass actually ran: it is
-	// skipped for a portable gate and for a caller that generates itself.
-	generated bool
 	// cachePath is the throwaway tool cache the gate created, removed by
 	// cleanup.
 	cachePath string
@@ -141,6 +140,13 @@ func runGate(in gateInput) (gateResult, int) {
 	// before any workspace mutation, so check, drift, and apply all fail on
 	// a drifted pin having written nothing.
 	if in.supplied != nil {
+		if in.driver == nil {
+			// The gate's own contract, not a caller's flag parsing: a pin
+			// set names a harness, so there is nothing to verify it against
+			// without one. check refuses --pins without --harness before
+			// it gets here.
+			panic("runGate: a supplied pin set requires a driver")
+		}
 		res.resolved, err = verifyManifestDiag(res.project, in.driver.Harness(), resolveIntegrationStoreBase(), in.supplied, res.diags)
 		if err != nil {
 			return res, failEnv(in.jsonl, in.stdout, in.stderr, in.command, err)
@@ -151,7 +157,7 @@ func runGate(in gateInput) (gateResult, int) {
 	}
 
 	if in.beforeTools != nil {
-		if code := in.beforeTools(); code >= 0 {
+		if code := in.beforeTools(); code != 0 {
 			return res, code
 		}
 	}
@@ -197,7 +203,6 @@ func runGate(in gateInput) (gateResult, int) {
 			TenonVersion:     version.Version,
 			Model:            manifestModel(in.supplied, in.driver.Harness()),
 		}, res.diags)
-		res.generated = true
 		if res.diags.HasErrors() {
 			return res, fail()
 		}
