@@ -110,13 +110,11 @@ func runDrift(args []string, stdout, stderr io.Writer) int {
 
 	supplied, err := readSuppliedManifest(*manifestPath)
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon drift:", err)
-		return 1
+		return failEnv(jsonl, stdout, stderr, "drift", err)
 	}
 	p, diags, err := agentproject.LoadWithManifest(agent, expectedFingerprint(supplied))
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon drift:", err)
-		return 1
+		return failEnv(jsonl, stdout, stderr, "drift", err)
 	}
 	// A supplied manifest is verified against the current closure exactly as
 	// check does, before generation: drift reports the identical drift
@@ -124,8 +122,7 @@ func runDrift(args []string, stdout, stderr io.Writer) int {
 	// pin the closure no longer matches.
 	if p != nil && !diags.HasErrors() && supplied != nil {
 		if _, err := verifyManifestDiag(p, driver.Harness(), resolveIntegrationStoreBase(), supplied, diags); err != nil {
-			fmt.Fprintln(stderr, "tenon drift:", err)
-			return 1
+			return failEnv(jsonl, stdout, stderr, "drift", err)
 		}
 	}
 	// Everything through generation below mirrors check's own gate exactly
@@ -140,13 +137,11 @@ func runDrift(args []string, stdout, stderr io.Writer) int {
 
 	executable, err := resolveExecutable()
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon drift:", err)
-		return 1
+		return failEnv(jsonl, stdout, stderr, "drift", err)
 	}
 	ws, err := filepath.Abs(*workspace)
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon drift:", err)
-		return 1
+		return failEnv(jsonl, stdout, stderr, "drift", err)
 	}
 	// A workspace that does not exist is not a gate failure: the source is
 	// fine, the environment is what is missing, and gate_failed says the
@@ -175,15 +170,13 @@ func runDrift(args []string, stdout, stderr io.Writer) int {
 	// still what generation targets and what classification reads below.
 	prepWorkspace, err := filepath.Abs(agent)
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon drift:", err)
-		return 1
+		return failEnv(jsonl, stdout, stderr, "drift", err)
 	}
 	cache := ""
 	if len(p.Tools) > 0 {
 		cache, err = os.MkdirTemp("", "tenon-tools-")
 		if err != nil {
-			fmt.Fprintln(stderr, "tenon drift:", err)
-			return 1
+			return failEnv(jsonl, stdout, stderr, "drift", err)
 		}
 		defer os.RemoveAll(cache)
 	}
@@ -265,8 +258,7 @@ func runDrift(args []string, stdout, stderr io.Writer) int {
 	if jsonl {
 		res := driftResult{Outcome: "ok", Agent: p.Name, Harness: driver.Harness(), Workspace: ws, Fingerprint: p.Fingerprint, Unchanged: unchanged}
 		if err := writeResult(stdout, res); err != nil {
-			fmt.Fprintln(stderr, "tenon drift:", err)
-			return 1
+			return failEnv(jsonl, stdout, stderr, "drift", err)
 		}
 		return 0
 	}

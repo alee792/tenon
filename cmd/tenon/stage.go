@@ -65,8 +65,7 @@ func runStagePrepare(args []string, stdout, stderr io.Writer) int {
 
 	executable, err := resolveExecutable()
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon stage:", err)
-		return 1
+		return failEnv(jsonl, stdout, stderr, "stage", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), prepareBudget)
@@ -80,8 +79,7 @@ func runStagePrepare(args []string, stdout, stderr io.Writer) int {
 	})
 	render(diags, jsonl, stdout, stderr)
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon stage:", err)
-		return 1
+		return failEnv(jsonl, stdout, stderr, "stage", err)
 	}
 	if result == nil || diags.HasErrors() {
 		writeGateFailed(jsonl, stdout, stderr, "stage")
@@ -95,8 +93,7 @@ func runStagePrepare(args []string, stdout, stderr io.Writer) int {
 		if err := writeResult(stdout, stageResult{
 			Outcome: "ok", Agent: result.Agent, Fingerprint: result.Fingerprint, Output: result.Output,
 		}); err != nil {
-			fmt.Fprintln(stderr, "tenon stage:", err)
-			return 1
+			return failEnv(jsonl, stdout, stderr, "stage", err)
 		}
 		return 0
 	}
@@ -160,8 +157,7 @@ func runStageVerify(args []string, stdout, stderr io.Writer) int {
 	}
 	if jsonl {
 		if err := writeResult(stdout, stageVerifyResult{Outcome: "ok", Artifact: *artifact}); err != nil {
-			fmt.Fprintln(stderr, "tenon stage verify:", err)
-			return 1
+			return failEnv(jsonl, stdout, stderr, "stage verify", err)
 		}
 		return 0
 	}

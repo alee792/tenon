@@ -430,10 +430,22 @@ source to name. This
 object is shaped differently from a diagnostic line — it has no `id`,
 `path`, or `rule` field — so a consumer parsing the stream must expect it
 as the stream's final, distinct object rather than mistake it for a
-malformed diagnostic. A failing run ends the stream the same way, with an
-object carrying only the outcome (`gate_failed`, or `drift` for a workspace
-that no longer matches), so a consumer reading objects until end of stream
-never infers failure from the absence of a summary. The `outcome` field is
+malformed diagnostic. A failing run ends the stream the same way, so a
+consumer reading objects until end of stream never infers failure from the
+absence of a summary. The outcome vocabulary is
+`ok / gate_failed / drift / blocked / error`: `gate_failed` when the source
+itself is invalid, `drift` when the workspace no longer matches, `blocked`
+when clean refuses to remove what it found, and `error` when the run could
+not complete for a reason that is not the source's fault — an unreadable
+pin set, an unwritable path, a closure that would not resolve, an os error
+mid-clean, a harness that would not start. That distinction is the point of
+the field: the first four are findings about the source or the workspace,
+which a loop scores; an `error` is a statement about the environment, which
+the loop retries or escalates and never scores. An `error` object carries
+an `error` field with the same prose stderr carries, bounded, so a consumer
+reading only the stream still learns what went wrong. The one deliberate
+silence is a usage error: exit 2, no outcome object, because a malformed
+invocation never ran. The `outcome` field is
 the authoritative machine signal; the process exit code is its coarse
 projection.
 
@@ -441,7 +453,13 @@ Two conventions apply to every command above and below. `--format` governs
 output rendering everywhere it appears — `prose` for people, `jsonl` for a
 consumer — and `TENON_HARNESS` supplies the default for an unset
 `--harness`, with an explicit flag always winning and an invalid
-environment value named honestly as coming from the environment. The one
+environment value named honestly as coming from the environment. On `check`
+that default is load-bearing rather than cosmetic: it selects the harness
+gate, so a `check` invoked with no `--harness` in a shell where
+`TENON_HARNESS` is set runs the full harness gate — pin verification and
+the generation dry-run — and not the portable one. Omitting `--harness`
+means the portable gate only when `TENON_HARNESS` is unset, which is what
+the flag's own help text says. The one
 exception is `clean`, which ignores `TENON_HARNESS` deliberately.
 
 `tenon drift AGENT --workspace WORKSPACE --harness <claude|codex>` reports
@@ -489,7 +507,14 @@ deliberately kept so a re-run can finish the job. An omitted
 `--harness` means every harness recorded in the workspace, which is why
 clean alone ignores `TENON_HARNESS`: an environment default would silently
 narrow a full reset. A workspace with no records succeeds trivially, and a
-record owning no files is still dropped.
+record owning no files is still dropped. That trivial success is the bare
+clean's alone. `clean --harness H` over a workspace holding no `apply-H.json`
+record exits 1 — `tenon clean: no claude record in WORKSPACE/.tenon; nothing
+to clean for that harness`, and the `error` outcome in jsonl — because the
+operator named a harness this workspace was never applied for, and
+reporting success would read as "that harness is now clean" for files tenon
+never wrote. It is an argument that does not match the environment, not a
+refusal to remove something, which is why it is `error` and not `blocked`.
 
 An apply record is durable state on disk, so the paths in it are an input
 like any other and are never trusted verbatim. A recorded path that is not

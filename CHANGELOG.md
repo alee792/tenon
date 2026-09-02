@@ -46,7 +46,13 @@ The first release, v0.1.0, ships the core described in
   when the source is gone. A file modified since its apply refuses the whole
   clean unless `--force` is passed; a file tenon never recorded is never
   touched either way; a workspace with no records succeeds trivially, and a
-  record owning no files is still dropped. Clean never trusts the paths in a
+  record owning no files is still dropped. That trivial success belongs to
+  the bare clean alone: `clean --harness H` over a workspace holding no
+  `apply-H.json` record exits 1 with
+  `tenon clean: no claude record in WORKSPACE/.tenon; nothing to clean for
+  that harness` and the `error` outcome, because the operator named a
+  harness this workspace was never applied for and reporting success would
+  read as "that harness is now clean". Clean never trusts the paths in a
   record verbatim: one that is not workspace-local, or one reached through a
   parent that is a symlink rather than a real directory, blocks the clean
   (`escapes-workspace`, `symlink-parent`) with or without `--force`, every
@@ -76,8 +82,20 @@ The first release, v0.1.0, ships the core described in
   distinct object carrying an `outcome` field: `ok` from check, apply,
   drift, clean, and stage (including `stage verify`), `gate_failed` when the
   source itself is invalid, `drift`
-  when the workspace no longer matches a fresh apply, and `blocked` when
-  clean refuses. Check's success object keeps `agent` and `fingerprint` and
+  when the workspace no longer matches a fresh apply, `blocked` when
+  clean refuses, and `error` when the run could not complete for a reason
+  that is not the source's fault — an unreadable pin set, an unwritable
+  path, a closure that would not resolve, an os error mid-clean, a harness
+  that would not start. The full vocabulary is
+  `ok / gate_failed / drift / blocked / error`. The first four are findings
+  a loop scores; `error` is a statement about the environment, which the
+  loop retries or escalates and never scores. An `error` object carries the
+  same prose stderr carries, bounded, so a consumer reading only the stream
+  still learns what went wrong. Usage errors remain the one deliberate
+  exception: exit 2, and no outcome object at all, because a malformed
+  invocation never ran. `tenon run`, whose stdout IS the wire event stream,
+  ends it the same way — `{"outcome":"ok"}` after a clean dispatch, and the
+  error or `gate_failed` object on failure. Check's success object keeps `agent` and `fingerprint` and
   adds `pins_written` when `--write-pins` wrote one; `outcome` is the only
   field every result object carries, and the rest vary by command. `stage`
   honors `--format` too, ending a jsonl run with its own result object

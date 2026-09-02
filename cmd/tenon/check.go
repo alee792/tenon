@@ -96,7 +96,7 @@ type (
 func runCheck(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("check", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	harnessName := fs.String("harness", "", "target harness: claude or codex (omit for the portable gate)")
+	harnessName := fs.String("harness", "", "target harness: claude or codex; omit (with TENON_HARNESS unset) for the portable gate")
 	mode := fs.String("format", "prose", "output rendering: prose or jsonl")
 	manifestPath := fs.String("pins", "", "supplied pin set to verify against the current runtime closure; fails closed naming the first drifted pin")
 	writePins := fs.String("write-pins", "", "write the resolved pin set for the current closure to FILE once the gate passes; requires --harness")
@@ -168,8 +168,7 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 
 	supplied, err := readSuppliedManifest(*manifestPath)
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon check:", err)
-		return 1
+		return failEnv(jsonl, stdout, stderr, "check", err)
 	}
 	// Writing pins without a supplied pin set loads for write, which accepts
 	// an instructions-free root: the gate mints the very pin set that later
@@ -182,8 +181,7 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 		p, diags, err = agentproject.LoadWithManifest(agent, expectedFingerprint(supplied))
 	}
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon check:", err)
-		return 1
+		return failEnv(jsonl, stdout, stderr, "check", err)
 	}
 	// A supplied pin set reports its closure drift before any generation, so
 	// check and apply fail identically.
@@ -194,15 +192,13 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 	if p != nil && !diags.HasErrors() && supplied != nil {
 		resolved, err = verifyManifestDiag(p, driver.Harness(), resolveIntegrationStoreBase(), supplied, diags)
 		if err != nil {
-			fmt.Fprintln(stderr, "tenon check:", err)
-			return 1
+			return failEnv(jsonl, stdout, stderr, "check", err)
 		}
 	}
 	if p != nil && !diags.HasErrors() {
 		workspace, err := filepath.Abs(agent)
 		if err != nil {
-			fmt.Fprintln(stderr, "tenon check:", err)
-			return 1
+			return failEnv(jsonl, stdout, stderr, "check", err)
 		}
 		// Tool preparation is the same work apply does, in the same order,
 		// against a throwaway cache that is deleted afterwards: check reports
@@ -211,8 +207,7 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 		if len(p.Tools) > 0 {
 			cache, err = os.MkdirTemp("", "tenon-tools-")
 			if err != nil {
-				fmt.Fprintln(stderr, "tenon check:", err)
-				return 1
+				return failEnv(jsonl, stdout, stderr, "check", err)
 			}
 			defer os.RemoveAll(cache)
 		}
@@ -223,8 +218,7 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 			// are identical; the files themselves are discarded.
 			executable, err := resolveExecutable()
 			if err != nil {
-				fmt.Fprintln(stderr, "tenon check:", err)
-				return 1
+				return failEnv(jsonl, stdout, stderr, "check", err)
 			}
 			_ = driver.Generate(p, apply.Target{
 				Workspace:        workspace,
@@ -255,8 +249,7 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 			storeBase := resolveIntegrationStoreBase()
 			current, err = manifest.Resolve(p, harnessValue, version.Version, manifestResolverFor(p, harnessValue, storeBase))
 			if err != nil {
-				fmt.Fprintln(stderr, "tenon check:", err)
-				return 1
+				return failEnv(jsonl, stdout, stderr, "check", err)
 			}
 		}
 		if *model != "" {
@@ -265,8 +258,7 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 			current.Harnesses[harnessValue] = pins
 		}
 		if err := writeFileAtomic(*writePins, current.Bytes()); err != nil {
-			fmt.Fprintln(stderr, "tenon check:", err)
-			return 1
+			return failEnv(jsonl, stdout, stderr, "check", err)
 		}
 		if !jsonl {
 			fmt.Fprintf(stdout, "wrote pins for agent %s (%s) to %s\n", p.Name, harnessValue, *writePins)
@@ -275,21 +267,18 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 
 	if emitFiles {
 		if err := emitFingerprintFiles(p, jsonl, stdout); err != nil {
-			fmt.Fprintln(stderr, "tenon check:", err)
-			return 1
+			return failEnv(jsonl, stdout, stderr, "check", err)
 		}
 	}
 	if emitCatalog {
 		if err := emitCapabilityCatalog(p, jsonl, stdout); err != nil {
-			fmt.Fprintln(stderr, "tenon check:", err)
-			return 1
+			return failEnv(jsonl, stdout, stderr, "check", err)
 		}
 	}
 
 	if jsonl {
 		if err := writeResult(stdout, checkResult{Outcome: "ok", Agent: p.Name, Fingerprint: p.Fingerprint, PinsWritten: *writePins}); err != nil {
-			fmt.Fprintln(stderr, "tenon check:", err)
-			return 1
+			return failEnv(jsonl, stdout, stderr, "check", err)
 		}
 		return 0
 	}

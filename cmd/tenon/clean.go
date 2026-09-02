@@ -56,18 +56,15 @@ func runClean(args []string, stdout, stderr io.Writer) int {
 
 	ws, err := filepath.Abs(*workspace)
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon clean:", err)
-		return 1
+		return failEnv(jsonl, stdout, stderr, "clean", err)
 	}
 	if info, err := os.Stat(ws); err != nil || !info.IsDir() {
-		fmt.Fprintf(stderr, "tenon clean: the workspace must be an existing directory: %s\n", *workspace)
-		return 1
+		return failEnvf(jsonl, stdout, stderr, "clean", "the workspace must be an existing directory: %s", *workspace)
 	}
 
 	harnesses, ignored, err := cleanHarnesses(ws, *harnessName)
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon clean:", err)
-		return 1
+		return failEnv(jsonl, stdout, stderr, "clean", err)
 	}
 	// A file in .tenon whose name merely looks like a record is reported and
 	// then left alone. --harness is validated strictly, and a discovered name
@@ -77,8 +74,7 @@ func runClean(args []string, stdout, stderr io.Writer) int {
 	for _, name := range ignored {
 		if jsonl {
 			if err := writeResult(stdout, cleanIgnoredEvent{Ignored: name, Reason: "unknown-harness"}); err != nil {
-				fmt.Fprintln(stderr, "tenon clean:", err)
-				return 1
+				return failEnv(jsonl, stdout, stderr, "clean", err)
 			}
 			continue
 		}
@@ -94,11 +90,23 @@ func runClean(args []string, stdout, stderr io.Writer) int {
 	for _, h := range harnesses {
 		record, err := apply.ReadRecord(ws, h)
 		if err != nil {
-			fmt.Fprintln(stderr, "tenon clean:", err)
-			return 1
+			return failEnv(jsonl, stdout, stderr, "clean", err)
 		}
 		if record == nil {
-			continue // no record for this harness: idempotent no-op
+			// A bare clean over a workspace holding no record for this
+			// harness is the idempotent no-op: nothing was asked for by
+			// name, and nothing is there. An explicit --harness is a
+			// different statement — the operator named a harness this
+			// workspace has never been applied for — so it is reported
+			// rather than silently succeeding, which would read as "the
+			// harness is now clean" when tenon never touched it. It is an
+			// argument that does not match the environment, not a refusal
+			// to remove something: the outcome is error, not blocked.
+			if *harnessName != "" {
+				return failEnvf(jsonl, stdout, stderr, "clean",
+					"no %s record in %s; nothing to clean for that harness", h, filepath.Join(ws, ".tenon"))
+			}
+			continue
 		}
 		// A record owning zero files still gets a plan: clean's promise is
 		// that it drops the record, and a record left behind by a clean that
@@ -116,13 +124,11 @@ func runClean(args []string, stdout, stderr io.Writer) int {
 		if jsonl {
 			for _, b := range blocked {
 				if err := writeResult(stdout, cleanBlockedEvent{Blocked: b.path, Reason: b.reason}); err != nil {
-					fmt.Fprintln(stderr, "tenon clean:", err)
-					return 1
+					return failEnv(jsonl, stdout, stderr, "clean", err)
 				}
 			}
 			if err := writeResult(stdout, cleanOutcomeBlocked{Outcome: "blocked"}); err != nil {
-				fmt.Fprintln(stderr, "tenon clean:", err)
-				return 1
+				return failEnv(jsonl, stdout, stderr, "clean", err)
 			}
 		} else {
 			ownership, containment := false, false
@@ -152,8 +158,7 @@ func runClean(args []string, stdout, stderr io.Writer) int {
 	if len(plans) == 0 {
 		if jsonl {
 			if err := writeResult(stdout, cleanOutcomeOK{Outcome: "ok", Removed: 0}); err != nil {
-				fmt.Fprintln(stderr, "tenon clean:", err)
-				return 1
+				return failEnv(jsonl, stdout, stderr, "clean", err)
 			}
 		} else {
 			fmt.Fprintln(stdout, "nothing to clean")
@@ -176,12 +181,10 @@ func runClean(args []string, stdout, stderr io.Writer) int {
 			if reason := removableNow(ws, path, p.record, *force); reason != "" {
 				if jsonl {
 					if err := writeResult(stdout, cleanBlockedEvent{Blocked: path, Reason: reason}); err != nil {
-						fmt.Fprintln(stderr, "tenon clean:", err)
-						return 1
+						return failEnv(jsonl, stdout, stderr, "clean", err)
 					}
 					if err := writeResult(stdout, cleanOutcomeBlocked{Outcome: "blocked"}); err != nil {
-						fmt.Fprintln(stderr, "tenon clean:", err)
-						return 1
+						return failEnv(jsonl, stdout, stderr, "clean", err)
 					}
 				} else {
 					fmt.Fprintf(stderr, "tenon clean: %s changed underneath the clean (%s); stopping after %d removed file(s), the workspace is partially cleaned\n", path, reason, total)
@@ -189,23 +192,20 @@ func runClean(args []string, stdout, stderr io.Writer) int {
 				return 1
 			}
 			if err := os.Remove(filepath.Join(ws, path)); err != nil && !os.IsNotExist(err) {
-				fmt.Fprintln(stderr, "tenon clean:", err)
-				return 1
+				return failEnv(jsonl, stdout, stderr, "clean", err)
 			}
 			apply.PruneEmptyParents(ws, path)
 			total++
 			if jsonl {
 				if err := writeResult(stdout, cleanRemovedEvent{Removed: path, Harness: p.harness}); err != nil {
-					fmt.Fprintln(stderr, "tenon clean:", err)
-					return 1
+					return failEnv(jsonl, stdout, stderr, "clean", err)
 				}
 			} else {
 				fmt.Fprintf(stdout, "removed %s\n", path)
 			}
 		}
 		if err := os.Remove(apply.RecordPath(ws, p.harness)); err != nil && !os.IsNotExist(err) {
-			fmt.Fprintln(stderr, "tenon clean:", err)
-			return 1
+			return failEnv(jsonl, stdout, stderr, "clean", err)
 		}
 		if !jsonl {
 			fmt.Fprintf(stdout, "cleaned %s: %d files\n", p.harness, len(p.toRemove))
@@ -221,8 +221,7 @@ func runClean(args []string, stdout, stderr io.Writer) int {
 
 	if jsonl {
 		if err := writeResult(stdout, cleanOutcomeOK{Outcome: "ok", Removed: total}); err != nil {
-			fmt.Fprintln(stderr, "tenon clean:", err)
-			return 1
+			return failEnv(jsonl, stdout, stderr, "clean", err)
 		}
 	}
 	return 0

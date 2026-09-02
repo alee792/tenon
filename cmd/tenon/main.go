@@ -64,6 +64,8 @@ const usage = `usage:
   tenon plugin update AGENT NAME --rev REV [--pins FILE]
   tenon plugin status AGENT [NAME] [--pins FILE]
   tenon version
+
+  TENON_HARNESS supplies --harness where it is omitted; the flag wins. clean ignores it.
 `
 
 func main() {
@@ -243,6 +245,61 @@ func writeGateFailed(jsonl bool, stdout, stderr io.Writer, cmd string) {
 	}
 }
 
+// errorOutcome is the final jsonl-mode object for a run that could not
+// complete for a reason that is not the source's fault: an unreadable pin
+// set, an unwritable path, a closure that would not resolve, an os error
+// mid-clean, a harness that would not start. It is deliberately NOT
+// gate_failed, drift, or blocked — those three are findings about the
+// source or the workspace, and a consumer scores them. An error is a
+// statement about the environment: the loop retries or escalates, and never
+// scores it. Error carries the same prose stderr already carries, bounded,
+// so a consumer reading only the stream still learns what went wrong.
+type errorOutcome struct {
+	Outcome string `json:"outcome"`
+	Error   string `json:"error"`
+}
+
+// okOutcome is the bare final object for a stream whose success carries
+// nothing else to report — run's, whose product is the event stream that
+// precedes it rather than a summary of it.
+type okOutcome struct {
+	Outcome string `json:"outcome"`
+}
+
+// noJSONL names the commands that have no machine-readable stream at all —
+// schedule trigger and schedule run, whose output is prose lifecycle lines,
+// and which therefore have no stream for an outcome object to terminate.
+// They still route their failures through failEnv so the classification of
+// every exit lives in one place.
+const noJSONL = false
+
+// writeErrorOutcome terminates the jsonl stream with that object. A no-op in
+// prose mode, where the prose on stderr is the whole report.
+func writeErrorOutcome(jsonl bool, stdout, stderr io.Writer, msg string) {
+	if !jsonl {
+		return
+	}
+	if err := writeResult(stdout, errorOutcome{Outcome: "error", Error: diagnostics.Bound(msg, 512)}); err != nil {
+		fmt.Fprintln(stderr, "tenon:", err)
+	}
+}
+
+// failEnv is the single environment-failure exit: the prose goes to stderr
+// exactly as it always has, the jsonl stream ends with the error outcome,
+// and the process exits 1. Every non-usage, non-gate failure path returns
+// through it so no jsonl stream can end in silence.
+func failEnv(jsonl bool, stdout, stderr io.Writer, cmd string, v any) int {
+	return failEnvf(jsonl, stdout, stderr, cmd, "%v", v)
+}
+
+// failEnvf is failEnv for a formatted message.
+func failEnvf(jsonl bool, stdout, stderr io.Writer, cmd, format string, args ...any) int {
+	msg := fmt.Sprintf(format, args...)
+	fmt.Fprintf(stderr, "tenon %s: %s\n", cmd, msg)
+	writeErrorOutcome(jsonl, stdout, stderr, msg)
+	return 1
+}
+
 // applyResult is the jsonl-mode result summary for a successful apply. Field
 // names follow apply.Record's existing json tags (snake_case). ManagedTools
 // names only the tools exposed through tenon's managed MCP boundary — native
@@ -299,13 +356,11 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 	}
 	supplied, err := readSuppliedManifest(manifestPath)
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon apply:", err)
-		return 1
+		return failEnv(jsonl, stdout, stderr, "apply", err)
 	}
 	p, diags, err := agentproject.LoadWithManifest(agent, expectedFingerprint(supplied))
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon apply:", err)
-		return 1
+		return failEnv(jsonl, stdout, stderr, "apply", err)
 	}
 	if p == nil || diags.HasErrors() {
 		render(diags, jsonl, stdout, stderr)
@@ -318,8 +373,7 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 	// .tenon, no generated files.
 	if supplied != nil {
 		if _, err := verifyManifestDiag(p, driver.Harness(), storeBase, supplied, diags); err != nil {
-			fmt.Fprintln(stderr, "tenon apply:", err)
-			return 1
+			return failEnv(jsonl, stdout, stderr, "apply", err)
 		}
 		if diags.HasErrors() {
 			render(diags, jsonl, stdout, stderr)
@@ -329,8 +383,7 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 	}
 	executable, err := resolveExecutable()
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon apply:", err)
-		return 1
+		return failEnv(jsonl, stdout, stderr, "apply", err)
 	}
 	// Tools are prepared and inspected once, before anything in the
 	// workspace is mutated: a project whose tools cannot be built is not
@@ -355,8 +408,7 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 	}
 	render(diags, jsonl, stdout, stderr)
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon apply:", err)
-		return 1
+		return failEnv(jsonl, stdout, stderr, "apply", err)
 	}
 	if result == nil || diags.HasErrors() {
 		writeGateFailed(jsonl, stdout, stderr, "apply")
@@ -374,8 +426,7 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 			ManagedTools: managedTools(p),
 		}
 		if err := writeResult(stdout, res); err != nil {
-			fmt.Fprintln(stderr, "tenon apply:", err)
-			return 1
+			return failEnv(jsonl, stdout, stderr, "apply", err)
 		}
 		return 0
 	}
@@ -651,32 +702,40 @@ func runRun(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 2
 	}
 
+	// run has no --format flag: its stdout IS the jsonl wire event stream,
+	// so every outcome object below is written unconditionally. The
+	// terminator carries only an outcome and none of a wire event's
+	// envelope fields (no schema_version, no sequence), which is exactly
+	// how every other command's final object is distinguished from the
+	// lines before it.
+	const jsonl = true
+
 	driver, err := newHarnessDriver(harnessName)
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon run:", err)
-		return 1
+		return failEnv(jsonl, stdout, stderr, "run", err)
 	}
 
 	supplied, err := readSuppliedManifest(*manifestPath)
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon run:", err)
-		return 1
+		return failEnv(jsonl, stdout, stderr, "run", err)
 	}
 	// Load the project and dispatch under the whole-process deadline.
 	p, diags, err := agentproject.LoadWithManifest(agent, expectedFingerprint(supplied))
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon run:", err)
-		return 1
+		return failEnv(jsonl, stdout, stderr, "run", err)
 	}
 	if p == nil || diags.HasErrors() {
+		// The source itself is invalid — the same gate check and apply run —
+		// so the stream ends gate_failed, not error: this is a finding about
+		// the source, not about the environment the run needed.
 		_ = diags.WriteProse(stderr)
 		fmt.Fprintln(stderr, "tenon run: the agent project is invalid; run tenon apply")
+		writeGateFailed(jsonl, stdout, stderr, "run")
 		return 1
 	}
 	// A supplied manifest gates the process open: on drift, open nothing.
 	if err := checkManifest(p, harnessName, resolveIntegrationStoreBase(), supplied); err != nil {
-		fmt.Fprintln(stderr, "tenon run:", err)
-		return 1
+		return failEnv(jsonl, stdout, stderr, "run", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
@@ -692,6 +751,12 @@ func runRun(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		TurnTimeout:  *turnTimeout,
 		Manifest:     manifestIdentity(supplied),
 	}); err != nil {
+		return failEnv(jsonl, stdout, stderr, "run", err)
+	}
+	// A dispatched run that ends cleanly ends its stream the way every other
+	// command does, so a consumer reading objects until end of stream never
+	// has to tell a finished run from a truncated one.
+	if err := writeResult(stdout, okOutcome{Outcome: "ok"}); err != nil {
 		fmt.Fprintln(stderr, "tenon run:", err)
 		return 1
 	}
@@ -780,8 +845,7 @@ func runScheduleTrigger(args []string, stdout, stderr io.Writer) int {
 
 	supplied, err := readSuppliedManifest(*manifestPath)
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon schedule trigger:", err)
-		return 1
+		return failEnv(noJSONL, stdout, stderr, "schedule trigger", err)
 	}
 	p, ok := loadScheduleProject(agent, "schedule trigger", expectedFingerprint(supplied), stderr)
 	if !ok {
@@ -795,20 +859,17 @@ func runScheduleTrigger(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	if target == nil {
-		fmt.Fprintf(stderr, "tenon schedule trigger: no schedule named %q in this agent\n", name)
-		return 1
+		return failEnvf(noJSONL, stdout, stderr, "schedule trigger", "no schedule named %q in this agent", name)
 	}
 
 	driver, err := newHarnessDriver(harnessName)
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon schedule trigger:", err)
-		return 1
+		return failEnv(noJSONL, stdout, stderr, "schedule trigger", err)
 	}
 	// Triggering requires the workspace to carry the applied setup: fail closed
 	// on stale or missing generated setup rather than dispatch against drift.
 	if err := apply.Verify(p, *workspace, harnessName); err != nil {
-		fmt.Fprintln(stderr, "tenon schedule trigger:", err)
-		return 1
+		return failEnv(noJSONL, stdout, stderr, "schedule trigger", err)
 	}
 	// Take the same exclusive lock the clock uses so a trigger never races a
 	// running clock or a concurrent trigger for the same setup — both would
@@ -816,8 +877,7 @@ func runScheduleTrigger(args []string, stdout, stderr io.Writer) int {
 	// held; the caller can retry.
 	release, err := schedule.Lock(*workspace, p.Name, harnessName)
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon schedule trigger:", err)
-		return 1
+		return failEnv(noJSONL, stdout, stderr, "schedule trigger", err)
 	}
 	defer release()
 
@@ -826,12 +886,10 @@ func runScheduleTrigger(args []string, stdout, stderr io.Writer) int {
 	// A supplied manifest gates this process open before any harness
 	// invocation, matching run and mcp serve: on drift, open nothing.
 	if err := checkManifest(p, harnessName, resolveIntegrationStoreBase(), supplied); err != nil {
-		fmt.Fprintln(stderr, "tenon schedule trigger:", err)
-		return 1
+		return failEnv(noJSONL, stdout, stderr, "schedule trigger", err)
 	}
 	if err := driver.Verify(ctx); err != nil {
-		fmt.Fprintf(stderr, "tenon schedule trigger: the %s harness could not be verified: %v\n", harnessName, err)
-		return 1
+		return failEnvf(noJSONL, stdout, stderr, "schedule trigger", "the %s harness could not be verified: %v", harnessName, err)
 	}
 
 	outcome, err := dispatch.RunTask(ctx, dispatch.Options{
@@ -845,8 +903,7 @@ func runScheduleTrigger(args []string, stdout, stderr io.Writer) int {
 		Manifest:     manifestIdentity(supplied),
 	}, *inputID, target.Prompt)
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon schedule trigger:", err)
-		return 1
+		return failEnv(noJSONL, stdout, stderr, "schedule trigger", err)
 	}
 
 	line := fmt.Sprintf("schedule=%q input_id=%q status=%s duplicate=%t",
@@ -910,8 +967,7 @@ func runScheduleRun(args []string, stdout, stderr io.Writer) int {
 
 	supplied, err := readSuppliedManifest(*manifestPath)
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon schedule run:", err)
-		return 1
+		return failEnv(noJSONL, stdout, stderr, "schedule run", err)
 	}
 	p, ok := loadScheduleProject(agent, "schedule run", expectedFingerprint(supplied), stderr)
 	if !ok {
@@ -919,8 +975,7 @@ func runScheduleRun(args []string, stdout, stderr io.Writer) int {
 	}
 	driver, err := newHarnessDriver(harnessName)
 	if err != nil {
-		fmt.Fprintln(stderr, "tenon schedule run:", err)
-		return 1
+		return failEnv(noJSONL, stdout, stderr, "schedule run", err)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -945,8 +1000,7 @@ func runScheduleRun(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	if err := schedule.Run(ctx, opts); err != nil {
-		fmt.Fprintln(stderr, "tenon schedule run:", err)
-		return 1
+		return failEnv(noJSONL, stdout, stderr, "schedule run", err)
 	}
 	return 0
 }

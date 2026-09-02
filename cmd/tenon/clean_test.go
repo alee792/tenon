@@ -155,7 +155,14 @@ func TestCleanRefusesModifiedFilesUnlessForced(t *testing.T) {
 }
 
 // TestCleanOnUnappliedWorkspaceIsANoOp proves the uninstall idempotency
-// property: an empty or never-applied workspace succeeds trivially.
+// property: an empty or never-applied workspace succeeds trivially — and
+// that the idempotency is a property of the BARE clean only. A bare clean
+// asks for whatever is there and finds nothing, which is success. A clean
+// naming a --harness asserts that harness was applied here, and a workspace
+// holding no such record contradicts the assertion: succeeding silently
+// would read as "that harness is now clean" for a harness tenon never
+// touched. It is an argument that does not match the environment, so the
+// outcome is error rather than blocked — nothing was refused.
 func TestCleanOnUnappliedWorkspaceIsANoOp(t *testing.T) {
 	ws := t.TempDir()
 	var stdout, stderr bytes.Buffer
@@ -164,6 +171,53 @@ func TestCleanOnUnappliedWorkspaceIsANoOp(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "nothing to clean") {
 		t.Fatalf("clean must report nothing to clean: %q", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"clean", "--workspace", ws, "--harness", "claude"}, nil, &stdout, &stderr); code != 1 {
+		t.Fatalf("clean --harness on a workspace with no such record exit %d, want 1\nstdout: %s\nstderr: %s",
+			code, stdout.String(), stderr.String())
+	}
+	want := "tenon clean: no claude record in " + filepath.Join(ws, ".tenon") + "; nothing to clean for that harness"
+	if !strings.Contains(stderr.String(), want) {
+		t.Fatalf("clean must name the missing record and the directory it looked in\nwant: %s\ngot:  %s", want, stderr.String())
+	}
+}
+
+// TestCleanNamingAHarnessWithNoRecordEndsWithAnError proves that same
+// mismatch ends the jsonl stream with the environment outcome, not with
+// blocked: blocked means clean refused to remove something it found, and
+// here there was nothing to find.
+func TestCleanNamingAHarnessWithNoRecordEndsWithAnError(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	ws := t.TempDir()
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("apply exit %d: %s", code, stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"clean", "--workspace", ws, "--harness", "codex", "--format", "jsonl"}, nil, &stdout, &stderr); code != 1 {
+		t.Fatalf("clean --harness codex over a claude-only workspace exit %d, want 1\nstdout: %s\nstderr: %s",
+			code, stdout.String(), stderr.String())
+	}
+	final := finalOutcome(t, stdout.String())
+	if final.Outcome != "error" {
+		t.Fatalf("outcome = %q, want error: %s", final.Outcome, stdout.String())
+	}
+	if !strings.Contains(final.Error, "no codex record in") {
+		t.Fatalf("the error must name the harness it found no record for: %q", final.Error)
+	}
+	// The claude record and its files are untouched: a mismatch reports, it
+	// never removes something else instead.
+	if _, err := os.Stat(filepath.Join(ws, "CLAUDE.md")); err != nil {
+		t.Fatalf("a codex-scoped clean must not touch claude-owned files: %v", err)
+	}
+	if _, err := os.Stat(apply.RecordPath(ws, "claude")); err != nil {
+		t.Fatalf("a codex-scoped clean must not touch the claude record: %v", err)
 	}
 }
 

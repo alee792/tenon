@@ -149,16 +149,51 @@ variable may supply a missing argument; it may not shrink the scope of a
 removal.
 
 **The outcome field is the authoritative machine signal.** Every jsonl
-stream ends with one distinct object carrying `outcome`: `ok` from check,
-apply, drift, and clean; `gate_failed` when the source itself is invalid;
-`drift` when the source is fine but the workspace no longer matches;
-`blocked` when clean refuses. Previously a failing run simply stopped, and a
+stream ends with one distinct object carrying `outcome`, from the full
+vocabulary `ok / gate_failed / drift / blocked / error`: `ok` from check,
+apply, drift, clean, stage, and run; `gate_failed` when the source itself is
+invalid; `drift` when the source is fine but the workspace no longer
+matches; `blocked` when clean refuses; `error` when the run could not
+complete at all. Previously a failing run simply stopped, and a
 consumer had to infer failure from a summary that never came — an absence
 that is indistinguishable from a truncated pipe. Exit codes remain, and
 remain useful, but they are a coarse projection of the outcome: one integer
 cannot carry both what happened and what was produced, and a loop that must
 distinguish "discard this mutation" from "the environment moved" should read
 a field, not a number.
+
+**`error` is that second thing, and it is not a score.** The rule is:
+`error` means the run could not complete for a reason that is not the
+source's fault — an unreadable pin set, an unwritable cache or pin path, a
+closure that would not resolve, an os error partway through a clean, a
+harness or dispatch that would not start. The loop retries or escalates it;
+it never scores it. The other four outcomes are findings about a source or a
+workspace, and a loop that treated an unwritable temp directory as a failing
+candidate would be scoring its own filesystem. This is also what closes the
+gap the paragraph above opened: the promise was that *every* jsonl stream
+ends with an outcome object, but environment failures used to print prose to
+stderr and end the stream with nothing at all — precisely the silence the
+decision exists to abolish, arriving on exactly the paths a machine consumer
+is least able to interpret. The prose stays on stderr, unchanged; the object
+carries the same text, bounded, so a consumer reading only the stream still
+learns what went wrong. Usage errors keep emitting nothing (exit 2): a
+malformed invocation never ran, and an outcome object would report on a run
+that did not happen. `run` is included, its stdout being the wire event
+stream itself: it ends with `{"outcome":"ok"}` after a clean dispatch and
+with the error or `gate_failed` object otherwise, in each case an object
+carrying none of a wire event's envelope fields, which is how every other
+command's terminator is told apart from the lines before it. `schedule` has
+no machine-readable stream to terminate, so it emits no outcome object at
+all.
+
+**A named `--harness` clean asserts that harness was applied.** A bare
+`clean` over a workspace with no records is the idempotent no-op it always
+was. `clean --harness H` over a workspace holding no `apply-H.json` record
+is not: the operator asserted something about the workspace that is false,
+and exiting 0 would report "that harness is now clean" about files tenon
+never wrote. It exits 1 with the `error` outcome — an argument that does not
+match the environment, not a refusal to remove something, which is what
+`blocked` is for.
 
 ## Consequences
 
