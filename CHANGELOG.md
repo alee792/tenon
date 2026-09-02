@@ -111,16 +111,23 @@ The first release, v0.1.0, ships the core described in
   error, exit 2 with no outcome object.
 
 - A failing gate now names the bytes that failed: the `gate_failed` object
-  from `check`, `apply`, `drift`, and `run` carries `source_digest`, a
-  `sha256:` content hash over the authored files, so a loop that discards a
-  rejected candidate can still say which candidate it discarded. It is not a
+  from `check`, `apply`, `drift`, `stage`, and `run` carries `source_digest`,
+  a `sha256:` content hash over the authored files, so a loop that discards a
+  rejected candidate can still say which candidate it discarded. (`stage
+  verify` carries none: it verifies a staged tree and has no source to
+  name.) It is not a
   fingerprint and must never be treated as one — a digest names bytes, a
   fingerprint names a configuration the gate proved (ADR 0025) — and the two
   are separated by construction: the digest is hashed under its own domain
-  prefix, so a digest and a fingerprint over byte-identical content differ.
+  prefix, so a source's digest always differs from that tree's fingerprint.
+  Both render as `sha256:` and 64 hex characters, so the field a value
+  arrives in carries the meaning, never the value alone.
   A passing run carries a fingerprint and no digest; a failing one the
-  reverse. The digest excludes tenon's own records and the files a fresh
-  apply generates, and is omitted only when the agent root cannot be read.
+  reverse. The digest covers exactly the authored inputs the loader reads —
+  `instructions.md`, the component directories, and the native tool
+  dependency files at the agent root — with each file's executable bit, so
+  generated output, `.git/`, and vendored dependency trees cannot move it.
+  It is omitted only when the agent root cannot be read.
 
 - `--emit catalog` reports an MCP entry's `transport` in one vocabulary
   whichever side declared the server — `stdio`, `streamable-http`, or

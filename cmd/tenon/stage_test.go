@@ -297,7 +297,13 @@ func TestStageHonorsFormat(t *testing.T) {
 	if code := run([]string{"stage", broken, "--harness", "codex", "--output", filepath.Join(base, "broken"), "--format", "jsonl"}, nil, &stdout, &stderr); code == 0 {
 		t.Fatal("a failing gate must not stage")
 	}
-	if !strings.HasSuffix(strings.TrimSpace(stdout.String()), `{"outcome":"gate_failed"}`) {
+	// The terminator carries the digest that names the bytes that failed,
+	// exactly as check, drift, and apply carry it.
+	failed := finalOutcome(t, stdout.String())
+	if failed.Outcome != "gate_failed" {
 		t.Fatalf("a failing stage must end with gate_failed: %q", stdout.String())
+	}
+	if !strings.HasPrefix(failed.SourceDigest, "sha256:") {
+		t.Fatalf("a failing stage must name the bytes that failed, got %q", failed.SourceDigest)
 	}
 }

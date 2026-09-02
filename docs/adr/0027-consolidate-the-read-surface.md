@@ -201,15 +201,23 @@ gate; a hash of a source that does not load carries none of that proof, and
 letting the two share a name — or a value — would dilute exactly the
 property the fingerprint exists for. So the two are separated by
 construction, not by convention: the digest is hashed under its own domain
-prefix, so a digest and a fingerprint over byte-identical content differ.
+prefix, so a source's digest always differs from that tree's fingerprint.
+The separation is in the values, not in their appearance — both render as
+`sha256:` and 64 hex characters, and a bare string cannot be classified by
+looking at it; the field a value arrives in is what carries the meaning.
 The fields never appear together either — a passing run carries a
 fingerprint and no digest, a failing one the reverse.
 
 It is computed from whatever the loader inventoried, and otherwise by
-walking the authored files under the agent root, excluding tenon's own
-records and the output a fresh apply generates (the default workspace is the
-agent directory itself, so an applied source sits beside generated files
-that have nothing to do with what was authored). Both paths are
+walking the agent root for exactly the names the loader itself reads:
+`instructions.md`, the component directories, and the native tool
+dependency files the fingerprint inventories at the root. That allowlist is
+the point. A walk that hashed everything it was not told to skip would fold
+in the output a fresh apply generates (the default workspace is the agent
+directory itself), and worse, `.git/` — which mutates on every fetch and
+checkout, so the digest of an unchanged source would change under it.
+Each entry contributes its path, its content hash, and its executable bit,
+the same authored intent the fingerprint covers. Both paths are
 deterministic for a given tree. The field is omitted only when the root
 itself cannot be read: there are no bytes to name, and a placeholder would
 be a name for nothing.

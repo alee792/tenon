@@ -82,7 +82,12 @@ func runStagePrepare(args []string, stdout, stderr io.Writer) int {
 		return failEnv(jsonl, stdout, stderr, "stage", err)
 	}
 	if result == nil || diags.HasErrors() {
-		writeGateFailed(jsonl, stdout, stderr, "stage", "")
+		// The rejected source is attributable exactly as check, drift, and
+		// apply make it: the digest names the bytes that failed the gate.
+		// stage has no loaded project in hand here, so the digest comes from
+		// the authored-file walk, which is the same path those commands take
+		// when the loader never got as far as an inventory.
+		writeGateFailed(jsonl, stdout, stderr, "stage", sourceDigest(agent, nil))
 		return 1
 	}
 	// --format governs all output, not only diagnostics: in jsonl mode the

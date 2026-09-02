@@ -7,7 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/alee792/tenon/internal/agentproject"
@@ -15,24 +15,60 @@ import (
 
 // sourceDigestDomain is the domain-separation prefix every source digest is
 // hashed under. It exists so a digest and a fingerprint of byte-identical
-// content can never collide: a fingerprint names a configuration the gate
-// proved, a digest names bytes that failed it, and the two must be
-// distinguishable by value alone and not only by the field they arrive in.
+// content differ: a fingerprint names a configuration the gate proved, a
+// digest names bytes that failed it, and no source can ever produce the same
+// value under both names. The two are not told apart by inspecting a bare
+// string — both render as sha256:<64 hex> — but by the field the value
+// arrives in; the domain prefix is what guarantees the values themselves
+// cannot coincide.
 const sourceDigestDomain = "tenon-source-digest\n"
 
-// digestExcluded are the top-level names a fresh apply generates into a
-// workspace, plus tenon's own record directory. The default workspace is the
-// agent directory itself, so a source that has been applied in place carries
-// generated output beside its authored files; a digest that included them
-// would change when nothing authored changed. Authored harness files live
-// under harness/ in the source and are not affected.
-var digestExcluded = map[string]bool{
-	".tenon":    true,
-	".claude":   true,
-	".codex":    true,
-	".mcp.json": true,
-	"CLAUDE.md": true,
-	"AGENTS.md": true,
+// digestSourceNames are the top-level names the fallback walk digests: the
+// authored inputs the loader itself reads, and nothing else. It mirrors
+// internal/agentproject — instructions.md and the component directories
+// loaded by loadSkills, loadPlugins, loadSubagents, loadTools,
+// loadHarnessFiles, loadConnections (mcpAuthoredDir), and loadSchedules —
+// so the two stay in sync; a name added there belongs here too.
+//
+// It is an allowlist rather than a list of exclusions on purpose. A digest
+// that hashed everything it was not told to skip would fold in .git/,
+// node_modules/, .venv/, dist/, and editor droppings, and .git alone mutates
+// on every fetch and checkout — which would destroy the determinism the
+// digest exists to provide.
+var digestSourceNames = map[string]bool{
+	"instructions.md": true,
+	"skills":          true,
+	"tools":           true,
+	"subagents":       true,
+	"plugins":         true,
+	"mcp":             true,
+	"schedules":       true,
+	"harnesses":       true,
+}
+
+// digestDependencyFiles are the native tool dependency files at the agent
+// root that the fingerprint inventories, mirroring
+// internal/agentproject.toolDependencySpecs (typescript: deno.json,
+// deno.lock; python: pyproject.toml, uv.lock; go: go.mod, go.sum). The walk
+// digests each when present without asking which languages the tools use:
+// it runs on sources that did not load far enough to have an answer.
+var digestDependencyFiles = map[string]bool{
+	"deno.json":      true,
+	"deno.lock":      true,
+	"pyproject.toml": true,
+	"uv.lock":        true,
+	"go.mod":         true,
+	"go.sum":         true,
+}
+
+// digestEntry is one authored file's contribution to a source digest: its
+// relative path, its content hash, and its executable bit, which the
+// fingerprint also covers because the bit is authored intent and a tool that
+// gained or lost it is a different source.
+type digestEntry struct {
+	path       string
+	hash       string
+	executable bool
 }
 
 // sourceDigest is a content hash over the authored files of the agent source
@@ -44,17 +80,18 @@ var digestExcluded = map[string]bool{
 //
 // The digest is computed from the loader's own inventory when there is one —
 // p.FingerprintEntries, which the loader populates for every source it got
-// far enough to inventory — and otherwise by walking regular files under
-// root. Both are deterministic for a given tree; the two are not required to
-// agree with each other, because a source that fails before inventory and
-// one that fails after are different states of the world and neither's
-// digest is ever compared to the other's. The returned string is empty only
-// when root itself cannot be read, in which case the caller omits the field.
+// far enough to inventory — and otherwise by walking the authored files
+// under root. Both are deterministic for a given tree; the two are not
+// required to agree with each other, because a source that fails before
+// inventory and one that fails after are different states of the world and
+// neither's digest is ever compared to the other's. The returned string is
+// empty only when root itself cannot be read, in which case the caller omits
+// the field.
 func sourceDigest(root string, p *agentproject.Project) string {
-	var entries [][2]string
+	var entries []digestEntry
 	if p != nil && len(p.FingerprintEntries) > 0 {
 		for _, e := range p.FingerprintEntries {
-			entries = append(entries, [2]string{e.Path, e.Hash})
+			entries = append(entries, digestEntry{path: e.Path, hash: e.Hash, executable: e.Executable})
 		}
 	} else {
 		walked, ok := walkSourceFiles(root)
@@ -63,26 +100,55 @@ func sourceDigest(root string, p *agentproject.Project) string {
 		}
 		entries = walked
 	}
-	sort.Slice(entries, func(i, j int) bool {
-		if entries[i][0] != entries[j][0] {
-			return entries[i][0] < entries[j][0]
-		}
-		return entries[i][1] < entries[j][1]
-	})
 	h := sha256.New()
-	_, _ = io.WriteString(h, sourceDigestDomain)
-	for _, e := range entries {
-		fmt.Fprintf(h, "%s\n%s\n", e[0], e[1])
-	}
+	_, _ = io.WriteString(h, digestPreimage(entries))
 	return fmt.Sprintf("sha256:%x", h.Sum(nil))
 }
 
-// walkSourceFiles lists every regular file under root as a (relative path,
-// content hash) pair, excluding generated output. A file that cannot be read
-// is recorded under a fixed marker rather than skipped, so the digest of an
-// unreadable tree is still defined and still stable across runs. It reports
-// false only when root itself cannot be walked at all.
-func walkSourceFiles(root string) ([][2]string, bool) {
+// digestPreimage is the exact material a source digest hashes: the domain
+// prefix, then every entry's path, content hash, and executable intent in a
+// total order. It is a named function so the domain separation is testable
+// as the property it is, rather than only observable through the two hashes
+// it keeps apart.
+func digestPreimage(entries []digestEntry) string {
+	entries = slices.Clone(entries)
+	slices.SortFunc(entries, func(a, b digestEntry) int {
+		if c := strings.Compare(a.path, b.path); c != 0 {
+			return c
+		}
+		if c := strings.Compare(a.hash, b.hash); c != 0 {
+			return c
+		}
+		if a.executable == b.executable {
+			return 0
+		}
+		if !a.executable {
+			return -1
+		}
+		return 1
+	})
+	var b strings.Builder
+	b.WriteString(sourceDigestDomain)
+	for _, e := range entries {
+		mode := "-"
+		if e.executable {
+			mode = "x"
+		}
+		fmt.Fprintf(&b, "%s\n%s\n%s\n", e.path, e.hash, mode)
+	}
+	return b.String()
+}
+
+// walkSourceFiles lists every authored regular file under root as a digest
+// entry, taking only the names in digestSourceNames and
+// digestDependencyFiles: everything else at the root — tenon's own records,
+// the output a fresh apply generates into the default workspace, .git/,
+// vendored dependency trees, editor droppings — is not authored source and
+// must not move a digest. A file that cannot be read is recorded under a
+// fixed marker rather than skipped, so the digest of an unreadable tree is
+// still defined and still stable across runs. It reports false only when
+// root itself cannot be walked at all.
+func walkSourceFiles(root string) ([]digestEntry, bool) {
 	abs, err := filepath.Abs(root)
 	if err != nil {
 		return nil, false
@@ -90,7 +156,7 @@ func walkSourceFiles(root string) ([][2]string, bool) {
 	if info, err := os.Stat(abs); err != nil || !info.IsDir() {
 		return nil, false
 	}
-	var entries [][2]string
+	var entries []digestEntry
 	walkErr := filepath.WalkDir(abs, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if path == abs {
@@ -106,7 +172,8 @@ func walkSourceFiles(root string) ([][2]string, bool) {
 		if rel == "." {
 			return nil
 		}
-		if digestExcluded[strings.SplitN(rel, "/", 2)[0]] {
+		top := strings.SplitN(rel, "/", 2)[0]
+		if !digestSourceNames[top] && !(top == rel && digestDependencyFiles[top]) {
 			if d.IsDir() {
 				return fs.SkipDir
 			}
@@ -115,12 +182,15 @@ func walkSourceFiles(root string) ([][2]string, bool) {
 		if d.IsDir() || !d.Type().IsRegular() {
 			return nil
 		}
-		content, readErr := os.ReadFile(path)
-		if readErr != nil {
-			entries = append(entries, [2]string{rel, "unreadable"})
-			return nil
+		entry := digestEntry{path: rel, hash: "unreadable"}
+		if info, statErr := d.Info(); statErr == nil {
+			entry.executable = info.Mode().Perm()&0o111 != 0
 		}
-		entries = append(entries, [2]string{rel, fmt.Sprintf("sha256:%x", sha256.Sum256(content))})
+		content, readErr := os.ReadFile(path)
+		if readErr == nil {
+			entry.hash = fmt.Sprintf("sha256:%x", sha256.Sum256(content))
+		}
+		entries = append(entries, entry)
 		return nil
 	})
 	if walkErr != nil {

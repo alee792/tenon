@@ -438,10 +438,17 @@ failed, so a rejected candidate is attributable without a consumer hashing
 the tree itself. It is explicitly not a fingerprint and never joins with
 one: a digest names bytes, a fingerprint names a configuration the gate
 proved. The two are separated by construction — the digest is hashed under
-its own domain prefix, so a digest and a fingerprint over byte-identical
-content differ — and they never appear together, a passing run carrying a
-fingerprint and no digest and a failing one the reverse. The field is
-omitted only when the agent root itself cannot be read. The outcome
+its own domain prefix, so a source's digest always differs from that tree's
+fingerprint — but both render as `sha256:` and 64 hex characters, so what
+tells them apart is the field a value arrives in, never the value alone.
+They never appear together: a passing run carries a fingerprint and no
+digest, a failing one the reverse. `check`, `apply`, `drift`, `stage`, and
+`run` all carry it on a gate failure; `stage verify` does not, having no
+source to name. The digest covers the authored inputs the loader itself
+reads — `instructions.md`, the component directories, and the native tool
+dependency files at the agent root — and nothing else, so generated output,
+version-control state, and vendored dependency trees cannot move it. The
+field is omitted only when the agent root itself cannot be read. The outcome
 vocabulary is
 `ok / gate_failed / drift / blocked / error`: `gate_failed` when the source
 itself is invalid, `drift` when the workspace no longer matches, `blocked`

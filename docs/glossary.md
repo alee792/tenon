@@ -32,8 +32,11 @@ growth requires stated payment.
   authored files that a failing gate reports as `source_digest`, so a
   rejected candidate is attributable. It is deliberately not a fingerprint:
   a digest names bytes, a fingerprint names a configuration the gate proved.
-  A consumer joins failures by digest and successes by fingerprint, and the
-  two can never collide — the digest is hashed under its own domain prefix.
+  A consumer joins failures by digest and successes by fingerprint: the
+  digest is hashed under its own domain prefix, so a source's digest always
+  differs from that tree's fingerprint. Both render as `sha256:` plus 64 hex
+  characters, so the field a value arrives in carries the meaning, never the
+  value alone.
 - **Improvement loop** — an agent or optimizer revising an agent's files; an
   author coequal with the person. Tenon is its substrate — the gate
   (`tenon check`), reproducible application, and attribution — never the
