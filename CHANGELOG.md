@@ -110,6 +110,18 @@ The first release, v0.1.0, ships the core described in
   is a regular file is neither drift nor a gate failure: it is a usage
   error, exit 2 with no outcome object.
 
+- A failing gate now names the bytes that failed: the `gate_failed` object
+  from `check`, `apply`, `drift`, and `run` carries `source_digest`, a
+  `sha256:` content hash over the authored files, so a loop that discards a
+  rejected candidate can still say which candidate it discarded. It is not a
+  fingerprint and must never be treated as one — a digest names bytes, a
+  fingerprint names a configuration the gate proved (ADR 0025) — and the two
+  are separated by construction: the digest is hashed under its own domain
+  prefix, so a digest and a fingerprint over byte-identical content differ.
+  A passing run carries a fingerprint and no digest; a failing one the
+  reverse. The digest excludes tenon's own records and the files a fresh
+  apply generates, and is omitted only when the agent root cannot be read.
+
 - `--emit catalog` reports an MCP entry's `transport` in one vocabulary
   whichever side declared the server — `stdio`, `streamable-http`, or
   `installed` — so an authored connection's kind and a plugin-declared

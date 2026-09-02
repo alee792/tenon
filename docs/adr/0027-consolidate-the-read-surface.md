@@ -186,6 +186,34 @@ command's terminator is told apart from the lines before it. `schedule` has
 no machine-readable stream to terminate, so it emits no outcome object at
 all.
 
+**A failed gate emits a `source_digest`.** Rejected candidates are data: a
+loop that discards a mutation still wants to name it, and until now the only
+name a failed candidate had was the identifier set that rejected it. The
+`gate_failed` object now carries `source_digest`, a content hash over the
+authored files, so a rejected candidate is attributable without a loop
+hashing the tree itself.
+
+The rule that keeps it honest is the naming: **a digest names bytes, a
+fingerprint names a proven configuration.** A consumer joins failures by
+digest and successes by fingerprint, and never confuses the two. The
+fingerprint's whole value is that ADR 0025 mints it only from a passing
+gate; a hash of a source that does not load carries none of that proof, and
+letting the two share a name — or a value — would dilute exactly the
+property the fingerprint exists for. So the two are separated by
+construction, not by convention: the digest is hashed under its own domain
+prefix, so a digest and a fingerprint over byte-identical content differ.
+The fields never appear together either — a passing run carries a
+fingerprint and no digest, a failing one the reverse.
+
+It is computed from whatever the loader inventoried, and otherwise by
+walking the authored files under the agent root, excluding tenon's own
+records and the output a fresh apply generates (the default workspace is the
+agent directory itself, so an applied source sits beside generated files
+that have nothing to do with what was authored). Both paths are
+deterministic for a given tree. The field is omitted only when the root
+itself cannot be read: there are no bytes to name, and a placeholder would
+be a name for nothing.
+
 **A named `--harness` clean asserts that harness was applied.** A bare
 `clean` over a workspace with no records is the idempotent no-op it always
 was. `clean --harness H` over a workspace holding no `apply-H.json` record
@@ -217,9 +245,6 @@ match the environment, not a refusal to remove something, which is what
 
 ## Open questions
 
-Recorded rather than settled; neither is implemented, and neither blocks the
-decisions above.
-
 **Should `pins` be `lock`?** The case for: `lock` is universally
 recognized, and it carries the fail-closed connotation the file actually
 has — a lockfile is the thing you verify against, and drifting from it is an
@@ -234,15 +259,3 @@ stays open because the recognition argument is real; if it is reopened, it
 should be reopened before the identifier stability window closes, or not at
 all.
 
-**Should a failed gate emit a `source_digest`?** Rejected candidates are
-data: a loop that discards a mutation still wants to name it, and today the
-only name a failed candidate has is the identifier set that rejected it. A
-content hash over the authored files, emitted alongside `gate_failed`, would
-make rejected candidates attributable without a loop hashing the tree
-itself. The requirement is that it must not be — and must not be called — a
-fingerprint: the fingerprint's whole value is that it is gate-proven, and a
-digest of a source that does not load would dilute exactly that property if
-the two were ever confused. Hence the deliberately different name, and
-hence the deliberate decision not to implement it yet: it is a new
-machine-facing identity, and one is enough until a real consumer asks for
-the second.

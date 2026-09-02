@@ -235,12 +235,14 @@ func render(diags *diagnostics.List, jsonl bool, stdout, stderr io.Writer) {
 // writeGateFailed terminates the jsonl stream with check's own gate_failed
 // object (defined in check.go) when apply's gate rejects the project — the
 // same gate check runs, so apply's failure stream ends exactly as check's
-// does. A no-op in prose mode.
-func writeGateFailed(jsonl bool, stdout, stderr io.Writer, cmd string) {
+// does. digest is the source digest naming the bytes that failed, empty
+// when there is no source to name (stage verify) or when the root itself
+// could not be read. A no-op in prose mode.
+func writeGateFailed(jsonl bool, stdout, stderr io.Writer, cmd, digest string) {
 	if !jsonl {
 		return
 	}
-	if err := writeResult(stdout, gateFailedResult{Outcome: "gate_failed"}); err != nil {
+	if err := writeResult(stdout, gateFailedResult{Outcome: "gate_failed", SourceDigest: digest}); err != nil {
 		fmt.Fprintln(stderr, "tenon "+cmd+":", err)
 	}
 }
@@ -364,7 +366,7 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 	}
 	if p == nil || diags.HasErrors() {
 		render(diags, jsonl, stdout, stderr)
-		writeGateFailed(jsonl, stdout, stderr, "apply")
+		writeGateFailed(jsonl, stdout, stderr, "apply", sourceDigest(agent, p))
 		return 1
 	}
 	storeBase := resolveIntegrationStoreBase()
@@ -377,7 +379,7 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 		}
 		if diags.HasErrors() {
 			render(diags, jsonl, stdout, stderr)
-			writeGateFailed(jsonl, stdout, stderr, "apply")
+			writeGateFailed(jsonl, stdout, stderr, "apply", sourceDigest(agent, p))
 			return 1
 		}
 	}
@@ -390,7 +392,7 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 	// half-applied.
 	if !prepareTools(p, workspace, "", diags) {
 		render(diags, jsonl, stdout, stderr)
-		writeGateFailed(jsonl, stdout, stderr, "apply")
+		writeGateFailed(jsonl, stdout, stderr, "apply", sourceDigest(agent, p))
 		return 1
 	}
 
@@ -411,7 +413,7 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 		return failEnv(jsonl, stdout, stderr, "apply", err)
 	}
 	if result == nil || diags.HasErrors() {
-		writeGateFailed(jsonl, stdout, stderr, "apply")
+		writeGateFailed(jsonl, stdout, stderr, "apply", sourceDigest(agent, p))
 		return 1
 	}
 	if jsonl {
@@ -727,10 +729,10 @@ func runRun(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if p == nil || diags.HasErrors() {
 		// The source itself is invalid — the same gate check and apply run —
 		// so the stream ends gate_failed, not error: this is a finding about
-		// the source, not about the environment the run needed.
+		// the source, and the digest names the bytes it was found in.
 		_ = diags.WriteProse(stderr)
 		fmt.Fprintln(stderr, "tenon run: the agent project is invalid; run tenon apply")
-		writeGateFailed(jsonl, stdout, stderr, "run")
+		writeGateFailed(jsonl, stdout, stderr, "run", sourceDigest(agent, p))
 		return 1
 	}
 	// A supplied manifest gates the process open: on drift, open nothing.

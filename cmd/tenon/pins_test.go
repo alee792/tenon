@@ -312,8 +312,8 @@ func TestWritePinsNeverWritesWhenTheGateFails(t *testing.T) {
 	if code := run([]string{"check", agent, "--harness", "claude", "--write-pins", path, "--format", "jsonl"}, nil, &out, &errb); code != 1 {
 		t.Fatalf("a failing gate must exit 1, got %d: %s", code, out.String())
 	}
-	if !strings.HasSuffix(strings.TrimSpace(out.String()), `{"outcome":"gate_failed"}`) {
-		t.Fatalf("the stream must end with gate_failed: %q", out.String())
+	if !strings.Contains(strings.TrimSpace(out.String()), `{"outcome":"gate_failed","source_digest":"sha256:`) {
+		t.Fatalf("the stream must end with gate_failed and its source digest: %q", out.String())
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("a failing gate must write no pin set: %v", err)

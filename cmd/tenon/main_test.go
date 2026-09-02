@@ -639,11 +639,26 @@ func parseDiagLines(t *testing.T, out string) []testDiag {
 // object and apply not.
 func checkDiagnostics(t *testing.T, out string) string {
 	t.Helper()
-	const terminal = "{\"outcome\":\"gate_failed\"}\n"
-	if !strings.HasSuffix(out, terminal) {
+	trimmed := strings.TrimSuffix(out, "\n")
+	terminal, rest := trimmed, ""
+	if idx := strings.LastIndex(trimmed, "\n"); idx >= 0 {
+		terminal, rest = trimmed[idx+1:], out[:idx+1]
+	}
+	var final struct {
+		Outcome      string `json:"outcome"`
+		SourceDigest string `json:"source_digest"`
+	}
+	if err := json.Unmarshal([]byte(terminal), &final); err != nil || final.Outcome != "gate_failed" {
 		t.Fatalf("a failing run must end with the terminal gate_failed object, got:\n%s", out)
 	}
-	return strings.TrimSuffix(out, terminal)
+	// The digest names the bytes that failed, so it is part of what check and
+	// apply must agree on: check and apply gate the same source, and a run
+	// that emitted no digest would strip to the same diagnostics as one that
+	// did.
+	if final.SourceDigest == "" {
+		t.Fatalf("a gate failure over a readable root must carry a source_digest, got:\n%s", out)
+	}
+	return rest
 }
 
 func filterDiags(ds []testDiag, id string) []testDiag {

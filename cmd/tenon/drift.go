@@ -39,15 +39,20 @@ type driftResult struct {
 // missing, or stale file).
 type driftOutcomeResult struct {
 	Outcome string `json:"outcome"`
+	// SourceDigest names the authored bytes that failed the gate, exactly as
+	// check's gate_failed object carries it, and is empty (and omitted) for
+	// a drift outcome: a drift run's source passed, so it has a fingerprint
+	// and needs no digest.
+	SourceDigest string `json:"source_digest,omitempty"`
 }
 
 // writeDriftOutcome terminates the jsonl stream with the final gate_failed
 // or drift object for a failing drift run. A no-op in prose mode.
-func writeDriftOutcome(jsonl bool, stdout, stderr io.Writer, outcome string) {
+func writeDriftOutcome(jsonl bool, stdout, stderr io.Writer, outcome, digest string) {
 	if !jsonl {
 		return
 	}
-	if err := writeResult(stdout, driftOutcomeResult{Outcome: outcome}); err != nil {
+	if err := writeResult(stdout, driftOutcomeResult{Outcome: outcome, SourceDigest: digest}); err != nil {
 		fmt.Fprintln(stderr, "tenon drift:", err)
 	}
 }
@@ -131,7 +136,7 @@ func runDrift(args []string, stdout, stderr io.Writer) int {
 	// not a difference against the workspace.
 	if p == nil || diags.HasErrors() {
 		render(diags, jsonl, stdout, stderr)
-		writeDriftOutcome(jsonl, stdout, stderr, "gate_failed")
+		writeDriftOutcome(jsonl, stdout, stderr, "gate_failed", sourceDigest(agent, p))
 		return 1
 	}
 
@@ -182,7 +187,7 @@ func runDrift(args []string, stdout, stderr io.Writer) int {
 	}
 	if !prepareTools(p, prepWorkspace, cache, diags) {
 		render(diags, jsonl, stdout, stderr)
-		writeDriftOutcome(jsonl, stdout, stderr, "gate_failed")
+		writeDriftOutcome(jsonl, stdout, stderr, "gate_failed", sourceDigest(agent, p))
 		return 1
 	}
 
@@ -200,7 +205,7 @@ func runDrift(args []string, stdout, stderr io.Writer) int {
 	}, diags)
 	if diags.HasErrors() {
 		render(diags, jsonl, stdout, stderr)
-		writeDriftOutcome(jsonl, stdout, stderr, "gate_failed")
+		writeDriftOutcome(jsonl, stdout, stderr, "gate_failed", sourceDigest(agent, p))
 		return 1
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
@@ -215,7 +220,7 @@ func runDrift(args []string, stdout, stderr io.Writer) int {
 			"the existing apply record could not be read and drift fails closed rather than guess ownership: %s",
 			diagnostics.Bound(err.Error(), 256))
 		render(diags, jsonl, stdout, stderr)
-		writeDriftOutcome(jsonl, stdout, stderr, "drift")
+		writeDriftOutcome(jsonl, stdout, stderr, "drift", "")
 		return 1
 	}
 
@@ -251,7 +256,7 @@ func runDrift(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	if diags.HasErrors() {
-		writeDriftOutcome(jsonl, stdout, stderr, "drift")
+		writeDriftOutcome(jsonl, stdout, stderr, "drift", "")
 		return 1
 	}
 	sort.Strings(unchanged)

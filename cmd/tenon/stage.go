@@ -82,7 +82,7 @@ func runStagePrepare(args []string, stdout, stderr io.Writer) int {
 		return failEnv(jsonl, stdout, stderr, "stage", err)
 	}
 	if result == nil || diags.HasErrors() {
-		writeGateFailed(jsonl, stdout, stderr, "stage")
+		writeGateFailed(jsonl, stdout, stderr, "stage", "")
 		return 1
 	}
 	// --format governs all output, not only diagnostics: in jsonl mode the
@@ -152,7 +152,7 @@ func runStageVerify(args []string, stdout, stderr io.Writer) int {
 	// reading the stream never has to infer failure from silence.
 	if err := stage.Verify(*artifact, *prefix); err != nil {
 		fmt.Fprintln(stderr, "tenon stage verify:", err)
-		writeGateFailed(jsonl, stdout, stderr, "stage verify")
+		writeGateFailed(jsonl, stdout, stderr, "stage verify", "")
 		return 1
 	}
 	if jsonl {

@@ -28,6 +28,12 @@ growth requires stated payment.
   passes the gate and never accepts one as input, because an authored
   catalog would be precisely the second inventory the directory-is-the-API
   convention exists to abolish.
+- **Source digest** — the `sha256:` content hash over an agent source's
+  authored files that a failing gate reports as `source_digest`, so a
+  rejected candidate is attributable. It is deliberately not a fingerprint:
+  a digest names bytes, a fingerprint names a configuration the gate proved.
+  A consumer joins failures by digest and successes by fingerprint, and the
+  two can never collide — the digest is hashed under its own domain prefix.
 - **Improvement loop** — an agent or optimizer revising an agent's files; an
   author coequal with the person. Tenon is its substrate — the gate
   (`tenon check`), reproducible application, and attribution — never the

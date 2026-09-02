@@ -432,7 +432,17 @@ object is shaped differently from a diagnostic line — it has no `id`,
 as the stream's final, distinct object rather than mistake it for a
 malformed diagnostic. A failing run ends the stream the same way, so a
 consumer reading objects until end of stream never infers failure from the
-absence of a summary. The outcome vocabulary is
+absence of a summary. A `gate_failed` object additionally carries
+`source_digest`, a `sha256:` content hash over the authored files that
+failed, so a rejected candidate is attributable without a consumer hashing
+the tree itself. It is explicitly not a fingerprint and never joins with
+one: a digest names bytes, a fingerprint names a configuration the gate
+proved. The two are separated by construction — the digest is hashed under
+its own domain prefix, so a digest and a fingerprint over byte-identical
+content differ — and they never appear together, a passing run carrying a
+fingerprint and no digest and a failing one the reverse. The field is
+omitted only when the agent root itself cannot be read. The outcome
+vocabulary is
 `ok / gate_failed / drift / blocked / error`: `gate_failed` when the source
 itself is invalid, `drift` when the workspace no longer matches, `blocked`
 when clean refuses to remove what it found, and `error` when the run could

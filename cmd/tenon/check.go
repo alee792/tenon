@@ -34,6 +34,12 @@ type checkResult struct {
 // infer failure from the absence of a summary.
 type gateFailedResult struct {
 	Outcome string `json:"outcome"`
+	// SourceDigest is a content hash over the authored files that failed, so
+	// a rejected candidate is attributable without the consumer hashing the
+	// tree itself. It is not a fingerprint and never joins with one: a
+	// digest names bytes, a fingerprint names a proven configuration.
+	// Omitted only when the agent root itself could not be read.
+	SourceDigest string `json:"source_digest,omitempty"`
 }
 
 // Catalog entries are the resolved capability inventory, one object per
@@ -231,7 +237,7 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 	}
 	render(diags, jsonl, stdout, stderr)
 	if p == nil || diags.HasErrors() {
-		writeGateFailed(jsonl, stdout, stderr, "check")
+		writeGateFailed(jsonl, stdout, stderr, "check", sourceDigest(agent, p))
 		return 1
 	}
 
