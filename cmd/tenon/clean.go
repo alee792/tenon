@@ -44,13 +44,8 @@ func runClean(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "tenon clean: --harness must be exactly claude or codex")
 		return 2
 	}
-	var jsonl bool
-	switch *mode {
-	case "prose":
-	case "jsonl":
-		jsonl = true
-	default:
-		fmt.Fprintln(stderr, "tenon clean: --format must be prose or jsonl")
+	jsonl, ok := parseFormat("clean", *mode, stderr)
+	if !ok {
 		return 2
 	}
 

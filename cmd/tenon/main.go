@@ -22,8 +22,6 @@ import (
 
 	"github.com/alee792/tenon/internal/agentproject"
 	"github.com/alee792/tenon/internal/apply"
-	"github.com/alee792/tenon/internal/claude"
-	"github.com/alee792/tenon/internal/codex"
 	"github.com/alee792/tenon/internal/diagnostics"
 	"github.com/alee792/tenon/internal/dispatch"
 	"github.com/alee792/tenon/internal/dispatchstate"
@@ -196,22 +194,12 @@ func commonFlags(name string, args []string, stderr io.Writer, withWorkspace, wi
 	}
 	agent = positional[0]
 
-	harnessValue, harnessFromEnv := resolveHarness(*harness)
-	switch harnessValue {
-	case "claude":
-		driver = claude.Driver{}
-	case "codex":
-		driver = codex.Driver{}
-	default:
-		fmt.Fprint(stderr, harnessFlagError(name, harnessValue, harnessFromEnv))
+	driver, _, driverOK := resolveDriver(name, *harness, false, stderr)
+	if !driverOK {
 		return "", "", nil, false, "", false, false
 	}
-	switch *mode {
-	case "prose":
-	case "jsonl":
-		jsonl = true
-	default:
-		fmt.Fprintf(stderr, "tenon %s: --format must be prose or jsonl\n", name)
+	jsonl, formatOK := parseFormat(name, *mode, stderr)
+	if !formatOK {
 		return "", "", nil, false, "", false, false
 	}
 	workspace = agent
@@ -356,46 +344,35 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return failEnv(jsonl, stdout, stderr, "apply", err)
 	}
-	p, diags, err := agentproject.LoadWithManifest(agent, expectedFingerprint(supplied))
-	if err != nil {
-		return failEnv(jsonl, stdout, stderr, "apply", err)
+	// The gate is the one check and drift run, in the same function: load,
+	// verify a supplied pin set BEFORE any workspace mutation — before tools
+	// are prepared and before generation, so a drifted pin writes nothing,
+	// no .tenon and no generated files — then prepare and inspect the tools,
+	// so a project whose tools cannot be built is not half-applied. Apply
+	// prepares against the real workspace and its own cache, because the
+	// closure it builds is the one it is about to apply, and it generates
+	// inside ApplyWithTarget below, which also writes; everything up to that
+	// point is byte-for-byte the gate check refuses on.
+	gate, code := runGate(gateInput{
+		command:       "apply",
+		agent:         agent,
+		driver:        driver,
+		supplied:      supplied,
+		jsonl:         jsonl,
+		stdout:        stdout,
+		stderr:        stderr,
+		prepWorkspace: workspace,
+	})
+	defer gate.cleanup()
+	if code != 0 {
+		return code
 	}
-	if p == nil || diags.HasErrors() {
-		render(diags, jsonl, stdout, stderr)
-		writeGateFailed(jsonl, stdout, stderr, "apply", sourceDigest(agent, p))
-		return 1
-	}
-	storeBase := resolveIntegrationStoreBase()
-	// A supplied manifest is verified BEFORE any workspace mutation — before
-	// tools are prepared and before generation — so drift writes nothing: no
-	// .tenon, no generated files.
-	if supplied != nil {
-		if _, err := verifyManifestDiag(p, driver.Harness(), storeBase, supplied, diags); err != nil {
-			return failEnv(jsonl, stdout, stderr, "apply", err)
-		}
-		if diags.HasErrors() {
-			render(diags, jsonl, stdout, stderr)
-			writeGateFailed(jsonl, stdout, stderr, "apply", sourceDigest(agent, p))
-			return 1
-		}
-	}
-	executable, err := resolveExecutable()
-	if err != nil {
-		return failEnv(jsonl, stdout, stderr, "apply", err)
-	}
-	// Tools are prepared and inspected once, before anything in the
-	// workspace is mutated: a project whose tools cannot be built is not
-	// half-applied.
-	if !prepareTools(p, workspace, "", diags) {
-		render(diags, jsonl, stdout, stderr)
-		writeGateFailed(jsonl, stdout, stderr, "apply", sourceDigest(agent, p))
-		return 1
-	}
+	p, diags, executable := gate.project, gate.diags, gate.executable
 
 	result, applyDiags, err := apply.ApplyWithTarget(p, apply.Target{
 		Workspace:        workspace,
 		Executable:       executable,
-		IntegrationStore: storeBase,
+		IntegrationStore: resolveIntegrationStoreBase(),
 		TenonVersion:     version.Version,
 		ManifestIdentity: manifestIdentity(supplied),
 		Model:            manifestModel(supplied, driver.Harness()),
