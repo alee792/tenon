@@ -331,7 +331,7 @@ func TestCheckApplyModelParity(t *testing.T) {
 	if checkCode == 0 || applyCode == 0 {
 		t.Fatalf("both must fail on the invalid authored settings.json: check=%d apply=%d", checkCode, applyCode)
 	}
-	if checkDiagnostics(checkOut.String()) != checkDiagnostics(applyOut.String()) {
+	if checkDiagnostics(t, checkOut.String()) != checkDiagnostics(t, applyOut.String()) {
 		t.Fatalf("check and apply must report identical diagnostics:\ncheck: %s\napply: %s", checkOut.String(), applyOut.String())
 	}
 	if !strings.Contains(checkOut.String(), "claude.settings.invalid") {

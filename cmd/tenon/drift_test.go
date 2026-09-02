@@ -273,7 +273,7 @@ func TestDriftValidateApplyParityUntouched(t *testing.T) {
 	if checkCode != 1 || applyCode != 1 {
 		t.Fatalf("both must still fail with exit 1: check=%d apply=%d", checkCode, applyCode)
 	}
-	if checkDiagnostics(checkOut.String()) != checkDiagnostics(applyOut.String()) {
+	if checkDiagnostics(t, checkOut.String()) != checkDiagnostics(t, applyOut.String()) {
 		t.Fatalf("check and apply must still report identical diagnostics:\n%s\n%s",
 			checkOut.String(), applyOut.String())
 	}

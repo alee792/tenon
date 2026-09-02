@@ -103,7 +103,7 @@ func TestCheckReportsApplyFailuresWithoutMutating(t *testing.T) {
 	if checkCode == 0 || applyCode == 0 {
 		t.Fatalf("both must fail: check=%d apply=%d", checkCode, applyCode)
 	}
-	if checkDiagnostics(checkOut.String()) != checkDiagnostics(applyOut.String()) {
+	if checkDiagnostics(t, checkOut.String()) != checkDiagnostics(t, applyOut.String()) {
 		t.Fatalf("check and apply must report identical diagnostics:\n%s\n%s",
 			checkOut.String(), applyOut.String())
 	}
@@ -125,7 +125,7 @@ func TestJSONLDiagnosticsAreParseable(t *testing.T) {
 	if code := run([]string{"check", agent, "--harness", "codex", "--format", "jsonl"}, nil, &stdout, &stderr); code == 0 {
 		t.Fatal("expected validation failure")
 	}
-	lines := strings.Split(strings.TrimSpace(checkDiagnostics(stdout.String())), "\n")
+	lines := strings.Split(strings.TrimSpace(checkDiagnostics(t, stdout.String())), "\n")
 	if len(lines) == 0 || lines[0] == "" {
 		t.Fatal("expected at least one JSONL diagnostic")
 	}
@@ -157,6 +157,10 @@ func TestJSONLDiagnosticsAreParseable(t *testing.T) {
 // with its own hash and executable bit, sorted by path, followed by the same
 // rolled-up fingerprint check reports for the identical project.
 func TestEmitFilesListsFilesAndMatchesRollup(t *testing.T) {
+	// The absence of --harness is the subject here, so the developer's own
+	// TENON_HARNESS must not supply one: with it set, these runs would take
+	// the harness path and the assertions below would prove nothing.
+	t.Setenv("TENON_HARNESS", "")
 	agent := writeAgent(t, "my-agent", validInstructions)
 	writeFile(t, agent, "harnesses/claude/.claude/hooks/pre.sh", []byte("#!/bin/sh\n"), 0o755)
 	writeFile(t, agent, "harnesses/claude/.claude/settings.json", []byte(`{"a":1}`), 0o644)
@@ -219,6 +223,10 @@ func TestEmitFilesListsFilesAndMatchesRollup(t *testing.T) {
 // TestEmitFilesJSONLIsParseable proves the jsonl mode renders one JSON object
 // per file followed by the result summary, all machine parseable.
 func TestEmitFilesJSONLIsParseable(t *testing.T) {
+	// The absence of --harness is the subject here, so the developer's own
+	// TENON_HARNESS must not supply one: with it set, these runs would take
+	// the harness path and the assertions below would prove nothing.
+	t.Setenv("TENON_HARNESS", "")
 	agent := writeAgent(t, "my-agent", validInstructions)
 
 	var stdout, stderr bytes.Buffer
@@ -256,6 +264,10 @@ func TestEmitFilesJSONLIsParseable(t *testing.T) {
 // harness-specific generation warning under --harness codex and none at all
 // without it, and both pass.
 func TestCheckWithoutHarnessIsThePortableGate(t *testing.T) {
+	// The absence of --harness is the subject here, so the developer's own
+	// TENON_HARNESS must not supply one: with it set, these runs would take
+	// the harness path and the assertions below would prove nothing.
+	t.Setenv("TENON_HARNESS", "")
 	agent := writeAgent(t, "my-agent", validInstructions)
 	writeFile(t, agent, "skills/vendor/SKILL.md", []byte(vendorSkillMD), 0o644)
 
@@ -300,6 +312,10 @@ type catalogEntryForTest struct {
 // description among it — and that files precede the catalog whatever order
 // --emit names them.
 func TestEmitCatalogReportsResolvedCapabilities(t *testing.T) {
+	// The absence of --harness is the subject here, so the developer's own
+	// TENON_HARNESS must not supply one: with it set, these runs would take
+	// the harness path and the assertions below would prove nothing.
+	t.Setenv("TENON_HARNESS", "")
 	agent := writeAgent(t, "my-agent", validInstructions)
 	writeFile(t, agent, "skills/vendor/SKILL.md", []byte(vendorSkillMD), 0o644)
 	writeFile(t, agent, "subagents/reviewer/instructions.md", []byte(subagentInstructionsWithEffort), 0o644)
@@ -308,7 +324,6 @@ func TestEmitCatalogReportsResolvedCapabilities(t *testing.T) {
 		[]byte("---\ntype: streamable-http\nurl: https://example.com/mcp\n---\n"), 0o644)
 
 	var stdout, stderr bytes.Buffer
-	t.Setenv("TENON_HARNESS", "")
 	if code := run([]string{"check", agent, "--emit", "catalog,files", "--format", "jsonl"}, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("check --emit exit %d: %s", code, stderr.String())
 	}
@@ -360,6 +375,10 @@ func TestEmitCatalogReportsResolvedCapabilities(t *testing.T) {
 // project that passed: a failing gate emits diagnostics and the terminal
 // gate_failed object, and no file or catalog entry at all.
 func TestEmitEmitsNothingOnGateFailure(t *testing.T) {
+	// The absence of --harness is the subject here, so the developer's own
+	// TENON_HARNESS must not supply one: with it set, these runs would take
+	// the harness path and the assertions below would prove nothing.
+	t.Setenv("TENON_HARNESS", "")
 	agent := writeAgent(t, "my-agent", "no frontmatter\n")
 	writeFile(t, agent, "skills/vendor/SKILL.md", []byte(vendorSkillMD), 0o644)
 
@@ -391,6 +410,10 @@ func TestEmitEmitsNothingOnGateFailure(t *testing.T) {
 // value check cannot emit, and a manifest with no harness to verify it
 // against.
 func TestCheckRejectsUnusableFlagCombinations(t *testing.T) {
+	// The absence of --harness is the subject here, so the developer's own
+	// TENON_HARNESS must not supply one: with it set, these runs would take
+	// the harness path and the assertions below would prove nothing.
+	t.Setenv("TENON_HARNESS", "")
 	agent := writeAgent(t, "my-agent", validInstructions)
 
 	var stdout, stderr bytes.Buffer
@@ -608,8 +631,19 @@ func parseDiagLines(t *testing.T, out string) []testDiag {
 // match byte for byte on a gate failure. Both sides of that comparison call
 // this: apply's trailing object is byte-identical to check's, but stripping
 // only one side would leave the other's outcome line in the diff.
-func checkDiagnostics(out string) string {
-	return strings.TrimSuffix(out, "{\"outcome\":\"gate_failed\"}\n")
+//
+// The terminal object is asserted, not merely trimmed. TrimSuffix is a no-op
+// when the suffix is absent, so a run that emitted no outcome at all trimmed
+// to the same string as one that did — and the parity check then passed on
+// exactly the divergence it exists to catch, check emitting the terminal
+// object and apply not.
+func checkDiagnostics(t *testing.T, out string) string {
+	t.Helper()
+	const terminal = "{\"outcome\":\"gate_failed\"}\n"
+	if !strings.HasSuffix(out, terminal) {
+		t.Fatalf("a failing run must end with the terminal gate_failed object, got:\n%s", out)
+	}
+	return strings.TrimSuffix(out, terminal)
 }
 
 func filterDiags(ds []testDiag, id string) []testDiag {
@@ -1183,7 +1217,7 @@ func TestValidateApplyParityOnSubagentError(t *testing.T) {
 	if checkCode == 0 || applyCode == 0 {
 		t.Fatalf("both must fail: check=%d apply=%d", checkCode, applyCode)
 	}
-	if checkDiagnostics(checkOut.String()) != checkDiagnostics(applyOut.String()) {
+	if checkDiagnostics(t, checkOut.String()) != checkDiagnostics(t, applyOut.String()) {
 		t.Fatalf("check and apply must report identical diagnostics:\n%s\n%s",
 			checkOut.String(), applyOut.String())
 	}
@@ -1356,7 +1390,7 @@ func TestHarnessFilesValidateApplyParity(t *testing.T) {
 	if checkCode == 0 || applyCode == 0 {
 		t.Fatalf("both must fail: check=%d apply=%d", checkCode, applyCode)
 	}
-	if checkDiagnostics(checkOut.String()) != checkDiagnostics(applyOut.String()) {
+	if checkDiagnostics(t, checkOut.String()) != checkDiagnostics(t, applyOut.String()) {
 		t.Fatalf("check and apply must report identical diagnostics:\n%s\n%s",
 			checkOut.String(), applyOut.String())
 	}
@@ -2377,7 +2411,7 @@ func TestConnectionCheckApplyParityOnConnectionError(t *testing.T) {
 	if checkCode == 0 || applyCode == 0 {
 		t.Fatalf("both must fail: check=%d apply=%d", checkCode, applyCode)
 	}
-	if checkDiagnostics(checkOut.String()) != checkDiagnostics(applyOut.String()) {
+	if checkDiagnostics(t, checkOut.String()) != checkDiagnostics(t, applyOut.String()) {
 		t.Fatalf("check and apply must report identical diagnostics:\n%s\n%s",
 			checkOut.String(), applyOut.String())
 	}
@@ -2449,7 +2483,7 @@ func TestConnectionCheckApplyParityOnInstalledResolutionError(t *testing.T) {
 	if checkCode == 0 || applyCode == 0 {
 		t.Fatalf("both must fail: check=%d apply=%d", checkCode, applyCode)
 	}
-	if checkDiagnostics(checkOut.String()) != checkDiagnostics(applyOut.String()) {
+	if checkDiagnostics(t, checkOut.String()) != checkDiagnostics(t, applyOut.String()) {
 		t.Fatalf("check and apply must report identical diagnostics:\n%s\n%s",
 			checkOut.String(), applyOut.String())
 	}

@@ -312,7 +312,7 @@ func TestBrokenToolFailsCheckAndApplyIdentically(t *testing.T) {
 	if applyCode == 0 {
 		t.Fatal("a tool that does not compile must fail apply")
 	}
-	if checkDiagnostics(checkOut.String()) != checkDiagnostics(applyOut.String()) {
+	if checkDiagnostics(t, checkOut.String()) != checkDiagnostics(t, applyOut.String()) {
 		t.Fatalf("check and apply must report identical diagnostics:\n%s\n%s",
 			checkOut.String(), applyOut.String())
 	}
@@ -331,6 +331,10 @@ func TestBrokenToolFailsCheckAndApplyIdentically(t *testing.T) {
 // check/apply's own tool.prepare.failed diagnostic instead of silently
 // succeeding.
 func TestBrokenToolFailsThePortableGateToo(t *testing.T) {
+	// The absence of --harness is the subject here, so the developer's own
+	// TENON_HARNESS must not supply one: with it set, these runs would take
+	// the harness path and the assertions below would prove nothing.
+	t.Setenv("TENON_HARNESS", "")
 	agent := writeAgent(t, "my-agent", validInstructions)
 	writeGoTool(t, agent, brokenGoToolFile)
 

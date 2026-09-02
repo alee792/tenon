@@ -195,7 +195,7 @@ func TestCheckManifestReportsSameDriftAsApply(t *testing.T) {
 	if checkCode == 0 || applyCode == 0 {
 		t.Fatalf("both must fail on drift: check=%d apply=%d", checkCode, applyCode)
 	}
-	if checkDiagnostics(checkOut.String()) != checkDiagnostics(applyOut.String()) {
+	if checkDiagnostics(t, checkOut.String()) != checkDiagnostics(t, applyOut.String()) {
 		t.Fatalf("check and apply must report identical drift:\ncheck: %s\napply: %s", checkOut.String(), applyOut.String())
 	}
 	if !strings.Contains(checkOut.String(), "pins.drift.harness-version") {
@@ -270,6 +270,10 @@ func TestCheckWritePinsProvesInstructionsFreeRoot(t *testing.T) {
 // ever recorded into a pin set being written, so --model requires
 // --write-pins. Both are usage errors (exit 2), not gate failures.
 func TestCheckWritePinsUsageErrors(t *testing.T) {
+	// The absence of --harness is the subject here, so the developer's own
+	// TENON_HARNESS must not supply one: with it set, these runs would take
+	// the harness path and the assertions below would prove nothing.
+	t.Setenv("TENON_HARNESS", "")
 	agent := writeAgent(t, "my-agent", validInstructions)
 	withFakeResolver(t, "2.1.240", nil)
 	path := filepath.Join(t.TempDir(), "pins.json")
@@ -292,5 +296,113 @@ func TestCheckWritePinsUsageErrors(t *testing.T) {
 	}
 	if !strings.Contains(errb.String(), "--model requires --write-pins") {
 		t.Fatalf("the usage error must name the missing flag: %s", errb.String())
+	}
+}
+
+// TestWritePinsNeverWritesWhenTheGateFails proves the ordering ADR 0027
+// binds: a pin set is only ever minted by a project that gates now, so a
+// failing gate leaves no file behind at all — not an empty one, not a
+// partial one.
+func TestWritePinsNeverWritesWhenTheGateFails(t *testing.T) {
+	agent := writeAgent(t, "my-agent", "no frontmatter\n")
+	withFakeResolver(t, "2.1.240", nil)
+	path := filepath.Join(t.TempDir(), "pins.json")
+
+	var out, errb bytes.Buffer
+	if code := run([]string{"check", agent, "--harness", "claude", "--write-pins", path, "--format", "jsonl"}, nil, &out, &errb); code != 1 {
+		t.Fatalf("a failing gate must exit 1, got %d: %s", code, out.String())
+	}
+	if !strings.HasSuffix(strings.TrimSpace(out.String()), `{"outcome":"gate_failed"}`) {
+		t.Fatalf("the stream must end with gate_failed: %q", out.String())
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("a failing gate must write no pin set: %v", err)
+	}
+}
+
+// TestPinsAndWritePinsVerifyThenWrite proves the two flags compose in the
+// fail-closed order: supplied pins are verified first, and the pin set is
+// written only when that verification passed. On drift, nothing is written.
+func TestPinsAndWritePinsVerifyThenWrite(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	withFakeResolver(t, "2.1.240", nil)
+	supplied := writePinsFor(t, agent)
+
+	// Verification passes: the written pin set is the verified closure, and
+	// is byte-identical to the one supplied.
+	rewritten := filepath.Join(t.TempDir(), "rewritten.json")
+	var out, errb bytes.Buffer
+	if code := run([]string{"check", agent, "--harness", "claude", "--pins", supplied, "--write-pins", rewritten}, nil, &out, &errb); code != 0 {
+		t.Fatalf("verify-then-write exit %d: %s", code, errb.String())
+	}
+	before, err := os.ReadFile(supplied)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(rewritten)
+	if err != nil {
+		t.Fatalf("the verified closure must have been written: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Fatalf("the written pin set must be the closure just verified:\n%s\n%s", before, after)
+	}
+
+	// Verification fails: the run refuses, and writes nothing.
+	withFakeResolver(t, "9.9.9", nil)
+	refused := filepath.Join(t.TempDir(), "refused.json")
+	out.Reset()
+	errb.Reset()
+	if code := run([]string{"check", agent, "--harness", "claude", "--pins", supplied, "--write-pins", refused, "--format", "jsonl"}, nil, &out, &errb); code != 1 {
+		t.Fatalf("drifted pins must refuse, got %d: %s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "pins.drift.harness-version") {
+		t.Fatalf("the refusal must name the drifted pin: %q", out.String())
+	}
+	if _, err := os.Stat(refused); !os.IsNotExist(err) {
+		t.Fatalf("a refused run must write no pin set: %v", err)
+	}
+}
+
+// TestWritePinsWithEmitEndsWithExactlyOneResultObject proves the stream
+// contract holds when every optional projection is switched on at once: the
+// inventories are lines like any other, and the run still ends with one
+// distinct result object carrying the outcome and the written path.
+func TestWritePinsWithEmitEndsWithExactlyOneResultObject(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	withFakeResolver(t, "2.1.240", nil)
+	path := filepath.Join(t.TempDir(), "pins.json")
+
+	var out, errb bytes.Buffer
+	if code := run([]string{"check", agent, "--harness", "claude", "--emit", "files,catalog", "--write-pins", path, "--format", "jsonl"}, nil, &out, &errb); code != 0 {
+		t.Fatalf("check exit %d: %s", code, errb.String())
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	outcomes := 0
+	for _, line := range lines {
+		var obj struct {
+			Outcome string `json:"outcome"`
+		}
+		if err := json.Unmarshal([]byte(line), &obj); err != nil {
+			t.Fatalf("line %q is not JSON: %v", line, err)
+		}
+		if obj.Outcome != "" {
+			outcomes++
+		}
+	}
+	if outcomes != 1 {
+		t.Fatalf("exactly one object carries an outcome, got %d:\n%s", outcomes, out.String())
+	}
+	var summary struct {
+		Outcome     string `json:"outcome"`
+		PinsWritten string `json:"pins_written"`
+	}
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &summary); err != nil {
+		t.Fatal(err)
+	}
+	if summary.Outcome != "ok" || summary.PinsWritten != path {
+		t.Fatalf("summary = %+v, want ok and the written path", summary)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("the pin set must have been written: %v", err)
 	}
 }

@@ -45,7 +45,15 @@ The first release, v0.1.0, ships the core described in
   stories neither apply nor drift covered. It takes no AGENT, so it works
   when the source is gone. A file modified since its apply refuses the whole
   clean unless `--force` is passed; a file tenon never recorded is never
-  touched either way; a workspace with no records succeeds trivially.
+  touched either way; a workspace with no records succeeds trivially, and a
+  record owning no files is still dropped. Clean never trusts the paths in a
+  record verbatim: one that is not workspace-local, or one reached through a
+  parent that is a symlink rather than a real directory, blocks the clean
+  (`escapes-workspace`, `symlink-parent`) with or without `--force`, every
+  path is re-classified immediately before its own removal, and the
+  directory pruning is bounded by the workspace itself. Apply enforces the
+  same rule on its own removal of stale recorded files
+  (`apply.record.unsafe-path`).
 
 - `--diagnostics` is renamed `--format` everywhere, since the flag governs
   all output rendering rather than diagnostics alone; there is no deprecated
@@ -58,7 +66,18 @@ The first release, v0.1.0, ships the core described in
   drift, and clean, `gate_failed` when the source itself is invalid, `drift`
   when the workspace no longer matches a fresh apply, and `blocked` when
   clean refuses. Check's success object keeps `agent` and `fingerprint` and
-  adds `pins_written` when `--write-pins` wrote one.
+  adds `pins_written` when `--write-pins` wrote one; `outcome` is the only
+  field every result object carries, and the rest vary by command. `stage`
+  honors `--format` too, ending a jsonl run with its own result object
+  (agent, fingerprint, output directory) instead of prose. `drift` against a
+  workspace that does not exist now reports `drift` with every generated
+  path missing, rather than `gate_failed` for a source that is fine.
+
+- `--emit catalog` reports an MCP entry's `transport` in one vocabulary
+  whichever side declared the server — `stdio`, `streamable-http`, or
+  `installed` — so an authored connection's kind and a plugin-declared
+  server's transport are directly comparable; `source` remains what
+  distinguishes where an entry came from.
 
 - Standalone MCP connections move from `connections/` to `mcp/`, re-shaped to
   the Agent Plugins 1.0 `mcp.json` server-entry vocabulary (issue #49): a
