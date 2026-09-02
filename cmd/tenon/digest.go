@@ -43,7 +43,12 @@ var digestSourceNames = map[string]bool{
 	"plugins":         true,
 	"mcp":             true,
 	"schedules":       true,
-	"harnesses":       true,
+	// The pre-#49 name for mcp/. The loader reads it only to fail closed with
+	// mcp.migration.connections-dir, so its bytes are exactly the bytes that
+	// caused that failure; a digest that skipped them would name two sources
+	// that differ only there as one.
+	"connections": true,
+	"harnesses":   true,
 }
 
 // digestDependencyFiles are the native tool dependency files at the agent

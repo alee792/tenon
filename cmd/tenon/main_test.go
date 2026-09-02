@@ -3092,3 +3092,36 @@ func TestApplyRefusesEverythingWhenOnlySomePathsFailContainment(t *testing.T) {
 		t.Fatalf("nothing may be written through the symlinked parent, found %d entries", len(entries))
 	}
 }
+
+// TestManagedServerRefusesJSONLFormat proves the one --format value mcp serve
+// cannot honor is refused as a usage error before anything runs: stdout is the
+// MCP protocol, so an outcome object there would corrupt the stream the flag
+// exists to make parseable. Explicit --format prose is still accepted.
+func TestManagedServerRefusesJSONLFormat(t *testing.T) {
+	agent := writeAgent(t, "my-agent", validInstructions)
+	unapplied := t.TempDir()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"mcp", "serve", agent, "--harness", "claude", "--workspace", unapplied, "--format", "jsonl"},
+		bytes.NewBufferString(""), &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("--format jsonl on mcp serve must be a usage error, got %d: %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "not available for mcp serve") {
+		t.Fatalf("the refusal must say why: %q", stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("a refused invocation must write nothing to the protocol stream: %q", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = run([]string{"mcp", "serve", agent, "--harness", "claude", "--workspace", unapplied, "--format", "prose"},
+		bytes.NewBufferString(""), &stdout, &stderr)
+	if code == 2 {
+		t.Fatalf("--format prose must be accepted; got a usage error: %s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "apply record") {
+		t.Fatalf("with prose accepted the command must proceed to its own checks: %q", stderr.String())
+	}
+}

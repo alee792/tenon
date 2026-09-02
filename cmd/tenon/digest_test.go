@@ -339,3 +339,21 @@ func TestSourceDigestIsOmittedWhenTheRootCannotBeRead(t *testing.T) {
 		t.Fatalf("an unreadable root must carry no digest, got %q", final.SourceDigest)
 	}
 }
+
+// TestSourceDigestCoversTheLegacyConnectionsDir proves the one directory the
+// loader reads only to reject is still named by the digest: a legacy
+// connections/ tree is exactly the bytes behind mcp.migration.connections-dir,
+// so two sources that differ only there must not digest as one.
+func TestSourceDigestCoversTheLegacyConnectionsDir(t *testing.T) {
+	t.Setenv("TENON_HARNESS", "")
+	agent := writeAgent(t, "my-agent", validInstructions)
+	writeFile(t, agent, "connections/github.md", []byte("---\nurl: https://a.example/mcp\n---\n"), 0o644)
+	before := sourceDigest(agent, nil)
+	if before == "" {
+		t.Fatal("a readable root must have a digest")
+	}
+	writeFile(t, agent, "connections/github.md", []byte("---\nurl: https://b.example/mcp\n---\n"), 0o644)
+	if after := sourceDigest(agent, nil); after == before {
+		t.Fatalf("the rejected connections/ bytes must move the digest: %s", before)
+	}
+}
