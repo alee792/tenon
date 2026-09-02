@@ -21,7 +21,9 @@ The first release, v0.1.0, ships the core described in
   `fingerprint show` emitted, and `--emit catalog` is the resolved
   capability inventory (skills including plugin-merged ones with their
   descriptions, tools with their language, MCP servers, subagents,
-  schedules). A catalog is derived only, never accepted as input.
+  schedules). A catalog is derived only, never accepted as input. That
+  parity is structural: `check`, `drift`, and `apply` run one internal
+  `runGate`, so no second copy of the sequence is left to diverge.
 
 - The supplied agent manifest is renamed to the **pin set**, and the gate
   writes it. `--manifest PATH` becomes `--pins FILE` on `apply`, `drift`,

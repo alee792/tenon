@@ -41,7 +41,9 @@ exactly as apply prepares them against a throwaway cache. With `--harness`
 it additionally verifies a supplied pin set before any generation and
 performs a generation dry-run against the same target apply builds, so
 check and apply fail identically on the same source, which was validate's
-binding contract and remains binding here.
+binding contract and remains binding here. That parity is structural rather
+than test-enforced: check, drift, and apply call one `runGate`, so there is
+no second copy of the sequence left to diverge.
 
 `validate` and `fingerprint show` were never two commands. Both loaded the
 project, both bounded it, both prepared its tools, and both refused to
