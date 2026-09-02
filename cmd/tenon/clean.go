@@ -64,10 +64,25 @@ func runClean(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	harnesses, err := cleanHarnesses(ws, *harnessName)
+	harnesses, ignored, err := cleanHarnesses(ws, *harnessName)
 	if err != nil {
 		fmt.Fprintln(stderr, "tenon clean:", err)
 		return 1
+	}
+	// A file in .tenon whose name merely looks like a record is reported and
+	// then left alone. --harness is validated strictly, and a discovered name
+	// gets the same standard: acting on an apply-anything.json would let a
+	// stray file drive removals, and silently skipping it would hide a record
+	// clean did not process.
+	for _, name := range ignored {
+		if jsonl {
+			if err := writeResult(stdout, cleanIgnoredEvent{Ignored: name, Reason: "unknown-harness"}); err != nil {
+				fmt.Fprintln(stderr, "tenon clean:", err)
+				return 1
+			}
+			continue
+		}
+		fmt.Fprintf(stdout, "ignoring unrecognized record: .tenon/apply-%s.json\n", name)
 	}
 
 	// Every path in every harness named above is classified before anything
@@ -82,9 +97,13 @@ func runClean(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "tenon clean:", err)
 			return 1
 		}
-		if record == nil || len(record.Files) == 0 {
-			continue // no record, or a record owning nothing: idempotent no-op for this harness
+		if record == nil {
+			continue // no record for this harness: idempotent no-op
 		}
+		// A record owning zero files still gets a plan: clean's promise is
+		// that it drops the record, and a record left behind by a clean that
+		// reported nothing to clean is exactly the state ADR 0027 says clean
+		// removes.
 		plans = append(plans, planClean(ws, h, record, *force))
 	}
 
@@ -129,11 +148,35 @@ func runClean(args []string, stdout, stderr io.Writer) int {
 	total := 0
 	for _, p := range plans {
 		for _, path := range p.toRemove {
+			// The plan pass is what gives clean its all-or-nothing refusal in
+			// the common case, but it is a plan: the workspace can change
+			// between classifying a path and removing it. Every path is
+			// re-classified immediately before its own removal, and a path
+			// that no longer classifies as removable stops the clean where it
+			// stands. Files removed before that point are already gone and are
+			// already reported, so the run ends "blocked" — partially
+			// uninstalled is a state nobody asked for, and saying so is the
+			// only honest report of it.
+			if reason := removableNow(ws, path, p.record, *force); reason != "" {
+				if jsonl {
+					if err := writeResult(stdout, cleanBlockedEvent{Blocked: path, Reason: reason}); err != nil {
+						fmt.Fprintln(stderr, "tenon clean:", err)
+						return 1
+					}
+					if err := writeResult(stdout, cleanOutcomeBlocked{Outcome: "blocked"}); err != nil {
+						fmt.Fprintln(stderr, "tenon clean:", err)
+						return 1
+					}
+				} else {
+					fmt.Fprintf(stderr, "tenon clean: %s changed underneath the clean (%s); stopping after %d removed file(s), the workspace is partially cleaned\n", path, reason, total)
+				}
+				return 1
+			}
 			if err := os.Remove(filepath.Join(ws, path)); err != nil && !os.IsNotExist(err) {
 				fmt.Fprintln(stderr, "tenon clean:", err)
 				return 1
 			}
-			removeEmptyParents(ws, path)
+			apply.PruneEmptyParents(ws, path)
 			total++
 			if jsonl {
 				if err := writeResult(stdout, cleanRemovedEvent{Removed: path, Harness: p.harness}); err != nil {
@@ -174,39 +217,48 @@ func runClean(args []string, stdout, stderr io.Writer) int {
 // ws/.tenon (matching apply.RecordPath's own naming, so a future harness
 // needs no change here). A missing .tenon yields none rather than an error —
 // that is the "nothing to clean" case, not a failure.
-func cleanHarnesses(ws, harnessName string) ([]string, error) {
+func cleanHarnesses(ws, harnessName string) (harnesses, ignored []string, err error) {
 	if harnessName != "" {
-		return []string{harnessName}, nil
+		return []string{harnessName}, nil, nil
 	}
 	entries, err := os.ReadDir(filepath.Join(ws, ".tenon"))
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return nil, nil, nil
 		}
-		return nil, err
+		return nil, nil, err
 	}
-	var harnesses []string
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() || !strings.HasPrefix(name, "apply-") || !strings.HasSuffix(name, ".json") {
 			continue
 		}
-		harnesses = append(harnesses, strings.TrimSuffix(strings.TrimPrefix(name, "apply-"), ".json"))
+		discovered := strings.TrimSuffix(strings.TrimPrefix(name, "apply-"), ".json")
+		if discovered != "claude" && discovered != "codex" {
+			ignored = append(ignored, discovered)
+			continue
+		}
+		harnesses = append(harnesses, discovered)
 	}
 	sort.Strings(harnesses)
-	return harnesses, nil
+	sort.Strings(ignored)
+	return harnesses, ignored, nil
 }
 
 // harnessPlan is one harness's classified clean plan: which recorded paths
 // are safe to remove and which block the clean, decided before any mutation.
 type harnessPlan struct {
-	harness  string
+	harness string
+	// record is the record the plan was classified against, kept so the
+	// removal pass can re-classify each path immediately before removing it.
+	record   *apply.Record
 	toRemove []string
 	blocked  []blockedPath
 }
 
 // blockedPath is one recorded path clean refuses to remove: reason is the
-// jsonl-mode value ("modified" or "non-regular"); prose is the human line.
+// jsonl-mode value ("modified", "non-regular", "escapes-workspace", or
+// "symlink-parent"); prose is the human line.
 type blockedPath struct {
 	path   string
 	reason string
@@ -228,8 +280,23 @@ func planClean(ws, harnessName string, record *apply.Record, force bool) harness
 	}
 	sort.Strings(paths)
 
-	plan := harnessPlan{harness: harnessName}
+	plan := harnessPlan{harness: harnessName, record: record}
 	for _, path := range paths {
+		// Containment precedes ownership: ClassifyOwnership Lstats the leaf
+		// only, so a recorded "../victim/x" or a path reached through a
+		// symlinked parent directory would classify as an ordinary owned
+		// file and be removed outside the workspace. A record is durable
+		// state on disk — corruptible, hand-editable, written by an older
+		// tenon — so clean never trusts the paths in it verbatim. Neither
+		// issue is overridable by --force: --force widens what tenon
+		// removes inside the workspace, never where it removes.
+		if issue := apply.CheckContainment(ws, path); issue != apply.ContainmentOK {
+			plan.blocked = append(plan.blocked, blockedPath{
+				path: path, reason: string(issue),
+				prose: containmentProse(issue, path),
+			})
+			continue
+		}
 		kind, _ := apply.ClassifyOwnership(ws, path, record)
 		switch kind {
 		case apply.OwnershipAbsent:
@@ -264,25 +331,51 @@ func planClean(ws, harnessName string, record *apply.Record, force bool) harness
 	return plan
 }
 
-// removeEmptyParents mirrors internal/apply's own empty-directory pruning
-// after removing a stale generated file (apply.removeEmptyParents,
-// unexported there — see drift.go's isExecutableMode for the same
-// package-boundary reason cmd/tenon keeps its own copy): after clean
-// removes an owned file it walks upward from the file's parent, removing
-// each now-empty directory, stopping at the workspace root and never
-// touching .tenon (removed separately, once every record in it is gone).
-func removeEmptyParents(ws, path string) {
-	for dir := filepath.Dir(path); dir != "." && dir != ".tenon" && dir != string(filepath.Separator); dir = filepath.Dir(dir) {
-		if os.Remove(filepath.Join(ws, dir)) != nil {
-			return
-		}
+// removableNow re-classifies path immediately before its removal and
+// returns the blocking reason when it is no longer safe to remove, or ""
+// when it is. It is the same rule planClean applied — containment, then
+// apply.ClassifyOwnership, with force widening only OwnershipModified — run
+// a second time against the workspace as it is now rather than as it was
+// when the plan was made. A path that has since vanished is not a block:
+// removal is what clean wanted, and it already happened.
+func removableNow(ws, path string, record *apply.Record, force bool) string {
+	if issue := apply.CheckContainment(ws, path); issue != apply.ContainmentOK {
+		return string(issue)
 	}
+	switch kind, _ := apply.ClassifyOwnership(ws, path, record); kind {
+	case apply.OwnershipAbsent, apply.OwnershipClean:
+		return ""
+	case apply.OwnershipModified:
+		if force {
+			return ""
+		}
+		return "modified"
+	default:
+		return "non-regular"
+	}
+}
+
+// containmentProse renders the human line for a path clean refuses on
+// containment grounds, naming what is wrong with the recorded path rather
+// than only that it was refused.
+func containmentProse(issue apply.ContainmentIssue, path string) string {
+	if issue == apply.ContainmentEscapes {
+		return fmt.Sprintf("escapes the workspace: %s", path)
+	}
+	return fmt.Sprintf("reached through a symlinked or non-directory parent: %s", path)
 }
 
 // cleanRemovedEvent is one jsonl-mode line clean emits per file it removes.
 type cleanRemovedEvent struct {
 	Removed string `json:"removed"`
 	Harness string `json:"harness"`
+}
+
+// cleanIgnoredEvent is one jsonl-mode line clean emits per file in .tenon
+// that names no harness clean knows.
+type cleanIgnoredEvent struct {
+	Ignored string `json:"ignored"`
+	Reason  string `json:"reason"`
 }
 
 // cleanBlockedEvent is one jsonl-mode line clean emits per path it refuses

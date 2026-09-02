@@ -2774,3 +2774,83 @@ func TestCleanIgnoresTenonHarnessEnv(t *testing.T) {
 		t.Fatal("a bare clean must remove the codex record too, TENON_HARNESS notwithstanding")
 	}
 }
+
+// TestApplyRefusesStaleRecordPathsOutsideTheWorkspace proves the containment
+// guard on apply's own removal pass: a record naming a path that escapes the
+// workspace, or one reached through a symlinked parent, is refused with a
+// diagnostic before anything is written or removed. The record is durable
+// state on disk, so a corrupted one must not be able to make apply delete
+// outside the workspace it was handed.
+func TestApplyRefusesStaleRecordPathsOutsideTheWorkspace(t *testing.T) {
+	t.Run("escaping path", func(t *testing.T) {
+		agent := writeAgent(t, "my-agent", validInstructions)
+		parent := t.TempDir()
+		ws := filepath.Join(parent, "workspace")
+		if err := os.Mkdir(ws, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		victimDir := filepath.Join(parent, "victim")
+		if err := os.Mkdir(victimDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		secret := filepath.Join(victimDir, "secret.txt")
+		content := []byte("do not delete me\n")
+		if err := os.WriteFile(secret, content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws}, nil, &stdout, &stderr); code != 0 {
+			t.Fatalf("apply exit %d: %s", code, stderr.String())
+		}
+		addRecordedPath(t, ws, "claude", "../victim/secret.txt", content)
+
+		stdout.Reset()
+		stderr.Reset()
+		if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--format", "jsonl"}, nil, &stdout, &stderr); code == 0 {
+			t.Fatalf("apply must refuse a record path outside the workspace: %s", stdout.String())
+		}
+		if len(filterDiags(parseDiagLines(t, stdout.String()), "apply.record.unsafe-path")) != 1 {
+			t.Fatalf("the refusal must carry the stable identifier: %q", stdout.String())
+		}
+		if got, err := os.ReadFile(secret); err != nil || string(got) != string(content) {
+			t.Fatalf("the file outside the workspace must be untouched: got %q err %v", got, err)
+		}
+	})
+
+	t.Run("symlinked parent", func(t *testing.T) {
+		agent := writeAgent(t, "my-agent", validInstructions)
+		writeFile(t, agent, "skills/echo/SKILL.md", []byte(echoSkillMD), 0o644)
+		ws := t.TempDir()
+		outside := t.TempDir()
+
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws}, nil, &stdout, &stderr); code != 0 {
+			t.Fatalf("apply exit %d: %s", code, stderr.String())
+		}
+		// Dropping the skill makes every .claude path stale, and the
+		// directory they run through now lives outside the workspace.
+		if err := os.RemoveAll(filepath.Join(agent, "skills")); err != nil {
+			t.Fatal(err)
+		}
+		stolen := filepath.Join(outside, "claude")
+		if err := os.Rename(filepath.Join(ws, ".claude"), stolen); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(stolen, filepath.Join(ws, ".claude")); err != nil {
+			t.Fatal(err)
+		}
+
+		stdout.Reset()
+		stderr.Reset()
+		if code := run([]string{"apply", agent, "--harness", "claude", "--workspace", ws, "--format", "jsonl"}, nil, &stdout, &stderr); code == 0 {
+			t.Fatalf("apply must refuse to remove through a symlinked parent: %s", stdout.String())
+		}
+		if len(filterDiags(parseDiagLines(t, stdout.String()), "apply.record.unsafe-path")) == 0 {
+			t.Fatalf("the refusal must carry the stable identifier: %q", stdout.String())
+		}
+		if _, err := os.Stat(filepath.Join(stolen, "skills", "echo", "SKILL.md")); err != nil {
+			t.Fatalf("nothing outside the workspace may be removed: %v", err)
+		}
+	})
+}

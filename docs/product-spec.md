@@ -463,7 +463,21 @@ workspace, and `--force` overrides exactly that refusal; a file tenon never
 recorded as its own is never touched, with or without the flag. An omitted
 `--harness` means every harness recorded in the workspace, which is why
 clean alone ignores `TENON_HARNESS`: an environment default would silently
-narrow a full reset. A workspace with no records succeeds trivially.
+narrow a full reset. A workspace with no records succeeds trivially, and a
+record owning no files is still dropped.
+
+An apply record is durable state on disk, so the paths in it are an input
+like any other and are never trusted verbatim. A recorded path that is not
+workspace-local, or one that would be reached through a parent that is a
+symlink rather than a real directory, blocks the clean
+(`escapes-workspace`, `symlink-parent`) and is removed by nothing, with or
+without `--force`: the flag widens what tenon removes inside a workspace,
+never where it removes. The directory pruning that follows a removal is
+bounded by the workspace and never removes the workspace itself. Apply
+enforces the identical rule on its own removal of stale recorded files,
+refusing the apply rather than removing outside the workspace. A file in
+`.tenon` whose name resolves to no harness tenon knows is reported and left
+alone rather than acted on.
 
 ## Pins
 
