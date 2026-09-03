@@ -98,9 +98,10 @@ fanout collect try --json
 ```
 
 `collect` prints one record per variant — status, tenon's `outcome`,
-fingerprint, `source_digest`, terminal turn statuses, branch, head SHA, patch
-path, and (with `--text`) the agent's reassembled output. That JSON is the
-handoff to whatever ranks top-k. fanout computes no score and picks no winner.
+fingerprint, `source_digest`, the error-severity `diagnostics` of whichever
+gate rejected it, terminal turn statuses, branch, head SHA, patch path, and
+(with `--text`) the agent's reassembled output. That JSON is the handoff to
+whatever ranks top-k. fanout computes no score and picks no winner.
 
 A variant that tenon rejected has no fingerprint — tenon mints one only for a
 source that passes — so its `source_digest` names the bytes that failed

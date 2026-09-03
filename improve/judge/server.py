@@ -57,11 +57,27 @@ class Round:
         gen_dir = self.run_root / "generations" / f"gen-{self.generation}" / "variants"
         if not gen_dir.is_dir():
             raise FileNotFoundError(f"no generation state at {gen_dir}")
+        # A variant fanout marked errored is one tenon reported outcome
+        # "error" for: the environment failed, so whatever it left in
+        # events.jsonl is not the agent's answer. evolve never asks for its
+        # score, and nobody should be asked to judge it either.
+        errored = set()
+        state_path = gen_dir.parent / "state.json"
+        if state_path.is_file():
+            try:
+                state = json.loads(state_path.read_text())
+            except json.JSONDecodeError:
+                state = {}
+            errored = {
+                key
+                for key, record in (state.get("variants") or {}).items()
+                if isinstance(record, dict) and record.get("status") == "errored"
+            }
         for variant in sorted(gen_dir.iterdir()):
             # Variant names are <short>-t<task>r<repeat>; only compare like
             # with like, since a different task is a different question.
             name = variant.name
-            if f"-t{self.task_index}r" not in name:
+            if f"-t{self.task_index}r" not in name or name in errored:
                 continue
             events = variant / "events.jsonl"
             if not events.exists():

@@ -72,6 +72,15 @@ class TenonEnvironmentError(EvolveError):
     of admit rather than returning None."""
 
 
+def shown(value) -> str:
+    """Format a score for a human. An unscored genome prints as a dash.
+
+    None is not zero here: it means every trial of that genome ended in an
+    environment failure, so nothing was learned about it. Printing 0.0 would
+    read as evidence that it is terrible."""
+    return f"{value:.4f}" if value is not None else "-"
+
+
 # --------------------------------------------------------------------------
 # genome
 # --------------------------------------------------------------------------
@@ -525,6 +534,12 @@ class Search:
             shutil.rmtree(path, ignore_errors=True)
             return None
         fingerprint = verdict.fingerprint
+        if not fingerprint:
+            # `home` is built by slicing the fingerprint, so an empty one
+            # collapses it onto genomes_dir — and the next line deletes that
+            # directory, taking every genome in the run with it. An ok
+            # verdict that names nothing is a broken tenon, not a candidate.
+            raise TenonEnvironmentError("tenon check reported ok without a fingerprint")
         if verdict.warnings:
             self.log(f"  warnings ({operator}): {', '.join(verdict.warnings[:3])}")
         if fingerprint in self.known:
@@ -833,9 +848,24 @@ class Search:
         for genome in candidates:
             samples, log = [], []
             for t, task, r in [(t, task, r) for g, t, task, r in trials if g is genome]:
-                record = records.get(f"{genome.short}-t{t}r{r}")
+                variant = f"{genome.short}-t{t}r{r}"
+                record = records.get(variant)
                 if record is None:
                     samples.append(0.0)
+                    continue
+                if record.get("status") == "errored":
+                    # tenon reported outcome "error": the environment failed,
+                    # not the candidate. Every scorer shipped here turns a
+                    # non-done status into 0.0, so passing this on would
+                    # record infrastructure noise as evidence about the
+                    # genome. Drop the sample instead — a genome left with no
+                    # samples at all stays unscored and is evaluated again.
+                    detail = (record.get("detail") or "").splitlines()
+                    self.log(
+                        f"  WARNING: {variant} errored, not scored "
+                        f"(outcome {record.get('outcome') or 'none'})"
+                        + (f": {detail[0][:160]}" if detail else "")
+                    )
                     continue
                 if record.get("fingerprint") and record["fingerprint"] != genome.gid:
                     self.log(
@@ -871,7 +901,7 @@ class Search:
             # staying frozen at whatever the first draw happened to be.
             again = genome.gid in rescored and bool(genome.scores)
             genome.scores = (genome.scores if again else []) + samples
-            genome.score = statistics.fmean(genome.scores) if genome.scores else 0.0
+            genome.score = statistics.fmean(genome.scores) if genome.scores else None
             genome.stdev = statistics.pstdev(genome.scores) if len(genome.scores) > 1 else 0.0
             self.record(
                 {
@@ -887,7 +917,7 @@ class Search:
                     "path": str(genome.path),
                 }
             )
-            self.log(f"  {genome.short}  score {genome.score:.4f}  sd {genome.stdev:.4f}  [{genome.operator}]")
+            self.log(f"  {genome.short}  score {shown(genome.score)}  sd {genome.stdev:.4f}  [{genome.operator}]")
 
     def pins_for(self, genome: Genome) -> str:
         """One pin set per genome, so the model can be pinned across a moving
@@ -929,7 +959,7 @@ class Search:
             shutil.rmtree(staged.parent, ignore_errors=True)
             # Exit 0 is not the claim that matters; the terminator naming the
             # path it wrote is.
-            written, outcome = "", ""
+            written, outcome, error, ids = "", "", "", []
             for line in proc.stdout.splitlines():
                 line = line.strip()
                 if not line:
@@ -938,12 +968,35 @@ class Search:
                     obj = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if isinstance(obj, dict) and obj.get("outcome"):
-                    outcome, written = obj["outcome"], obj.get("pins_written", "")
-            if outcome != "ok" or written != str(path):
+                if not isinstance(obj, dict):
+                    continue
+                if obj.get("outcome"):
+                    outcome = obj["outcome"]
+                    written = obj.get("pins_written", "")
+                    error = obj.get("error", "")
+                elif obj.get("severity") == "error":
+                    ids.append(obj.get("id", ""))
+            if outcome in ("", "error"):
+                # An unwritable pins path, or a stream with no terminator at
+                # all. The environment failed, not the genome, and the search
+                # must stop rather than count this against the candidate.
+                raise TenonEnvironmentError(
+                    f"tenon check --write-pins could not run for {genome.short}: "
+                    f"{error or proc.stderr.strip()[:200] or 'no outcome'}"
+                )
+            if outcome == "gate_failed":
+                # This same content passed the gate on the way in, so a
+                # rejection here is tenon contradicting itself, not a verdict
+                # on the candidate. Name what it rejected.
                 raise EvolveError(
-                    f"tenon check --write-pins failed for {genome.short} "
-                    f"(outcome {outcome or 'none'}): {proc.stderr.strip()[:200]}"
+                    f"tenon check --write-pins rejected {genome.short}, which the gate "
+                    f"already admitted — a contract violation, not a finding about the "
+                    f"genome: {', '.join(i for i in ids if i) or 'no diagnostics'}"
+                )
+            if written != str(path):
+                raise EvolveError(
+                    f"tenon check reported ok for {genome.short} but wrote pins to "
+                    f"{written or 'nothing'} rather than {path}"
                 )
         return str(path)
 
@@ -1145,7 +1198,8 @@ class Search:
             best = max(population, key=lambda m: m.genome.score if m.genome.score is not None else -1e18)
             self.log(
                 f"resumed at generation {first_generation} — {len(self.known)} genomes known, "
-                f"{len(population)} carried forward, incumbent {best.genome.short} at {best.genome.score:.4f}"
+                f"{len(population)} carried forward, incumbent {best.genome.short} "
+                f"at {shown(best.genome.score)}"
             )
         else:
             work = scratch / "seed"
@@ -1164,7 +1218,7 @@ class Search:
                 self.checkpoint(0, population)
 
             for generation in range(first_generation, self.cfg.generations + 1):
-                self.log(f"generation {generation} — incumbent {best.genome.short} at {best.genome.score:.4f}")
+                self.log(f"generation {generation} — incumbent {best.genome.short} at {shown(best.genome.score)}")
                 candidates = self.propose(generation, population)
                 if not candidates:
                     self.log("  no admissible candidates; stopping")
@@ -1179,7 +1233,7 @@ class Search:
                     rescore = tuple(population)
                 was = best.genome.score
                 self.evaluate(generation, candidates, rescore)
-                if rescore and best.genome.score != was:
+                if rescore and best.genome.score != was and None not in (was, best.genome.score):
                     drift = best.genome.score - was
                     self.log(
                         f"  incumbent rescored {was:.4f} -> {best.genome.score:.4f} "
@@ -1190,11 +1244,18 @@ class Search:
                 # listed: a select policy is free to order its population any
                 # way it likes, and an island policy groups by island.
                 leader = max(population, key=lambda m: m.genome.score if m.genome.score is not None else -1e18)
-                if leader.genome.gid != best.genome.gid and (leader.genome.score or 0.0) > (best.genome.score or 0.0):
+                # An unscored genome cannot take the incumbency, and it cannot
+                # hold it against one that was measured: None is the absence
+                # of a measurement, not a low one.
+                if (
+                    leader.genome.gid != best.genome.gid
+                    and leader.genome.score is not None
+                    and (best.genome.score is None or leader.genome.score > best.genome.score)
+                ):
                     displaced = best
-                    gain = leader.genome.score - displaced.genome.score
+                    gain = leader.genome.score - (displaced.genome.score or 0.0)
                     best, stale = leader, 0
-                    self.log(f"  new incumbent {best.genome.short} at {best.genome.score:.4f} (+{gain:.4f})")
+                    self.log(f"  new incumbent {best.genome.short} at {shown(best.genome.score)} (+{gain:.4f})")
                     # A genome with one sample has a spread of zero, so judging
                     # the gain only against the winner's own spread would never
                     # fire on a fresh candidate — which is exactly the case
@@ -1211,7 +1272,11 @@ class Search:
                     stale += 1
                     self.log(f"  no improvement ({stale} generation(s) stale)")
                 self.checkpoint(generation, population)
-                if self.cfg.target is not None and best.genome.score >= self.cfg.target:
+                if (
+                    self.cfg.target is not None
+                    and best.genome.score is not None
+                    and best.genome.score >= self.cfg.target
+                ):
                     self.log(f"target {self.cfg.target} reached")
                     break
                 if self.cfg.patience and stale >= self.cfg.patience:
@@ -1241,7 +1306,7 @@ class Search:
         }
         (self.root / "best.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
         self.log("")
-        self.log(f"best {best.genome.short} at {best.genome.score:.4f} after {self.evaluations} evaluations")
+        self.log(f"best {best.genome.short} at {shown(best.genome.score)} after {self.evaluations} evaluations")
         self.log(f"review it: diff -ru {self.cfg.seed} {best.genome.path}")
         self.log("promotion is yours to make — evolve never writes to the source agent")
         return 0
@@ -1323,7 +1388,7 @@ def cmd_best(args) -> int:
     best = summary["best"]
     print(f"run        {summary['run']} ({summary['strategy']}, {summary['evaluations']} evaluations)")
     print(f"genome     {best['genome']}")
-    print(f"score      {best['score']:.4f}  sd {best['stdev']:.4f}")
+    print(f"score      {shown(best.get('score'))}  sd {shown(best.get('stdev'))}")
     print(f"operator   {best['operator']}")
     print(f"path       {best['path']}")
     print()

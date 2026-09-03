@@ -151,6 +151,12 @@ scores 0. `EVOLVE_WORKSPACE` is exported so a test-suite scorer can just `cd`
 into the variant's checkout — see
 [`examples/score-tests.sh`](examples/score-tests.sh).
 
+A trial whose variant fanout marked `errored` — tenon reported outcome
+`error`, so the environment failed rather than the candidate — is never handed
+to `score` at all. It is logged as a warning and dropped, and a genome left
+with no other sample stays unscored (`-` in the log and `null` in the lineage)
+rather than being recorded as a zero.
+
 The three search policies work the same way — a named built-in, or a command
 taking one JSON object on stdin and printing one on stdout. Evolve keeps the
 mechanism; these decide the policy.

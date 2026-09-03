@@ -390,6 +390,7 @@ class Supervisor:
                     "detail": "",
                     "fingerprint": "",
                     "source_digest": "",
+                    "diagnostics": [],
                     "outcome": "",
                     "branch": "",
                     "workspace": "",
@@ -569,25 +570,31 @@ class Supervisor:
     def _check(self, name: str, variant: dict, vdir: Path, agent: Path, workspace: Path) -> str:
         """Gate the variant and mint its identity in one process.
 
-        The harness is passed explicitly so this is the same gate `apply`
-        runs three lines later: a harness-specific rejection costs one
-        process here instead of two. No --emit: fanout wants a fingerprint,
-        and a per-file inventory it would discard is hot-path I/O."""
+        The harness and the pin set are passed explicitly so this is the
+        same gate `apply` runs three lines later: a harness-specific or
+        pin-specific rejection costs one process here instead of two, and it
+        is recorded as a rejection of this variant rather than surfacing
+        later as an apply contract violation. No --emit: fanout wants a
+        fingerprint, and a per-file inventory it would discard is hot-path
+        I/O."""
         self.set(name, status=CHECKING)
         log = vdir / "check.jsonl"
         err = vdir / "check.err"
+        argv = [
+            self.spec["tenon"],
+            "check",
+            str(agent),
+            "--harness",
+            self.spec["harness"],
+            "--format",
+            "jsonl",
+        ]
+        if variant.get("pins"):
+            argv += ["--pins", variant["pins"]]
         with log.open("wb") as out, err.open("wb") as errf:
             proc = self._spawn(
                 name,
-                [
-                    self.spec["tenon"],
-                    "check",
-                    str(agent),
-                    "--harness",
-                    self.spec["harness"],
-                    "--format",
-                    "jsonl",
-                ],
+                argv,
                 cwd=agent,
                 stdout=out,
                 stderr=errf,
@@ -605,10 +612,13 @@ class Supervisor:
             return terminator.get("fingerprint", "")
         if outcome == "gate_failed":
             digest = terminator.get("source_digest", "")
-            self.set(name, source_digest=digest)
-            ids = ",".join(d.get("id", "") for d in diagnostics if d.get("severity") == "error")
+            ids = [d.get("id", "") for d in diagnostics if d.get("severity") == "error"]
+            # The diagnostic ids are the finding. They go on the record, not
+            # only into the exception text, so `collect` can say what was
+            # rejected without anyone reading the log.
+            self.set(name, source_digest=digest, diagnostics=ids)
             raise FanoutError(
-                f"tenon check rejected {agent}: {ids or 'no diagnostics'}; "
+                f"tenon check rejected {agent}: {','.join(ids) or 'no diagnostics'}; "
                 f"source_digest={digest or 'unknown'}; see {log}"
             )
         raise TenonEnvironmentError(
@@ -642,7 +652,7 @@ class Supervisor:
             )
             proc.wait()
         self._reap(name)
-        terminator, _ = read_terminator(log, f"tenon apply ({err})")
+        terminator, diagnostics = read_terminator(log, f"tenon apply ({err})")
         outcome = terminator.get("outcome", "")
         self.set(name, outcome=outcome)
         if outcome == "ok":
@@ -654,12 +664,16 @@ class Supervisor:
             )
             return
         if outcome == "gate_failed":
-            # check passed on this same source moments ago and apply runs the
-            # same gate, so this is a contract violation worth naming loudly.
+            # check passed on this same source moments ago, with the same
+            # harness and the same pin set, so apply ran the same gate and
+            # this is a contract violation worth naming loudly. Naming it
+            # means recording what it rejected, not only that it did.
             digest = terminator.get("source_digest", "")
-            self.set(name, source_digest=digest)
+            ids = [d.get("id", "") for d in diagnostics if d.get("severity") == "error"]
+            self.set(name, source_digest=digest, diagnostics=ids)
             raise FanoutError(
-                f"tenon apply rejected a source tenon check accepted; "
+                f"tenon apply rejected a source tenon check accepted with the same "
+                f"harness and pins: {','.join(ids) or 'no diagnostics'}; "
                 f"source_digest={digest or 'unknown'}; see {log}"
             )
         raise TenonEnvironmentError(
@@ -836,6 +850,13 @@ def summarize_turns(events: Path) -> list:
     seen: dict = {}
     if not events.exists():
         return []
+    # A dispatcher terminalizes any input a previous one abandoned before it
+    # accepts an input of its own, emitting turn.uncertain for each, and
+    # deliberately leaves those out of run.completed's counts: they belong to
+    # the run that abandoned them. This reduction is cross-checked against
+    # those counts, so it has to draw the same line — the first
+    # input.accepted — or a complete stream reads as a truncated one.
+    accepted = False
     for line in events.read_text(errors="replace").splitlines():
         line = line.strip()
         if not line:
@@ -845,7 +866,10 @@ def summarize_turns(events: Path) -> list:
         except json.JSONDecodeError:
             continue
         kind = event.get("type")
-        if kind not in terminal:
+        if kind == "input.accepted":
+            accepted = True
+            continue
+        if kind not in terminal or not accepted:
             continue
         input_id = event.get("input_id") or ""
         if input_id not in seen:
@@ -1047,6 +1071,10 @@ def cmd_collect(args) -> int:
             # so a rejection is attributable; it is not a fingerprint and never
             # joins with one.
             "source_digest": record.get("source_digest", ""),
+            # The error-severity diagnostic ids from whichever gate rejected
+            # it, so a rejection says what was wrong without anyone opening
+            # the log.
+            "diagnostics": record.get("diagnostics", []),
             "outcome": record.get("outcome", ""),
             "harness": spec["harness"],
             "branch": record.get("branch", ""),
