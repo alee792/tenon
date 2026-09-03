@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """evolve — hill-climbing and genetic search over tenon agent projects.
 
-fanout runs one generation. evolve is the loop around it: propose candidate
+fanout runs one round. evolve is the loop around it: propose candidate
 agent projects, gate them, evaluate them, select, repeat.
 
 The design rests on two properties tenon already has, and adds nothing to
@@ -75,7 +75,7 @@ class TenonEnvironmentError(EvolveError):
 def shown(value) -> str:
     """Format a score for a human. An unscored genome prints as a dash.
 
-    None is not zero here: it means every trial of that genome ended in an
+    None is not zero here: it means every variant of that genome ended in an
     environment failure, so nothing was learned about it. Printing 0.0 would
     read as evidence that it is terrible."""
     return f"{value:.4f}" if value is not None else "-"
@@ -90,9 +90,9 @@ def shown(value) -> str:
 class Genome:
     gid: str
     path: Path
-    generation: int
+    round_no: int
     parents: list = field(default_factory=list)
-    operator: str = "seed"
+    mutator: str = "seed"
     score: float | None = None
     scores: list = field(default_factory=list)
     stdev: float | None = None
@@ -121,7 +121,9 @@ class Member:
 
 
 def genes(root: Path) -> dict:
-    """Map gene name to its path. A gene is one authored component."""
+    """Map each locus to the path of the gene at it. A locus is a component
+    path — `instructions.md`, `skills/alpha` — and the gene is the content
+    there; a genome is that map."""
     found: dict = {}
     for name in GENE_FILES:
         if (root / name).is_file():
@@ -160,13 +162,14 @@ def recombine(parents: list, target: Path, rng: random.Random) -> None:
     for name in loci:
         holders = [i for i, pool in enumerate(pools) if name in pool]
         plan[name] = holders[rng.randrange(len(holders))]
-    lay_out(parents, plan, target)
+    assemble(parents, plan, target)
 
 
-def lay_out(parents: list, plan: dict, target: Path) -> None:
-    """Materialize an offspring from a per-locus plan of {gene: parent index}.
+def assemble(parents: list, plan: dict, target: Path) -> None:
+    """Materialize an offspring from a per-locus plan of {locus: parent index}.
     This is the mechanism every combine policy shares: a policy decides which
-    parent supplies each gene, and this puts the files where they belong."""
+    parent supplies the gene at each locus, and this puts the files where they
+    belong."""
     pools = [genes(p) for p in parents]
     target.mkdir(parents=True, exist_ok=True)
     for name, index in plan.items():
@@ -227,8 +230,8 @@ def genome_view(m: Member, index: int = -1) -> dict:
         "score": g.score,
         "scores": g.scores,
         "stdev": g.stdev,
-        "generation": g.generation,
-        "operator": g.operator,
+        "round": g.round_no,
+        "mutator": g.mutator,
         "parents": g.parents,
         "path": str(g.path),
         "genes": sorted(genes(g.path)),
@@ -326,11 +329,11 @@ class Config:
     tasks: list
     repeats: int
     score: str
-    operators: list
+    mutators: list
     select_policy: str
     pair_policy: str
     combine_policy: str
-    generations: int
+    rounds: int
     population: int
     offspring: int
     crossover_rate: float
@@ -338,7 +341,7 @@ class Config:
     tournament: int
     patience: int
     target: float | None
-    max_evaluations: int
+    max_variants: int
     concurrency: int
     timeout: str
     turn_timeout: str
@@ -355,27 +358,27 @@ class Config:
         return payload
 
 
-def load_operators(raw: dict) -> list:
-    """Variation operators, weighted. `mutate` is sugar for a single one.
+def load_mutators(raw: dict) -> list:
+    """Variation mutators, weighted. `mutate` is sugar for a single one.
 
-    Naming each operator matters beyond bookkeeping: the operator that made a
+    Naming each mutator matters beyond bookkeeping: the mutator that made a
     genome lands in its lineage entry, so the record answers "which kind of
     change actually produced the gains" without extra instrumentation."""
-    operators = raw.get("operators")
-    if not operators:
+    mutators = raw.get("mutators")
+    if not mutators:
         if not raw.get("mutate"):
-            raise EvolveError("spec: one of mutate or operators is required")
-        operators = [{"name": "mutate", "weight": 1, "command": raw["mutate"]}]
-    if not isinstance(operators, list) or not operators:
-        raise EvolveError("operators must be a non-empty list")
+            raise EvolveError("spec: one of mutate or mutators is required")
+        mutators = [{"name": "mutate", "weight": 1, "command": raw["mutate"]}]
+    if not isinstance(mutators, list) or not mutators:
+        raise EvolveError("mutators must be a non-empty list")
     out = []
-    for entry in operators:
+    for entry in mutators:
         if not isinstance(entry, dict) or not entry.get("command"):
-            raise EvolveError("each operator needs a command")
+            raise EvolveError("each mutator needs a command")
         weight = float(entry.get("weight", 1))
         if weight <= 0:
-            raise EvolveError("an operator weight must be greater than zero")
-        out.append({"name": entry.get("name") or "operator", "weight": weight, "command": entry["command"]})
+            raise EvolveError("a mutator weight must be greater than zero")
+        out.append({"name": entry.get("name") or "mutator", "weight": weight, "command": entry["command"]})
     return out
 
 
@@ -419,7 +422,7 @@ def load_config(path: Path) -> Config:
         raise EvolveError("reevaluate must be incumbent, population, or none")
 
     # (mu + lambda): `population` is mu, the survivors carried forward, and
-    # `offspring` is lambda, how many candidates each generation proposes.
+    # `offspring` is lambda, how many candidates each round proposes.
     # They were one knob, which made "keep the best two, breed five from them"
     # inexpressible.
     if strategy == "hill-climb":
@@ -447,11 +450,11 @@ def load_config(path: Path) -> Config:
         tasks=tasks,
         repeats=int(raw.get("repeats", 1)),
         score=need("score"),
-        operators=load_operators(raw),
+        mutators=load_mutators(raw),
         select_policy=raw.get("select", "elitist"),
         pair_policy=raw.get("pair", "tournament"),
         combine_policy=raw.get("combine", "uniform"),
-        generations=int(raw.get("generations", 5)),
+        rounds=int(raw.get("rounds", 5)),
         population=population,
         offspring=offspring,
         crossover_rate=float(raw.get("crossover_rate", 0.5)),
@@ -459,7 +462,7 @@ def load_config(path: Path) -> Config:
         tournament=int(raw.get("tournament", 2)),
         patience=int(raw.get("patience", 0)),
         target=float(raw["target"]) if raw.get("target") is not None else None,
-        max_evaluations=int(raw.get("max_evaluations", 0)),
+        max_variants=int(raw.get("max_variants", 0)),
         concurrency=int(raw.get("concurrency", 4)),
         timeout=str(raw.get("timeout", "900s")),
         turn_timeout=str(raw.get("turn_timeout", "")),
@@ -489,7 +492,7 @@ class Search:
         # each slot so a behavioural descriptor can come from the evaluation
         # rather than from the pairing policy.
         self.observed: dict = {}
-        self.evaluations = 0
+        self.variants_spent = 0
 
     # -- lineage -----------------------------------------------------------
 
@@ -502,12 +505,12 @@ class Search:
 
     # -- candidate construction -------------------------------------------
 
-    def admit(self, path: Path, generation: int, parents: list, operator: str):
+    def admit(self, path: Path, round_no: int, parents: list, mutator: str):
         """Gate a materialized candidate and give it its identity. Returns the
         genome — the already-known one when the content is a duplicate, so it
         can fill a second slot — or None when tenon rejected it.
 
-        None means *rejected*, and the caller counts it against the operator.
+        None means *rejected*, and the caller counts it against the mutator.
         An environment failure is not that, so TenonEnvironmentError
         propagates: the candidate is neither admitted nor scored against."""
         verdict = gate(self.cfg.tenon, self.cfg.harness, path)
@@ -515,9 +518,9 @@ class Search:
             rejected = list(verdict.rejected)
             self.record(
                 {
-                    "generation": generation,
+                    "round": round_no,
                     "status": "rejected",
-                    "operator": operator,
+                    "mutator": mutator,
                     "parents": parents,
                     "diagnostics": rejected,
                     # The digest names the bytes that failed, and it is
@@ -530,7 +533,7 @@ class Search:
                 }
             )
             digest = verdict.source_digest.split(":")[-1][:8] or "unknown"
-            self.log(f"  rejected {digest} ({operator}): {', '.join(rejected[:3]) or 'no diagnostics'}")
+            self.log(f"  rejected {digest} ({mutator}): {', '.join(rejected[:3]) or 'no diagnostics'}")
             shutil.rmtree(path, ignore_errors=True)
             return None
         fingerprint = verdict.fingerprint
@@ -541,19 +544,19 @@ class Search:
             # verdict that names nothing is a broken tenon, not a candidate.
             raise TenonEnvironmentError("tenon check reported ok without a fingerprint")
         if verdict.warnings:
-            self.log(f"  warnings ({operator}): {', '.join(verdict.warnings[:3])}")
+            self.log(f"  warnings ({mutator}): {', '.join(verdict.warnings[:3])}")
         if fingerprint in self.known:
             self.record(
                 {
-                    "generation": generation,
+                    "round": round_no,
                     "status": "duplicate",
                     "genome": fingerprint,
-                    "operator": operator,
+                    "mutator": mutator,
                     "parents": parents,
                     "score": self.known[fingerprint].score,
                 }
             )
-            self.log(f"  duplicate {fingerprint.split(':')[-1][:8]} ({operator}) — reusing its score")
+            self.log(f"  duplicate {fingerprint.split(':')[-1][:8]} ({mutator}) — reusing its score")
             shutil.rmtree(path, ignore_errors=True)
             # Return the known genome rather than dropping it: the content is
             # already scored, but it may legitimately fill a new slot — an
@@ -563,31 +566,31 @@ class Search:
         if home.exists():
             shutil.rmtree(home)
         path.rename(home)
-        genome = Genome(gid=fingerprint, path=home, generation=generation, parents=parents, operator=operator)
+        genome = Genome(gid=fingerprint, path=home, round_no=round_no, parents=parents, mutator=mutator)
         self.known[fingerprint] = genome
         return genome
 
-    def vary(self, path: Path, parents: list, generation: int) -> str:
-        """Apply one weighted variation operator in the candidate directory.
+    def vary(self, path: Path, parents: list, round_no: int) -> str:
+        """Apply one weighted variation mutator in the candidate directory.
 
-        The operator is handed a report on the parents it came from — their
-        scores and every trial they ran, failures included. A blind mutation
-        wastes an evaluation; at this budget an operator should be able to see
+        The mutator is handed a report on the parents it came from — their
+        scores and every variant they ran, failures included. A blind mutation
+        wastes a variant; at this budget a mutator should be able to see
         why its parent scored what it did."""
-        operator = self.rng.choices(self.cfg.operators, [o["weight"] for o in self.cfg.operators])[0]
+        mutator = self.rng.choices(self.cfg.mutators, [m["weight"] for m in self.cfg.mutators])[0]
         report = self.root / "scratch" / f"{path.name}-parents.json"
         report.write_text(
             json.dumps(
                 {
-                    "generation": generation,
-                    "operator": operator["name"],
+                    "round": round_no,
+                    "mutator": mutator["name"],
                     "parents": [self.parent_report(p) for p in parents],
                 },
                 indent=2,
             )
         )
         proc = subprocess.run(
-            ["/bin/sh", "-c", operator["command"]],
+            ["/bin/sh", "-c", mutator["command"]],
             cwd=str(path),
             capture_output=True,
             text=True,
@@ -595,51 +598,51 @@ class Search:
                 **os.environ,
                 "EVOLVE_GENOME_DIR": str(path),
                 "EVOLVE_RUN": self.cfg.run,
-                "EVOLVE_OPERATOR": operator["name"],
+                "EVOLVE_MUTATOR": mutator["name"],
                 "EVOLVE_PARENT_REPORT": str(report),
                 "EVOLVE_GENES": ",".join(sorted(genes(path))),
-                # An operator's working directory is the genome it edits, so a
+                # A mutator's working directory is the genome it edits, so a
                 # relative command path in the spec would resolve against the
                 # genome rather than the project. This is the anchor to use.
                 "EVOLVE_CWD": os.getcwd(),
             },
         )
         if proc.returncode != 0:
-            raise EvolveError(f"operator {operator['name']} exited {proc.returncode}: {proc.stderr.strip()[:200]}")
-        return operator["name"]
+            raise EvolveError(f"mutator {mutator['name']} exited {proc.returncode}: {proc.stderr.strip()[:200]}")
+        return mutator["name"]
 
     def parent_report(self, member: Member) -> dict:
         view = genome_view(member)
         if member.genome.report and Path(member.genome.report).is_file():
-            view["trials"] = json.loads(Path(member.genome.report).read_text())
+            view["variants"] = json.loads(Path(member.genome.report).read_text())
         return view
 
-    def propose(self, generation: int, population: list) -> list:
+    def propose(self, round_no: int, population: list) -> list:
         """Three policies, in order: which slots pair up, which genes the child
         takes from which parent, and how the child is then varied. Each is a
         named built-in or a command; evolve only supplies the mechanism."""
         scratch = self.root / "scratch"
         scratch.mkdir(parents=True, exist_ok=True)
         candidates: list = []
-        for i, (parents, tags) in enumerate(self.choose_pairs(generation, population)):
-            work = scratch / f"g{generation}-c{i}"
+        for i, (parents, tags) in enumerate(self.choose_pairs(round_no, population)):
+            work = scratch / f"r{round_no}-c{i}"
             if work.exists():
                 shutil.rmtree(work)
             if len(parents) > 1:
-                self.combine(generation, parents, work)
-                operator = "crossover"
+                self.combine(round_no, parents, work)
+                mutator = "crossover"
             else:
                 materialize(parents[0].genome.path, work)
-                operator = "copy"
-            if operator == "copy" or self.rng.random() < self.cfg.mutation_rate:
+                mutator = "copy"
+            if mutator == "copy" or self.rng.random() < self.cfg.mutation_rate:
                 try:
-                    applied = self.vary(work, parents, generation)
+                    applied = self.vary(work, parents, round_no)
                 except EvolveError as err:
                     self.log(f"  {err}")
                     shutil.rmtree(work, ignore_errors=True)
                     continue
-                operator = applied if operator == "copy" else f"crossover+{applied}"
-            genome = self.admit(work, generation, [p.genome.gid for p in parents], operator)
+                mutator = applied if mutator == "copy" else f"crossover+{applied}"
+            genome = self.admit(work, round_no, [p.genome.gid for p in parents], mutator)
             if genome:
                 # A child inherits its first parent's tags unless the pairing
                 # policy said otherwise, so island membership descends by
@@ -647,7 +650,7 @@ class Search:
                 candidates.append(Member(genome, {**parents[0].tags, **self.observed.get(genome.gid, {}), **tags}))
         return candidates
 
-    def choose_pairs(self, generation: int, population: list) -> list:
+    def choose_pairs(self, round_no: int, population: list) -> list:
         """Parent selection. Returns one entry per offspring: the parent slots
         and any tags to put on the child. A single parent reproduces asexually,
         two or more recombine, so one policy expresses both who breeds and how
@@ -657,7 +660,7 @@ class Search:
             out = hook(
                 self.cfg.pair_policy,
                 {
-                    "generation": generation,
+                    "round": round_no,
                     "count": count,
                     "strategy": self.cfg.strategy,
                     "population": [genome_view(m, i) for i, m in enumerate(population)],
@@ -705,18 +708,18 @@ class Search:
             resolved.append((parents, tags))
         return resolved
 
-    def combine(self, generation: int, parents: list, work: Path) -> None:
+    def combine(self, round_no: int, parents: list, work: Path) -> None:
         """Crossover policy. The built-in draws each locus uniformly. A hook
-        either returns a plan — which parent supplies each gene, evolve lays it
-        out — or materializes the directory itself when it wants a grain finer
-        than whole components."""
+        either returns a plan — which parent supplies the gene at each locus,
+        and evolve assembles it — or materializes the directory itself when it
+        wants a grain finer than whole components."""
         if self.cfg.combine_policy == "uniform":
             recombine([p.genome.path for p in parents], work, self.rng)
             return
         out = hook(
             self.cfg.combine_policy,
             {
-                "generation": generation,
+                "round": round_no,
                 "out_dir": str(work),
                 "parents": [genome_view(p, i) for i, p in enumerate(parents)],
             },
@@ -735,10 +738,10 @@ class Search:
             if gid not in index:
                 raise EvolveError(f"the combine plan names {gid!r}, which is not one of this offspring's parents")
             resolved[name] = index[gid]
-        lay_out([p.genome.path for p in parents], resolved, work)
+        assemble([p.genome.path for p in parents], resolved, work)
 
     def tournament(self, population: list) -> Member:
-        # Generation 1 has only the seed to draw from, so the tournament can
+        # Round 1 has only the seed to draw from, so the tournament can
         # never be wider than the population it samples without replacement.
         size = min(max(2, self.cfg.tournament), len(population))
         pick = self.rng.sample(population, size)
@@ -746,8 +749,8 @@ class Search:
 
     # -- evaluation --------------------------------------------------------
 
-    def evaluate(self, generation: int, members: list, rescore: tuple = ()) -> None:
-        """One fanout run per generation: every candidate crossed with every
+    def evaluate(self, round_no: int, members: list, rescore: tuple = ()) -> None:
+        """One fanout run per round: every candidate crossed with every
         task, repeated `repeats` times. Fitness is the mean; the standard
         deviation travels with it so a 'win' inside the noise is visible."""
         # Two slots may hold the same content, and content already scored is
@@ -763,25 +766,25 @@ class Search:
             seen.add(gid)
             candidates.append(member.genome)
 
-        trials = []
+        variants = []
         for genome in candidates:
             for t, task in enumerate(self.cfg.tasks):
                 for r in range(self.cfg.repeats):
-                    trials.append((genome, t, task, r))
-        if not trials:
+                    variants.append((genome, t, task, r))
+        if not variants:
             return
-        if self.cfg.max_evaluations and self.evaluations + len(trials) > self.cfg.max_evaluations:
-            raise Budget(f"budget exhausted: {self.evaluations} evaluations spent")
+        if self.cfg.max_variants and self.variants_spent + len(variants) > self.cfg.max_variants:
+            raise Budget(f"budget exhausted: {self.variants_spent} variants spent")
 
         spec = {
-            "run": f"gen-{generation}",
+            "run": f"round-{round_no}",
             "repo": str(self.cfg.repo),
             "agent": self.cfg.agent,
             "harness": self.cfg.harness,
             "tenon": self.cfg.tenon,
             "concurrency": self.cfg.concurrency,
             "timeout": self.cfg.timeout,
-            "state_dir": str(self.root / "generations"),
+            "state_dir": str(self.root / "rounds"),
             "branch_prefix": f"evolve/{self.cfg.run}",
             "variants": [
                 {
@@ -790,36 +793,36 @@ class Search:
                     "mutate": f"{sys.executable} {Path(__file__).resolve()} _inject {g.path}",
                     **({"pins": self.pins_for(g)} if self.cfg.model else {}),
                 }
-                for g, t, task, r in trials
+                for g, t, task, r in variants
             ],
         }
         if self.cfg.turn_timeout:
             spec["turn_timeout"] = self.cfg.turn_timeout
-        spec_path = self.root / f"gen-{generation}.fanout.json"
+        spec_path = self.root / f"round-{round_no}.fanout.json"
         spec_path.write_text(json.dumps(spec, indent=2) + "\n")
 
-        self.log(f"  evaluating {len(candidates)} candidates over {len(trials)} runs")
+        self.log(f"  evaluating {len(candidates)} candidates over {len(variants)} runs")
         subprocess.run([sys.executable, self.cfg.fanout, "start", "--spec", str(spec_path)], check=False)
-        self.evaluations += len(trials)
+        self.variants_spent += len(variants)
         try:
-            self.score_generation(generation, candidates, trials, rescored, members, rescore)
+            self.score_round(round_no, candidates, variants, rescored, members, rescore)
         finally:
-            # Once the harness has run, the generation's worktrees are owed
+            # Once the harness has run, the round's worktrees are owed
             # back whether or not scoring succeeded.
-            self.reclaim(generation)
+            self.reclaim(round_no)
 
-    def score_generation(self, generation, candidates, trials, rescored, members, rescore) -> None:
+    def score_round(self, round_no, candidates, variants, rescored, members, rescore) -> None:
 
         collected = subprocess.run(
             [
                 sys.executable,
                 self.cfg.fanout,
                 "collect",
-                f"gen-{generation}",
+                f"round-{round_no}",
                 "--json",
                 "--text",
                 "--state-dir",
-                str(self.root / "generations"),
+                str(self.root / "rounds"),
             ],
             capture_output=True,
             text=True,
@@ -827,17 +830,17 @@ class Search:
         if collected.returncode != 0:
             raise EvolveError(f"fanout collect failed: {collected.stderr.strip()[:200]}")
         records = {r["variant"]: r for r in json.loads(collected.stdout)}
-        # A variant that never ran silently shrinks the generation — a judged
+        # A variant that never ran silently shrinks the round — a judged
         # round loses an entry, and a comparison-based score loses its anchor.
         # Say so rather than scoring a smaller field as if it were the one asked
         # for.
         broken = [
             f"{name} ({records[name].get('status', 'missing')})"
-            for name in (f"{g.short}-t{t}r{r}" for g, t, task, r in trials)
+            for name in (f"{g.short}-t{t}r{r}" for g, t, task, r in variants)
             if name not in records or records[name].get("status") != "done"
         ]
         if broken:
-            self.log(f"  WARNING: {len(broken)} of {len(trials)} runs did not complete: {', '.join(broken[:4])}")
+            self.log(f"  WARNING: {len(broken)} of {len(variants)} runs did not complete: {', '.join(broken[:4])}")
             for name in broken[:4]:
                 detail = records.get(name.split(" ")[0], {}).get("detail", "")
                 if detail:
@@ -847,7 +850,7 @@ class Search:
         reports.mkdir(exist_ok=True)
         for genome in candidates:
             samples, log = [], []
-            for t, task, r in [(t, task, r) for g, t, task, r in trials if g is genome]:
+            for t, task, r in [(t, task, r) for g, t, task, r in variants if g is genome]:
                 variant = f"{genome.short}-t{t}r{r}"
                 record = records.get(variant)
                 if record is None:
@@ -872,7 +875,7 @@ class Search:
                         f"  warning: {genome.short} ran as {record['fingerprint'].split(':')[-1][:8]}; "
                         "the injected genome is not what tenon fingerprinted"
                     )
-                value = self.fitness(generation, genome, t, task, record)
+                value = self.fitness(round_no, genome, t, task, record)
                 samples.append(value)
                 log.append(
                     {
@@ -905,11 +908,11 @@ class Search:
             genome.stdev = statistics.pstdev(genome.scores) if len(genome.scores) > 1 else 0.0
             self.record(
                 {
-                    "generation": generation,
+                    "round": round_no,
                     "status": "rescored" if again else "scored",
                     "genome": genome.gid,
                     "short": genome.short,
-                    "operator": genome.operator,
+                    "mutator": genome.mutator,
                     "parents": genome.parents,
                     "score": genome.score,
                     "scores": genome.scores,
@@ -917,7 +920,7 @@ class Search:
                     "path": str(genome.path),
                 }
             )
-            self.log(f"  {genome.short}  score {shown(genome.score)}  sd {genome.stdev:.4f}  [{genome.operator}]")
+            self.log(f"  {genome.short}  score {shown(genome.score)}  sd {genome.stdev:.4f}  [{genome.mutator}]")
 
     def pins_for(self, genome: Genome) -> str:
         """One pin set per genome, so the model can be pinned across a moving
@@ -1000,8 +1003,8 @@ class Search:
                 )
         return str(path)
 
-    def reclaim(self, generation: int) -> None:
-        """A generation is population x tasks x repeats full checkouts. Once it
+    def reclaim(self, round_no: int) -> None:
+        """A round is population x tasks x repeats full checkouts. Once it
         is scored, drop the worktrees and branches but keep the run's state, so
         the event streams and patches stay auditable without the disk cost."""
         if self.cfg.keep_worktrees:
@@ -1011,21 +1014,21 @@ class Search:
                 sys.executable,
                 self.cfg.fanout,
                 "clean",
-                f"gen-{generation}",
+                f"round-{round_no}",
                 "--force",
                 "--keep-state",
                 "--state-dir",
-                str(self.root / "generations"),
+                str(self.root / "rounds"),
             ],
             capture_output=True,
             text=True,
         )
 
-    def fitness(self, generation: int, genome: Genome, task_index: int, task: str, record: dict) -> float:
+    def fitness(self, round_no: int, genome: Genome, task_index: int, task: str, record: dict) -> float:
         payload = json.dumps(
             {
                 "run": self.cfg.run,
-                "generation": generation,
+                "round": round_no,
                 "genome": genome.gid,
                 "genome_path": str(genome.path),
                 "task_index": task_index,
@@ -1062,9 +1065,9 @@ class Search:
 
     # -- selection ---------------------------------------------------------
 
-    def select(self, generation: int, population: list, candidates: list) -> list:
+    def select(self, round_no: int, population: list, candidates: list) -> list:
         """Survivor selection. The built-in is elitist over the union of the
-        incumbents and this generation's candidates — the (mu+lambda) scheme —
+        incumbents and this round's candidates — the (mu+lambda) scheme —
         and keeps one slot per distinct genome so the default cannot collapse
         into copies of itself. A hook may return the same genome twice, which
         is how an island reset seeds one island from another's best."""
@@ -1087,7 +1090,7 @@ class Search:
         out = hook(
             self.cfg.select_policy,
             {
-                "generation": generation,
+                "round": round_no,
                 "keep": keep,
                 "strategy": self.cfg.strategy,
                 "population": [genome_view(m, i) for i, m in enumerate(population)],
@@ -1111,10 +1114,10 @@ class Search:
 
     # -- checkpoint --------------------------------------------------------
 
-    def checkpoint(self, generation: int, population: list) -> None:
-        """Record everything needed to resume after this generation.
+    def checkpoint(self, round_no: int, population: list) -> None:
+        """Record everything needed to resume after this round.
 
-        Generations are expensive — harness runs, and a person's attention in
+        Rounds are expensive — harness runs, and a person's attention in
         the judged case — so finishing one and being unable to build on it is
         the worst failure this tool has. The genomes and their scores are
         already durable in lineage.jsonl; what is not is which slots survived,
@@ -1123,8 +1126,8 @@ class Search:
             self.root / "checkpoint.json",
             {
                 "schema_version": SCHEMA_VERSION,
-                "generation": generation,
-                "evaluations": self.evaluations,
+                "round": round_no,
+                "variants": self.variants_spent,
                 "population": [{"genome": m.genome.gid, "tags": m.tags} for m in population],
                 "observed": self.observed,
                 "rng_state": json.loads(json.dumps(self.rng.getstate())),
@@ -1145,9 +1148,9 @@ class Search:
             genome = self.known.get(gid) or Genome(
                 gid=gid,
                 path=Path(entry["path"]),
-                generation=entry["generation"],
+                round_no=entry["round"],
                 parents=entry.get("parents", []),
-                operator=entry.get("operator", ""),
+                mutator=entry.get("mutator", ""),
             )
             genome.scores = entry.get("scores", [])
             genome.score = entry.get("score")
@@ -1161,17 +1164,17 @@ class Search:
 
         saved = self.root / "checkpoint.json"
         if not saved.is_file():
-            raise EvolveError(f"{self.root} has no checkpoint; it never finished a generation")
+            raise EvolveError(f"{self.root} has no checkpoint; it never finished a round")
         state = json.loads(saved.read_text())
         missing = [e["genome"] for e in state["population"] if e["genome"] not in self.known]
         if missing:
             raise EvolveError(f"the checkpoint names genomes the lineage does not carry: {missing[0]}")
         population = [Member(self.known[e["genome"]], dict(e.get("tags") or {})) for e in state["population"]]
-        self.evaluations = int(state.get("evaluations", 0))
+        self.variants_spent = int(state.get("variants", 0))
         self.observed = state.get("observed", {})
         if state.get("rng_state"):
             self.rng.setstate(tuple_of(state["rng_state"]))
-        return population, int(state["generation"]) + 1
+        return population, int(state["round"]) + 1
 
     # -- the loop ----------------------------------------------------------
 
@@ -1194,10 +1197,10 @@ class Search:
         stale = 0
 
         if self.resume:
-            population, first_generation = self.restore()
+            population, first_round = self.restore()
             best = max(population, key=lambda m: m.genome.score if m.genome.score is not None else -1e18)
             self.log(
-                f"resumed at generation {first_generation} — {len(self.known)} genomes known, "
+                f"resumed at round {first_round} — {len(self.known)} genomes known, "
                 f"{len(population)} carried forward, incumbent {best.genome.short} "
                 f"at {shown(best.genome.score)}"
             )
@@ -1207,8 +1210,8 @@ class Search:
             seed = self.admit(work, 0, [], "seed")
             if seed is None:
                 raise EvolveError("the seed genome did not pass tenon check; fix it before searching")
-            self.log(f"generation 0 — seed {seed.short}")
-            first_generation = 1
+            self.log(f"round 0 — seed {seed.short}")
+            first_round = 1
 
         try:
             if not self.resume:
@@ -1217,9 +1220,9 @@ class Search:
                 best = population[0]
                 self.checkpoint(0, population)
 
-            for generation in range(first_generation, self.cfg.generations + 1):
-                self.log(f"generation {generation} — incumbent {best.genome.short} at {shown(best.genome.score)}")
-                candidates = self.propose(generation, population)
+            for round_no in range(first_round, self.cfg.rounds + 1):
+                self.log(f"round {round_no} — incumbent {best.genome.short} at {shown(best.genome.score)}")
+                candidates = self.propose(round_no, population)
                 if not candidates:
                     self.log("  no admissible candidates; stopping")
                     break
@@ -1232,14 +1235,14 @@ class Search:
                 elif self.cfg.reevaluate == "population":
                     rescore = tuple(population)
                 was = best.genome.score
-                self.evaluate(generation, candidates, rescore)
+                self.evaluate(round_no, candidates, rescore)
                 if rescore and best.genome.score != was and None not in (was, best.genome.score):
                     drift = best.genome.score - was
                     self.log(
                         f"  incumbent rescored {was:.4f} -> {best.genome.score:.4f} "
                         f"({drift:+.4f}) over {len(best.genome.scores)} samples"
                     )
-                population = self.select(generation, population, candidates)
+                population = self.select(round_no, population, candidates)
                 # The incumbent is the best-scoring survivor, not the first one
                 # listed: a select policy is free to order its population any
                 # way it likes, and an island policy groups by island.
@@ -1270,8 +1273,8 @@ class Search:
                 else:
                     best = leader if leader.genome.gid == best.genome.gid else best
                     stale += 1
-                    self.log(f"  no improvement ({stale} generation(s) stale)")
-                self.checkpoint(generation, population)
+                    self.log(f"  no improvement ({stale} round(s) stale)")
+                self.checkpoint(round_no, population)
                 if (
                     self.cfg.target is not None
                     and best.genome.score is not None
@@ -1293,27 +1296,27 @@ class Search:
         summary = {
             "run": self.cfg.run,
             "strategy": self.cfg.strategy,
-            "evaluations": self.evaluations,
+            "variants": self.variants_spent,
             "best": {
                 "genome": best.genome.gid,
                 "short": best.genome.short,
                 "score": best.genome.score,
                 "stdev": best.genome.stdev,
                 "path": str(best.genome.path),
-                "operator": best.genome.operator,
+                "mutator": best.genome.mutator,
                 "parents": best.genome.parents,
             },
         }
         (self.root / "best.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
         self.log("")
-        self.log(f"best {best.genome.short} at {shown(best.genome.score)} after {self.evaluations} evaluations")
+        self.log(f"best {best.genome.short} at {shown(best.genome.score)} after {self.variants_spent} variants")
         self.log(f"review it: diff -ru {self.cfg.seed} {best.genome.path}")
         self.log("promotion is yours to make — evolve never writes to the source agent")
         return 0
 
 
 class Budget(Exception):
-    """The evaluation budget ran out; report what was found so far."""
+    """The variant budget ran out; report what was found so far."""
 
 
 # --------------------------------------------------------------------------
@@ -1323,8 +1326,8 @@ class Budget(Exception):
 
 def cmd_run(args) -> int:
     cfg = load_config(Path(args.spec).expanduser())
-    if args.generations:
-        cfg.generations = args.generations
+    if args.rounds:
+        cfg.rounds = args.rounds
     return Search(cfg, args.dry_run, args.resume).go()
 
 
@@ -1373,8 +1376,8 @@ def cmd_lineage(args) -> int:
         if entry.get("source_digest"):
             extra = f"src={entry['source_digest'].split(':')[-1][:8]} {extra}".rstrip()
         print(
-            f"gen{entry['generation']:<3} {entry['status']:<10} {gid:<9} "
-            f"parents={parents:<19} score={score:<9} {entry.get('operator','')} {extra}"
+            f"round{entry['round']:<3} {entry['status']:<10} {gid:<9} "
+            f"parents={parents:<19} score={score:<9} {entry.get('mutator','')} {extra}"
         )
     return 0
 
@@ -1386,10 +1389,10 @@ def cmd_best(args) -> int:
         raise EvolveError(f"no result for run {args.run!r}")
     summary = json.loads(path.read_text())
     best = summary["best"]
-    print(f"run        {summary['run']} ({summary['strategy']}, {summary['evaluations']} evaluations)")
+    print(f"run        {summary['run']} ({summary['strategy']}, {summary['variants']} variants)")
     print(f"genome     {best['genome']}")
     print(f"score      {shown(best.get('score'))}  sd {shown(best.get('stdev'))}")
-    print(f"operator   {best['operator']}")
+    print(f"mutator    {best['mutator']}")
     print(f"path       {best['path']}")
     print()
     print("Nothing has been promoted. Review the diff, then copy it into the")
@@ -1400,7 +1403,7 @@ def cmd_best(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="evolve",
-        description="Hill-climbing and genetic search over tenon agent projects, one fanout generation per step.",
+        description="Hill-climbing and genetic search over tenon agent projects, one fanout round per step.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -1408,14 +1411,14 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--spec", required=True)
     run.add_argument("--dry-run", action="store_true", help="print the resolved config and exit")
     run.add_argument(
-        "--generations",
+        "--rounds",
         type=int,
-        help="override the spec's generation count, which is how a resume asks for one more",
+        help="override the spec's round count, which is how a resume asks for one more",
     )
     run.add_argument(
         "--resume",
         action="store_true",
-        help="continue an existing run from its last checkpointed generation, "
+        help="continue an existing run from its last checkpointed round, "
         "reusing every genome it already scored",
     )
     run.set_defaults(func=cmd_run)

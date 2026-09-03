@@ -10,14 +10,14 @@
   ],
   "repeats": 1,
   "score": "python3 improve/judge/score-pairwise.py",
-  "operators": [
+  "mutators": [
     {
       "name": "edit",
       "weight": 1,
       "command": "sh \"$EVOLVE_CWD/improve/judge/mutate-instructions.sh\""
     }
   ],
-  "generations": 2,
+  "rounds": 2,
   "population": 2,
   "reevaluate": "incumbent",
   "concurrency": 5,

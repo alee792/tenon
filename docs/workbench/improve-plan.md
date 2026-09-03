@@ -77,7 +77,7 @@ T1 gates everything. T2 early despite being unglamorous. T3 precedes T4 and T5.
 
 | # | Item | Size |
 | --- | --- | --- |
-| I1 | **Vocabulary sweep before public.** `operators`->`mutators`, `generation`->`round`, one name for variant/trial/evaluation, `lay_out`->`assemble`, retire-or-define `locus`, fix EVOLVE.md:290's false "syntactic gate", let about.html claim being an improvement loop. JSON keys are free now, never again. | S |
+| I1 | **Vocabulary sweep before public.** `operators`->`mutators`, `generation`->`round`, one name for variant/trial/evaluation, `lay_out`->`assemble`, retire-or-define `locus`, fix EVOLVE.md:290's false "syntactic gate", let about.html claim being an improvement loop. JSON keys are free now, never again. **Landed:** the sweep shipped whole — spec and record keys, `--rounds`, `EVOLVE_MUTATOR`, the `rounds/round-N/` layout, `assemble`, the locus/gene glossary, the gate paragraph and the About page claim — with a guard test in `improve/judge/test_scoring.py` keeping it swept. | S |
 | I2 | **Export `EVOLVE_CARRIED`** beside `EVOLVE_GENES`; document that parent 0 is privileged for non-gene files. | S |
 | I3 | **Build the tenon adapter module.** Six call sites into one; name by role; diagnostic ids opaque; GENE_DIRS to spec config. **Before tenon's renames land** — then T3/T5/T9 cost one file instead of six. | M |
 | I4 | **`iterate` in the adapter:** check -> apply -> pre-drift -> run -> post-drift, one record with `phase_failed`. Do the drifts **in-process against one loaded source** — at search scale two extra process launches plus two full projection regenerations per candidate is the dominant non-model cost. | M |

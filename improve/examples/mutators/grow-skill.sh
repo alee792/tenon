@@ -1,15 +1,15 @@
 #!/bin/sh
-# A structural operator: adds a locus the genome did not have.
+# A structural mutator: adds a locus the genome did not have.
 #
-# combine can only ever shuffle genes the parents already hold, so without an
-# operator like this the genome's dimensionality is frozen at the seed. This is
+# combine can only ever shuffle genes the parents already hold, so without a
+# mutator like this the genome's dimensionality is frozen at the seed. This is
 # how an agent acquires a capability rather than rewording an existing one.
 set -eu
 
 report=${EVOLVE_PARENT_REPORT:-/dev/null}
 existing=${EVOLVE_GENES:-}
 
-name=$(claude -p "Read this evaluation report of an agent's runs: $(cat "$report" | head -c 12000)
+name=$(claude -p "Read this report of an agent's runs: $(cat "$report" | head -c 12000)
 
 The agent already has these components: $existing
 

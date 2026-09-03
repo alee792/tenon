@@ -25,7 +25,7 @@ for island in range(ISLANDS):
             break
     islands.append(kept)
 
-if req["generation"] % RESET_EVERY == 0:
+if req["round"] % RESET_EVERY == 0:
     strength = [max([m["score"] or 0.0 for m in isl], default=-1.0) for isl in islands]
     worst, best = strength.index(min(strength)), strength.index(max(strength))
     if worst != best and islands[best]:
