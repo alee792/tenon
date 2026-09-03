@@ -56,6 +56,35 @@ and the first entries under *Added* describe the shipped commands.
   person and its own *generation* is the writing of harness files, which is
   why neither word could keep this second meaning.
 
+  Every tenon call it makes now goes through one adapter, `improve/tenon.py`,
+  which is the only module there that names a tenon subcommand or flag — a
+  test greps the rest to keep it so. Its roles are named for what the caller
+  wants, not for the subcommand that currently supplies it: `gate`,
+  `identity`, `files`, `catalog`, `compile`, `drifted`, `dispatch`, `clean`,
+  and the composite `iterate`, which runs gate, compile, dispatch and a
+  post-run drift as one record with a `phase_failed` that names findings only
+  — an environment failure raises out of it and never reaches a lineage. One
+  private terminator reader decodes the outcome vocabulary for all of them,
+  and the streams it is tested against were recorded from a real binary.
+
+  Two scoring rules were settled with it. A variant that is **missing from
+  `collect`** or **cancelled** by a fail-fast sibling joins one that
+  **errored** as unscored rather than scored zero: all three mean the loop
+  learned nothing about that genome, and a zero reads as evidence that it is
+  terrible. A **run that exhausts its wall-clock budget is a finding about
+  the variant** and is scored as a failed one: the adapter enforces the
+  deadline itself and terminates the dispatch's process group, reporting
+  `outcome: timed_out`, because tenon's own `--timeout` overrun is
+  indistinguishable from any other environment failure and the alternative —
+  dropping slow variants — lets a search drift toward whatever fits the
+  budget without ever paying for being slow.
+
+  Which paths count as recombinable **genes** is now spec configuration,
+  `genes.dirs` and `genes.files`, defaulting to what the tool always used.
+  They mirror what tenon's loader inventories, and a mirror that cannot be
+  corrected in a spec drifts silently the next time tenon recognises a
+  component directory.
+
 - `tenon check` is now the single gate over an agent project, absorbing
   `tenon validate` and `tenon fingerprint show`
   ([ADR 0027](docs/adr/0027-consolidate-the-read-surface.md)). Without

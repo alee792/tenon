@@ -544,10 +544,10 @@ class Supervisor:
 
     def _child_env(self, variant: dict, vdir: Path, agent: Path, workspace: Path) -> dict:
         env = dict(os.environ)
-        # fanout always passes --harness explicitly (a harness sweep is one of
-        # its use cases), so an inherited TENON_HARNESS can only change what a
-        # mutate hook's own tenon calls target. Drop it rather than let it
-        # silently retarget a child.
+        # fanout always names the harness explicitly (a harness sweep is one
+        # of its use cases), so an inherited TENON_HARNESS can only change
+        # what a mutate hook's own tenon calls target. Drop it rather than let
+        # it silently retarget a child.
         env.pop("TENON_HARNESS", None)
         env.update(
             {
@@ -1061,7 +1061,7 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--task", help="prompt dispatched as one turn")
     start.add_argument("--k", type=int, help="number of variants (mutually exclusive with a spec variants list)")
     start.add_argument("--mutate", help="shell command run in each variant's agent dir before the gate")
-    start.add_argument("--pins", help="pin set supplied to check, apply, and run")
+    start.add_argument("--pins", help="pin set the gate, compile, and dispatch all resolve against")
     start.add_argument("--concurrency", type=int, help="variants in flight at once (default: min(k, 4))")
     start.add_argument("--timeout", help="whole-process deadline per variant (default: 600s, tenon's cap is 30m)")
     start.add_argument("--turn-timeout", help="per-turn deadline (default: none)")
@@ -1091,7 +1091,7 @@ def build_parser() -> argparse.ArgumentParser:
     logs.add_argument("run")
     logs.add_argument("variant")
     logs.add_argument("-f", "--follow", action="store_true")
-    logs.add_argument("--stderr", action="store_true", help="show tenon run's stderr instead")
+    logs.add_argument("--stderr", action="store_true", help="show the dispatch's stderr instead")
     logs.add_argument("--text", action="store_true", help="print reassembled agent output text")
     add_state_dir(logs)
     logs.set_defaults(func=cmd_logs)

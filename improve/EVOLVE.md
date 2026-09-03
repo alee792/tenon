@@ -25,7 +25,22 @@ same for `plugins/`, `mcp/`, `schedules/` — is a gene. Crossover is file-level
 recombination, not text surgery: for every locus either parent holds, the
 offspring inherits one parent's copy of the gene there.
 
-**The fingerprint is the genome id.** `tenon check --format jsonl` is
+**Which paths are genes is configuration, not a constant.** `spec.genes.dirs`
+and `spec.genes.files` default to `["skills", "tools", "subagents",
+"plugins", "mcp", "schedules"]` and `["instructions.md"]` — the set this tool
+has always recombined. They are a **mirror of what tenon's loader
+inventories**, and a mirror drifts: the day tenon recognises a new component
+directory, a search that does not know about it silently stops recombining
+that component and carries it along with the first parent instead, which
+looks like a search that simply never varies there. Keep them level with the
+agent-project layout. Tenon's loader today inventories `instructions.md`,
+`skills/`, `tools/`, `subagents/`, `plugins/`, `mcp/`, `schedules/` and
+`harnesses/`; `harnesses/` is deliberately not a default gene, because
+whether per-harness overrides should recombine independently of the source
+they override is a decision for the search rather than for this file. Add it
+to `genes.dirs` when it is.
+
+**The fingerprint is the genome id.** The adapter's `gate` is
 a single call that both gates a candidate and names it — stable diagnostic
 identifiers on rejection, the source fingerprint on success. That gives three
 things for free:
@@ -69,7 +84,8 @@ never writes to the source agent. `evolve best` prints a diff to review.
   "max_variants": 60,
   "concurrency": 4,
   "timeout": "900s",
-  "rng_seed": 1
+  "rng_seed": 1,
+  "genes": { "dirs": ["skills", "tools", "subagents", "plugins", "mcp", "schedules"], "files": ["instructions.md"] }
 }
 ```
 
@@ -154,11 +170,23 @@ scores 0. `EVOLVE_WORKSPACE` is exported so a test-suite scorer can just `cd`
 into the variant's checkout — see
 [`examples/score-tests.sh`](examples/score-tests.sh).
 
-A variant that fanout marked `errored` — tenon reported outcome
-`error`, so the environment failed rather than the candidate — is never handed
-to `score` at all. It is logged as a warning and dropped, and a genome left
-with no other sample stays unscored (`-` in the log and `null` in the lineage)
-rather than being recorded as a zero.
+**Three states are never handed to `score` at all**, because all three mean
+the same thing: we learned nothing about this genome. A variant fanout marked
+`errored` (tenon reported outcome `error`, so the environment failed rather
+than the candidate); a variant `cancelled` by a fail-fast sibling before it
+ran; and a variant missing from `collect` entirely. Each is logged as a
+warning and dropped, and a genome left with no other sample stays unscored
+(`-` in the log and `null` in the lineage) rather than being recorded as a
+zero. Recording a zero would let an infrastructure outage read as "every
+candidate is terrible" and quietly steer the search.
+
+A variant that ran out of **time** is not in that set. A dispatch whose
+wall-clock budget expires is terminated and reported as `timed_out`, which
+fanout marks `failed`: it is a finding about the variant — the agent really
+was slower than the budget — and it is scored like any other failed variant.
+Dropping it instead would let a search drift toward whatever fits the budget
+without ever paying for being slow. Set `timeout` to the budget you actually
+mean.
 
 The three search policies work the same way — a named built-in, or a command
 taking one JSON object on stdin and printing one on stdout. Evolve keeps the

@@ -12,7 +12,7 @@ its contract:
     a `skills/<name>/` directory, a `tools/<file>`, a `subagents/<name>.md`.
     Crossover is therefore file-level recombination, not text surgery.
 
-  * `tenon check --format jsonl` is one call that both gates a candidate
+  * The adapter's `gate` is one call that both proves a candidate
     and mints its identity: stable diagnostic identifiers and the digest of
     the bytes that failed on rejection, the source fingerprint on success. So
     the fingerprint is the genome id — content-addressed, gate-proven, and
@@ -1148,7 +1148,7 @@ class Search:
             materialize(self.cfg.seed, work)
             seed = self.admit(work, 0, [], "seed")
             if seed is None:
-                raise EvolveError("the seed genome did not pass tenon check; fix it before searching")
+                raise EvolveError("the seed genome did not pass the gate; fix it before searching")
             self.log(f"round 0 — seed {seed.short}")
             first_round = 1
 
