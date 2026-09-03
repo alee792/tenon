@@ -1,0 +1,443 @@
+<section data-about="loop">
+  <p class="lede">evolve is a search over agent configurations. You give it a seed agent, a way to
+    vary one, and a way to score one; it proposes candidates, runs them in isolation, and keeps
+    what wins.</p>
+
+  <div class="note">
+    <b>What this is and is not.</b> Lilian Weng's
+    <a href="https://lilianweng.github.io/posts/2026-07-04-harness/" target="_blank" rel="noopener">
+    Harness Engineering for Self-Improvement</a> argues that the near-term path to recursive
+    self-improvement runs through the <i>harness</i> — the system around the model — rather than
+    the weights, and that the binding constraint is the verifier. This is not that loop. It is the
+    substrate underneath one: a composable API for varying, isolating, identifying and scoring
+    agent configurations, with a human standing in for the verifier because that is the part
+    nobody has solved. Nothing here improves itself.
+  </div>
+
+  <h4>The loop</h4>
+  <svg class="viz" viewBox="0 0 720 150" role="img" aria-label="The evolve loop: propose, gate, evaluate, score, select, repeating">
+    <defs><marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M1 1L9 5L1 9" class="head"/></marker></defs>
+    <g class="stage"><rect x="16" y="20" width="120" height="50" rx="7"/>
+      <text class="lbl" x="76" y="41">propose</text><text class="sub" x="76" y="57">vary or breed</text></g>
+    <g class="stage fixed"><rect x="162" y="20" width="120" height="50" rx="7"/>
+      <text class="lbl" x="222" y="41">gate</text><text class="sub" x="222" y="57">tenon check</text></g>
+    <g class="stage fixed"><rect x="308" y="20" width="120" height="50" rx="7"/>
+      <text class="lbl" x="368" y="41">evaluate</text><text class="sub" x="368" y="57">one run each</text></g>
+    <g class="stage"><rect x="454" y="20" width="120" height="50" rx="7"/>
+      <text class="lbl" x="514" y="41">score</text><text class="sub" x="514" y="57">fitness</text></g>
+    <g class="stage"><rect x="600" y="20" width="104" height="50" rx="7"/>
+      <text class="lbl" x="652" y="41">select</text><text class="sub" x="652" y="57">survivors</text></g>
+    <path class="edge" d="M136 45 H158" marker-end="url(#a1)"/>
+    <path class="edge" d="M282 45 H304" marker-end="url(#a1)"/>
+    <path class="edge" d="M428 45 H450" marker-end="url(#a1)"/>
+    <path class="edge" d="M574 45 H596" marker-end="url(#a1)"/>
+    <path class="edge" d="M652 70 V102 H76 V76" marker-end="url(#a1)"/>
+    <rect class="swatch you" x="16" y="126" width="9" height="9" rx="2"/>
+    <text class="sub start" x="32" y="134">you supply this</text>
+    <rect class="swatch" x="150" y="126" width="9" height="9" rx="2"/>
+    <text class="sub start" x="166" y="134">fixed</text>
+  </svg>
+
+  <p><b>Propose</b> picks parents, recombines their genes, and applies a variation operator.
+    <b>Gate</b> validates the result before anything expensive happens — a malformed candidate dies
+    for the cost of a subprocess rather than a model run. <b>Evaluate</b> runs each survivor on the
+    task in its own isolated checkout. <b>Score</b> turns a run into a number. <b>Select</b> decides
+    who continues.</p>
+
+  <h4>The budget is the design constraint</h4>
+  <p>Every evaluation is a full agent session. A generation of five candidates on one task is five
+    sessions; a search is tens of evaluations, not the millions an evolutionary algorithm normally
+    assumes. Almost everything else here follows from that: the gate exists so bad candidates cost
+    nothing, deduplication exists so nothing is paid for twice, and the search algorithms stay
+    deliberately simple because at this sample size sophistication cannot express itself.</p>
+
+  <h4>Three layers</h4>
+  <table>
+    <tr><th>layer</th><th>owns</th></tr>
+    <tr><td><b>tenon</b></td><td>What an agent <i>is</i> — compiling a folder of files into working
+      harness configuration, validating it, and giving it an identity.</td></tr>
+    <tr><td><b>fanout</b></td><td>One generation — k isolated checkouts, one agent run in each,
+      results collected. It never scores anything.</td></tr>
+    <tr><td><b>evolve</b></td><td>The search across generations — propose, select, lineage.</td></tr>
+  </table>
+  <p>tenon deliberately refuses to do evaluation, scoring or selection. That refusal is why the
+    search is a separate tool sitting on top rather than a feature inside it.</p>
+</section>
+
+<section data-about="api" hidden>
+  <p class="lede">The loop is fixed. Five points in it are commands you supply — each reads one JSON
+    object on stdin and prints one on stdout. Everything specific to <i>your</i> search lives
+    there.</p>
+
+  <div class="cards">
+    <div class="apicard"><code>pair</code><span class="role">which parents reproduce</span>
+      <span class="built">tournament</span></div>
+    <div class="apicard"><code>combine</code><span class="role">which gene comes from which parent</span>
+      <span class="built">uniform</span></div>
+    <div class="apicard"><code>operators</code><span class="role">how a child varies</span>
+      <span class="built none">no default</span></div>
+    <div class="apicard"><code>score</code><span class="role">fitness</span>
+      <span class="built none">no default</span></div>
+    <div class="apicard"><code>select</code><span class="role">who survives</span>
+      <span class="built">elitist</span></div>
+  </div>
+
+  <p><code>score</code> and <code>operators</code> ship no default on purpose. A default fitness
+    function would be the tool inventing an objective — precisely the move that makes a loop like
+    this report progress it has not made.</p>
+
+  <details>
+    <summary>What a hook actually receives and returns</summary>
+    <p><code>pair</code> is given the population and how many offspring are wanted, and returns one
+      entry per offspring. A single parent reproduces asexually; two or more recombine. Returning
+      tuples is what lets one policy express both <i>who breeds</i> and <i>how often crossover
+      happens</i>, instead of splitting that across two settings.</p>
+<pre class="io">→ in   { "generation": 2, "count": 5,
+         "population": [ { "index": 0, "genome": "sha256:…", "score": 0.75,
+                           "tags": {}, "genes": ["instructions.md", "skills/alpha"] }, … ] }
+
+← out  { "pairs": [ [0], [0, 1], { "parents": [1], "tags": {"island": 2} } ] }</pre>
+    <p>Parents are referenced by <b>slot index</b> rather than genome id, because two slots can hold
+      the same genome and an id would then be ambiguous.</p>
+  </details>
+
+  <details>
+    <summary>The other four contracts</summary>
+    <table>
+      <tr><th>hook</th><th>returns</th></tr>
+      <tr><td><code>combine</code></td><td><code>{"genes": {"skills/alpha": "sha256:…"}}</code> — a
+        plan of which parent supplies each locus. Or <code>{"materialized": true}</code> if the hook
+        wrote the child directory itself, which is the escape hatch for recombining below the
+        component grain.</td></tr>
+      <tr><td><code>operators</code></td><td>Not a hook but a weighted list of commands, each run
+        with the candidate as its working directory. Each is <b>named</b>, and the name lands in the
+        lineage, so the record answers which <i>kind</i> of change produced the gains.</td></tr>
+      <tr><td><code>score</code></td><td><code>{"score": 0.7}</code>, optionally with
+        <code>"tags"</code> observed at runtime — which is how a behavioural descriptor arrives.</td></tr>
+      <tr><td><code>select</code></td><td><code>{"population": ["sha256:…", …]}</code>, or entries
+        carrying tags. It may return the same genome twice.</td></tr>
+    </table>
+  </details>
+
+  <h4>One thing is not injectable</h4>
+  <p>Validation. Every candidate passes through tenon before it can be scored, and that is what
+    keeps a genome's identity meaningful — a fingerprint is only ever reported for a configuration
+    that actually loads. Make the gate a policy and the identity stops certifying anything.</p>
+</section>
+
+<section data-about="algorithms" hidden>
+  <p class="lede">Because the points above are just commands, the search algorithm is a choice you
+    make from outside rather than a property of the tool.</p>
+
+  <svg class="viz" viewBox="0 0 720 200" role="img" aria-label="Three search shapes: hill climb, genetic, island model">
+    <defs><marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto">
+      <path d="M1 1L9 5L1 9" class="head"/></marker></defs>
+
+    <text class="cap-t" x="14" y="16">hill climb</text>
+    <circle class="dot lead" cx="110" cy="42" r="7"/>
+    <g class="edge-g">
+      <path class="edge" d="M105 49 L48 82"/><path class="edge" d="M108 50 L90 82"/>
+      <path class="edge" d="M112 50 L130 82"/><path class="edge" d="M115 49 L172 82"/>
+    </g>
+    <circle class="dot" cx="44" cy="90" r="6"/><circle class="dot" cx="86" cy="90" r="6"/>
+    <circle class="dot lead" cx="134" cy="90" r="7"/><circle class="dot" cx="176" cy="90" r="6"/>
+    <path class="edge accent" d="M134 98 V128" marker-end="url(#a2)"/>
+    <circle class="dot lead" cx="134" cy="140" r="7"/>
+    <text class="sub" x="110" y="176" text-anchor="middle">one incumbent, k neighbours</text>
+
+    <text class="cap-t" x="254" y="16">genetic</text>
+    <circle class="dot lead" cx="310" cy="42" r="7"/><circle class="dot lead" cx="390" cy="42" r="7"/>
+    <g class="edge-g">
+      <path class="edge" d="M305 50 L290 82"/><path class="edge" d="M312 50 L330 82"/>
+      <path class="edge" d="M386 50 L350 82"/><path class="edge" d="M394 50 L410 82"/>
+      <path class="edge" d="M316 50 L368 82"/><path class="edge" d="M384 50 L332 82"/>
+    </g>
+    <circle class="dot" cx="286" cy="90" r="6"/><circle class="dot" cx="328" cy="90" r="6"/>
+    <circle class="dot" cx="370" cy="90" r="6"/><circle class="dot" cx="412" cy="90" r="6"/>
+    <text class="sub" x="350" y="176" text-anchor="middle">several survivors, recombined</text>
+
+    <text class="cap-t" x="494" y="16">island model</text>
+    <rect class="pen" x="490" y="30" width="64" height="56" rx="6"/>
+    <rect class="pen" x="566" y="30" width="64" height="56" rx="6"/>
+    <rect class="pen dim" x="642" y="30" width="64" height="56" rx="6"/>
+    <circle class="dot lead" cx="510" cy="50" r="6"/><circle class="dot" cx="534" cy="68" r="6"/>
+    <circle class="dot" cx="586" cy="50" r="6"/><circle class="dot" cx="610" cy="68" r="6"/>
+    <circle class="dot faded" cx="662" cy="50" r="6"/><circle class="dot faded" cx="686" cy="68" r="6"/>
+    <path class="edge accent" d="M522 92 V116 H674 V96" marker-end="url(#a2)"/>
+    <text class="sub" x="598" y="134" text-anchor="middle">weakest island reseeded from the best</text>
+    <text class="sub" x="598" y="176" text-anchor="middle">populations kept apart</text>
+  </svg>
+
+  <table>
+    <tr><th>algorithm</th><th>what you write</th></tr>
+    <tr><td>Random-mutation hill climb</td><td>nothing — the defaults, one survivor</td></tr>
+    <tr><td>Genetic algorithm</td><td>nothing — the defaults, several survivors</td></tr>
+    <tr><td><a href="https://www.nature.com/articles/s41586-023-06924-6" target="_blank" rel="noopener">FunSearch</a>-style islands</td>
+      <td>a <code>pair</code> that breeds within an island, and a <code>select</code> that keeps each
+        island's best and periodically reseeds the weakest from the strongest</td></tr>
+    <tr><td><a href="https://arxiv.org/abs/1504.04909" target="_blank" rel="noopener">MAP-Elites</a></td>
+      <td>a <code>score</code> that tags a behavioural niche, and a <code>select</code> that keeps
+        the best per niche</td></tr>
+    <tr><td>Novelty search</td><td>a <code>score</code> measuring distance from what has been seen
+      rather than quality</td></tr>
+  </table>
+
+  <h4>Slots carry tags, and the search never reads them</h4>
+  <p>The population is a list of <i>slots</i>, not of genomes. A slot holds a genome plus an opaque
+    tag dictionary that policies write and evolve only carries and inherits.</p>
+  <p>The distinction is load-bearing. A genome is content, addressed by its fingerprint and
+    immutable, so its <i>score</i> belongs to it. An island, a niche, an age layer belongs to the
+    <i>slot</i> — because the same content can occupy two at once. An island reset seeds the weakest
+    island from the strongest, and afterwards one genome sits in two islands with one score. Put the
+    tag on the genome and that becomes unrepresentable.</p>
+
+  <details>
+    <summary>The island model, in full</summary>
+    <p>Two policies and no change to evolve. <code>pair</code> groups the population by its
+      <code>island</code> tag, draws both parents from within one, and tags the child with that
+      island. <code>select</code> keeps each island's own best, and every third generation replaces
+      the weakest island's members with copies of the strongest island's — which is the move that
+      makes the model work, and the reason a genome has to be able to occupy two slots.</p>
+  </details>
+
+  <h4>Genomes can change shape</h4>
+  <p>Crossover only shuffles loci the parents already hold, so on its own the genome's
+    dimensionality is frozen at whatever the seed had. An operator that <i>adds</i> a gene is how an
+    agent acquires a capability rather than rewording an existing one; one that removes a gene is
+    the counterweight, since growth without pruning is bloat.</p>
+  <p>Differently-shaped genomes still recombine because loci are aligned by <b>name</b>:
+    <code>skills/alpha</code> in two genomes descends from one origin, so the name serves as the
+    historical marking that says which genes correspond.</p>
+</section>
+
+<section data-about="gene" hidden>
+  <p class="lede">A search needs a representation — something to mutate, something to recombine,
+    something to call the same or different. That came for free from how tenon already defines an
+    agent.</p>
+
+  <h4>An agent is a folder, so a genome is a directory</h4>
+  <p>tenon defines an agent as plain files: an <code>instructions.md</code> plus typed directories.
+    Nothing is registered; capability is added by adding a file. The search inherits its unit
+    rather than inventing one.</p>
+
+  <div class="tree">
+    <div class="t-row"><span class="t-path">agent/</span></div>
+    <div class="t-row gene"><span class="t-path">├── instructions.md</span><span class="t-tag">gene</span></div>
+    <div class="t-row"><span class="t-path">├── skills/</span></div>
+    <div class="t-row gene"><span class="t-path">│&nbsp;&nbsp; ├── alpha/</span><span class="t-tag">gene</span></div>
+    <div class="t-row gene"><span class="t-path">│&nbsp;&nbsp; └── beta/</span><span class="t-tag">gene</span></div>
+    <div class="t-row"><span class="t-path">└── tools/</span></div>
+    <div class="t-row gene"><span class="t-path">&nbsp;&nbsp;&nbsp; └── fmt.py</span><span class="t-tag">gene</span></div>
+    <div class="t-row t-fp"><span class="t-path">fingerprint sha256:cb1bbf1d…</span><span class="t-tag">genome id</span></div>
+  </div>
+
+  <p>Because a gene is a whole authored component, crossover is file-level recombination rather than
+    text surgery: for each locus either parent holds, the child inherits one parent's copy intact.</p>
+
+  <h4>The fingerprint is the identity</h4>
+  <p>tenon computes a content-addressed digest over every authored input, and reports it only for a
+    project that actually loads. One call both gates a candidate and names it — stable diagnostic
+    identifiers on rejection, the fingerprint on success. Three things follow:</p>
+  <ul>
+    <li><b>A cheap gate.</b> Recombination produces incoherent offspring routinely — a skill whose
+      tool did not come along. They die before a model is opened, and the rule that rejected them is
+      recorded by name.</li>
+    <li><b>Deduplication.</b> A genome already scored is never paid for twice, and a mutation that
+      cycles back to a known genome is caught across generations.</li>
+    <li><b>Attribution.</b> The same fingerprint travels on every run, so a score cannot drift apart
+      from the configuration that earned it.</li>
+  </ul>
+
+  <h4>Isolation</h4>
+  <p>Every candidate gets its own git worktree on its own branch. Variants cannot see or corrupt one
+    another, the agent is free to write files, and promoting a winner afterwards is a plain
+    <code>git checkout</code>. Worktrees are reclaimed once a generation is scored, so disk holds one
+    generation rather than all of them.</p>
+
+  <h4>Reproducibility</h4>
+  <p>A folder cannot express which model ran or which harness version. A tenon pin set pins those —
+    and it binds an expected fingerprint, which means it is bound to <i>one</i> genome, while every
+    mutation changes the fingerprint. So the search writes one pin set per genome: many genomes
+    crossed with one pin set. Two runs that look identical then really are, and the difference you
+    observe is the change you made.</p>
+  <details>
+    <summary>How we found that out</summary>
+    <p>By getting it wrong. The first live run wrote one pin set from the genome directory, whose
+      name is a fingerprint, and applied it to an agent directory named <code>demo-agent</code>.
+      tenon refused every variant with <code>pins.drift.agent</code> — failing closed, exactly as
+      designed, on a mistake in how the pin set was generated.</p>
+  </details>
+</section>
+
+<section data-about="scoring" hidden>
+  <p class="lede">Scoring is where a loop like this starts lying to itself. Weng's point is that the
+    verifier is the bottleneck; this demo answers it by not automating the verifier at all.</p>
+
+  <h4>Ask for a comparison, not a score</h4>
+  <p>Absolute scoring is the wrong question to put to a person. <i>How good is this, from 0 to 1?</i>
+    drifts with mood, order and fatigue. <i>Which of these two is better?</i> is the judgement people
+    are reliable at, so the demo asks only that.</p>
+  <div class="note">
+    <b>On the name.</b> The pairwise-preference framing is borrowed from
+    <a href="https://arxiv.org/abs/2502.17543" target="_blank" rel="noopener">PAPRIKA</a>
+    (<i>Training a Generally Curious Agent</i>, ICLR 2025), which builds trajectory preference pairs
+    and feeds them to DPO to fine-tune weights. This is not that. The same preference signal is
+    consumed as fitness over agent <i>configurations</i>, and no weights are touched.
+  </div>
+
+  <h4>From ordinal to cardinal</h4>
+  <p>Comparisons are ordinal; a search needs a number. The projection is
+    <a href="https://en.wikipedia.org/wiki/Bradley%E2%80%93Terry_model" target="_blank" rel="noopener">Bradley-Terry</a>
+    maximum likelihood — fit a latent strength per genome such that
+    <code>P(i beats j) = pᵢ / (pᵢ + pⱼ)</code>, solved by Zermelo's iteration. Fitness is the fitted
+    probability of beating a uniformly drawn opponent.</p>
+  <details>
+    <summary>Why not just count wins</summary>
+    <p>A raw win rate treats every comparison as equally informative, so beating the weakest entry
+      counts the same as beating the strongest, and it has no answer at all when some pairs went
+      unjudged. Two genomes with identical 1-1 records score <b>0.669</b> and <b>0.358</b> under the
+      fit when their opponents differed in strength — where a win rate gives both 0.500.</p>
+    <p>The estimator is also honest about what it cannot know: going 1-1 against the <i>same</i> pair
+      of opponents is genuinely uninformative — those likelihoods differ only by a constant — and it
+      returns equal strengths rather than inventing a difference.</p>
+  </details>
+
+  <h4>The anchor, and why the scale is global</h4>
+  <p>A round's scores are normalised inside that round's field, so they do not compare across
+    generations. A genome that went 5/5 against weak siblings and 1/5 against strong ones has not
+    changed — its opposition has. That is not hypothetical; it is what the run below did.</p>
+  <p>So the incumbent is re-judged in every round. That shared entry links the rounds into one
+    connected comparison graph, which makes a <i>single</i> fit over every comparison identifiable.
+    It is the only basis on which a generation-1 genome and a generation-2 genome can honestly be
+    compared.</p>
+
+  <svg class="viz" viewBox="0 0 720 268" role="img" aria-label="Lineage of the demo run: seed, five children, the winner, five more children">
+    <defs><marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto">
+      <path d="M1 1L9 5L1 9" class="head"/></marker></defs>
+    <text class="cap-t" x="10" y="16">generation 0</text>
+    <g class="node"><rect x="300" y="22" width="120" height="42" rx="6"/><text class="mono" x="360" y="40">cb1bbf1d</text><text class="sub" x="360" y="55">0.425 · seed</text></g>
+    <text class="cap-t" x="10" y="100">generation 1</text>
+    <path class="edge" d="M348 64 L110 106" marker-end="url(#a3)"/>
+    <path class="edge" d="M354 64 L245 106" marker-end="url(#a3)"/>
+    <path class="edge" d="M360 64 L360 106" marker-end="url(#a3)"/>
+    <path class="edge" d="M366 64 L475 106" marker-end="url(#a3)"/>
+    <path class="edge" d="M372 64 L610 106" marker-end="url(#a3)"/>
+    <g class="node"><rect x="50" y="110" width="120" height="42" rx="6"/><text class="mono" x="110" y="128">4031e4fc</text><text class="sub" x="110" y="143">0.085</text></g>
+    <g class="node"><rect x="185" y="110" width="120" height="42" rx="6"/><text class="mono" x="245" y="128">24424939</text><text class="sub" x="245" y="143">0.425</text></g>
+    <g class="node lead"><rect x="300" y="110" width="120" height="42" rx="6"/><text class="mono" x="360" y="128">360122bb</text><text class="sub lead-t" x="360" y="143">0.895 · won</text></g>
+    <g class="node"><rect x="415" y="110" width="120" height="42" rx="6"/><text class="mono" x="475" y="128">71eb2f5c</text><text class="sub" x="475" y="143">0.585</text></g>
+    <g class="node"><rect x="550" y="110" width="120" height="42" rx="6"/><text class="mono" x="610" y="128">655656b5</text><text class="sub" x="610" y="143">0.585</text></g>
+    <text class="cap-t" x="10" y="192">generation 2</text>
+    <path class="edge accent" d="M348 152 L110 198" marker-end="url(#a3)"/>
+    <path class="edge accent" d="M354 152 L245 198" marker-end="url(#a3)"/>
+    <path class="edge accent" d="M360 152 L360 198" marker-end="url(#a3)"/>
+    <path class="edge accent" d="M366 152 L475 198" marker-end="url(#a3)"/>
+    <path class="edge accent" d="M372 152 L610 198" marker-end="url(#a3)"/>
+    <g class="node"><rect x="50" y="202" width="120" height="42" rx="6"/><text class="mono" x="110" y="220">5f1a7722</text><text class="sub" x="110" y="235">0.417</text></g>
+    <g class="node"><rect x="185" y="202" width="120" height="42" rx="6"/><text class="mono" x="245" y="220">1438fcba</text><text class="sub" x="245" y="235">0.417</text></g>
+    <g class="node lead"><rect x="300" y="202" width="120" height="42" rx="6"/><text class="mono" x="360" y="220">b9b99537</text><text class="sub lead-t" x="360" y="235">0.750 · won</text></g>
+    <g class="node"><rect x="415" y="202" width="120" height="42" rx="6"/><text class="mono" x="475" y="220">0c643a74</text><text class="sub" x="475" y="235">0.584</text></g>
+    <g class="node"><rect x="550" y="202" width="120" height="42" rx="6"/><text class="mono" x="610" y="220">ea8ab4c7</text><text class="sub" x="610" y="235">0.584</text></g>
+  </svg>
+  <p class="cap">The demo run. <code>360122bb</code> won generation 1 outright at 5/5, then was
+    re-judged inside generation 2 against its own children and came last at 1/5 — the anchor
+    revealing that the field had improved, not that the genome had got worse.</p>
+
+  <h4>Two smaller decisions</h4>
+  <p><b>Re-judging corrects luck.</b> Elitist selection on a noisy score keeps whichever candidate
+    drew luckiest and never revisits it. Because the fingerprint names content, re-running an
+    incumbent adds samples to the same genome and its estimate tightens rather than staying frozen
+    at first contact.</p>
+  <p><b>An unjudged genome scores 0.5, not 0.</b> The seed has nothing to compare against in
+    generation 0. Scoring it zero would mean anything at all beats it — and whether the search beat
+    the seed is the first question it has to answer.</p>
+
+  <h4>How a human is wired into a machine API</h4>
+  <p>This is the part that connects back to the API. The search calls its scoring command
+    <i>once per run, sequentially, after the generation has finished</i>. A pairwise judge cannot
+    answer the first of those calls without seeing the others — and the search is blocked waiting,
+    so the others never arrive.</p>
+
+  <svg class="viz" viewBox="0 0 720 210" role="img" aria-label="How the blocked scoring call is resolved by the judge reading the generation from disk">
+    <defs><marker id="a4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto">
+      <path d="M1 1L9 5L1 9" class="head"/></marker></defs>
+    <text class="cap-t" x="60"  y="16" text-anchor="middle">evolve</text>
+    <text class="cap-t" x="360" y="16" text-anchor="middle">judge server</text>
+    <text class="cap-t" x="660" y="16" text-anchor="middle">you</text>
+    <path class="lane" d="M60 26 V196"/><path class="lane" d="M360 26 V196"/><path class="lane" d="M660 26 V196"/>
+    <rect class="blocked" x="52" y="44" width="16" height="120" rx="3"/>
+    <path class="edge" d="M68 52 H352" marker-end="url(#a4)"/>
+    <text class="sub" x="210" y="46" text-anchor="middle">score(run 1) — and blocks</text>
+    <path class="edge dash" d="M368 82 H420 V102 H372" marker-end="url(#a4)"/>
+    <text class="sub" x="470" y="88" text-anchor="start">reads the whole generation off disk</text>
+    <path class="edge" d="M368 124 H652" marker-end="url(#a4)"/>
+    <text class="sub" x="510" y="118" text-anchor="middle">15 comparisons</text>
+    <path class="edge accent" d="M652 148 H368" marker-end="url(#a4)"/>
+    <text class="sub" x="510" y="142" text-anchor="middle">verdicts</text>
+    <path class="edge accent" d="M352 172 H68" marker-end="url(#a4)"/>
+    <text class="sub" x="210" y="166" text-anchor="middle">every blocked call answered</text>
+  </svg>
+
+  <p>The way out is for the judge to not depend on its callers at all. By the time scoring starts,
+    every variant's output is already on disk — so the first call makes the server read the whole
+    generation itself, run the round robin in your browser, and answer every blocked caller from the
+    result. The scoring command stays a dumb client that blocks on HTTP.</p>
+  <p>Nothing in the search knows a human is involved. It sees a command that takes a run on stdin and
+    prints a number — the same contract a test-suite scorer satisfies. That is the sense in which
+    this is an API rather than a feature.</p>
+</section>
+
+<section data-about="walkthrough" hidden>
+  <p class="lede">The same run, as you would meet it.</p>
+
+  <h4>1 · Compare two answers</h4>
+  <picture>
+    <source srcset="/assets/01-judge-dark.png" media="(prefers-color-scheme: dark)">
+    <img src="/assets/01-judge-light.png" alt="The judging screen showing two answers side by side">
+  </picture>
+  <p class="cap">Two answers to the same task, labelled A and B and nothing else. You are not told
+    which lineage produced which, or how either scored before.</p>
+
+  <h4>2 · Reveal the genes if you want them</h4>
+  <picture>
+    <source srcset="/assets/02-genes-dark.png" media="(prefers-color-scheme: dark)">
+    <img src="/assets/02-genes-light.png" alt="The judging screen with both genes revealed">
+  </picture>
+  <p class="cap"><kbd>g</kbd> shows the <code>instructions.md</code> behind each answer. Hidden by
+    default and with no visible control, because reading it first pulls your judgement toward the
+    prompt rather than the output.</p>
+
+  <h4>3 · A finished generation becomes a scoreboard</h4>
+  <picture>
+    <source srcset="/assets/03-leaderboard-dark.png" media="(prefers-color-scheme: dark)">
+    <img src="/assets/03-leaderboard-light.png" alt="Generation leaderboard with scores, strengths and records">
+  </picture>
+  <p class="cap">Score is the fitted probability of beating a random opponent; strength is the raw
+    latent value; record is the plain win count.</p>
+
+  <h4>4 · Open any genome</h4>
+  <picture>
+    <source srcset="/assets/04-browse-dark.png" media="(prefers-color-scheme: dark)">
+    <img src="/assets/04-browse-light.png" alt="A genome's answer beside its instructions">
+  </picture>
+  <p class="cap">What it answered, next to the gene that produced it, with the operator that made it
+    and the parent it came from.</p>
+
+  <h4>5 · Lineage</h4>
+  <picture>
+    <source srcset="/assets/05-lineage-dark.png" media="(prefers-color-scheme: dark)">
+    <img src="/assets/05-lineage-light.png" alt="The lineage table for a generation">
+  </picture>
+  <p class="cap">Generation 2 mid-judging — the banner offers to continue, the tab is marked
+    <span class="pill">partial</span>, and every candidate descends from generation 1's winner.</p>
+
+  <h4>6 · One scale across generations</h4>
+  <picture>
+    <source srcset="/assets/06-overall-dark.png" media="(prefers-color-scheme: dark)">
+    <img src="/assets/06-overall-light.png" alt="All genomes from both generations on a single scale">
+  </picture>
+  <p class="cap">One fit over every comparison. <code>360122bb</code> carries
+    <span class="pill">gen 1, 2</span> — it appears in both rounds, and that shared entry is what
+    makes the single scale possible.</p>
+</section>
