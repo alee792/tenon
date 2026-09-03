@@ -1,7 +1,7 @@
-# A structural operator: removes a locus.
+# A structural mutator: removes a locus.
 #
 # Growth without pruning is bloat — the classic failure of variable-length
-# representations. Instructions get longer every generation, context cost
+# representations. Instructions get longer every round, context cost
 # climbs, and nothing ever removes a rule that stopped earning its place. This
 # is the counterweight, not symmetry for its own sake.
 #

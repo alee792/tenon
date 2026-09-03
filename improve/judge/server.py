@@ -8,12 +8,12 @@ actually reliable at, so this serves pairwise comparisons and derives the
 scalar fitness from the outcomes — the PAPRIKA-style preference framing.
 
 The awkward part is the shape of evolve's scoring API: `score` is called once
-per trial, sequentially, after the whole generation has run. A pairwise judge
+per variant, sequentially, after the whole round has run. A pairwise judge
 cannot answer the first call without seeing the others, and evolve is blocked
 waiting, so no others are coming. This server breaks that deadlock by not
 depending on the clients at all: fanout has already finished writing the
-generation's state by the time scoring starts, so on the first request the
-server reads every variant of that generation off disk, runs the full
+round's state by the time scoring starts, so on the first request the
+server reads every variant of that round off disk, runs the full
 round-robin in the browser, and answers all the blocked clients from the
 result.
 
@@ -41,11 +41,11 @@ ASSETS = HERE / "assets"
 
 
 class Round:
-    """One generation's judging: the entries, the pairs, and the verdicts."""
+    """One round's judging: the entries, the pairs, and the verdicts."""
 
-    def __init__(self, run_root: Path, generation: int, task_index: int):
+    def __init__(self, run_root: Path, round_no: int, task_index: int):
         self.run_root = run_root
-        self.generation = generation
+        self.round_no = round_no
         self.task_index = task_index
         self.entries: list = []
         self.pairs: list = []
@@ -54,15 +54,15 @@ class Round:
         self.load()
 
     def load(self) -> None:
-        gen_dir = self.run_root / "generations" / f"gen-{self.generation}" / "variants"
-        if not gen_dir.is_dir():
-            raise FileNotFoundError(f"no generation state at {gen_dir}")
+        round_dir = self.run_root / "rounds" / f"round-{self.round_no}" / "variants"
+        if not round_dir.is_dir():
+            raise FileNotFoundError(f"no round state at {round_dir}")
         # A variant fanout marked errored is one tenon reported outcome
         # "error" for: the environment failed, so whatever it left in
         # events.jsonl is not the agent's answer. evolve never asks for its
         # score, and nobody should be asked to judge it either.
         errored = set()
-        state_path = gen_dir.parent / "state.json"
+        state_path = round_dir.parent / "state.json"
         if state_path.is_file():
             try:
                 state = json.loads(state_path.read_text())
@@ -73,7 +73,7 @@ class Round:
                 for key, record in (state.get("variants") or {}).items()
                 if isinstance(record, dict) and record.get("status") == "errored"
             }
-        for variant in sorted(gen_dir.iterdir()):
+        for variant in sorted(round_dir.iterdir()):
             # Variant names are <short>-t<task>r<repeat>; only compare like
             # with like, since a different task is a different question.
             name = variant.name
@@ -95,12 +95,12 @@ class Round:
         for entry in self.entries:
             entry["instructions"] = read_instructions(paths.get(entry["short"], ""))
         # Verdicts are a person's time. Reload any already given for this
-        # generation so a restarted server resumes mid-round instead of
+        # round so a restarted server resumes mid-round instead of
         # throwing the work away.
-        saved = self.run_root / "judge" / f"verdicts-gen-{self.generation}.json"
+        saved = self.run_root / "judge" / f"verdicts-round-{self.round_no}.json"
         if saved.is_file():
             self.verdicts = json.loads(saved.read_text())
-        # Full round robin. With k=5 that is ten comparisons per generation,
+        # Full round robin. With k=5 that is ten comparisons per round,
         # which a person can actually finish.
         self.pairs = [
             {"id": f"{a['key']}|{b['key']}", "a": a["key"], "b": b["key"]}
@@ -182,7 +182,7 @@ class Round:
         if not keys:
             return {}
         if len(keys) == 1:
-            # Nothing to compare against — generation 0 holds only the seed.
+            # Nothing to compare against — round 0 holds only the seed.
             # The coin flip is the honest answer; a zero would mean the seed is
             # beaten by anything at all.
             return {keys[0]: 0.5}
@@ -194,7 +194,7 @@ class Round:
         return out
 
     def board(self) -> list:
-        """The generation's scoreboard, strongest first."""
+        """The round's scoreboard, strongest first."""
         keys, wins, counts = self.tally()
         scores = self.scores()
         p = self.strengths() if len(keys) > 1 else [1.0] * len(keys)
@@ -317,23 +317,23 @@ class Judge:
         return self.child is not None and self.child.poll() is None
 
     def advance(self, run_root: Path) -> dict:
-        """Ask the search for one more generation.
+        """Ask the search for one more round.
 
         The command is fixed at startup and the request carries no arguments,
         so a page cannot ask this server to run something of its choosing."""
         if not self.can_advance():
             return {"error": "this judge was started without --spec, so it cannot run the search"}
         if self.running():
-            return {"error": "a generation is already running"}
+            return {"error": "a round is already running"}
         checkpoint = run_root / "checkpoint.json"
         if not checkpoint.is_file():
             return {"error": "the run has no checkpoint to resume from"}
-        nxt = int(json.loads(checkpoint.read_text())["generation"]) + 1
-        self.child_log = run_root / f"generation-{nxt}.log"
+        nxt = int(json.loads(checkpoint.read_text())["round"]) + 1
+        self.child_log = run_root / f"round-{nxt}.log"
         handle = self.child_log.open("ab")
         self.child = subprocess.Popen(
             [sys.executable, str(self.evolve), "run", "--spec", str(self.spec),
-             "--resume", "--generations", str(nxt)],
+             "--resume", "--rounds", str(nxt)],
             cwd=str(self.evolve.parent.parent),
             stdout=handle,
             stderr=subprocess.STDOUT,
@@ -350,11 +350,11 @@ class Judge:
             tail = "\n".join(self.child_log.read_text(errors="replace").splitlines()[-4:])
         return {"running": code is None, "exited": code, "tail": tail}
 
-    def round_for(self, run_root: Path, generation: int, task_index: int, task: str) -> Round:
-        key = (str(run_root), generation, task_index)
+    def round_for(self, run_root: Path, round_no: int, task_index: int, task: str) -> Round:
+        key = (str(run_root), round_no, task_index)
         with self.lock:
             if key not in self.rounds:
-                rnd = Round(run_root, generation, task_index)
+                rnd = Round(run_root, round_no, task_index)
                 rnd.task = task
                 self.rounds[key] = rnd
             return self.rounds[key]
@@ -371,7 +371,7 @@ class Judge:
             while not rnd.done:
                 self.ready.wait(timeout=1.0)
             if entry_key not in {e["key"] for e in rnd.entries}:
-                raise KeyError(f"{entry_key} is not in generation {rnd.generation}'s round")
+                raise KeyError(f"{entry_key} is not in round {rnd.round_no}")
             genome = entry_key.split("-t")[0]
             overall = self.global_fit()
             if genome in overall:
@@ -392,17 +392,17 @@ class Judge:
     def save_verdicts(self, rnd: Round) -> None:
         out = rnd.run_root / "judge"
         out.mkdir(exist_ok=True)
-        (out / f"verdicts-gen-{rnd.generation}.json").write_text(json.dumps(rnd.verdicts, indent=2) + "\n")
+        (out / f"verdicts-round-{rnd.round_no}.json").write_text(json.dumps(rnd.verdicts, indent=2) + "\n")
 
     def persist(self, rnd: Round) -> None:
-        """Write the generation's scoreboard beside the search's own state, so
+        """Write the round's scoreboard beside the search's own state, so
         the judging survives the server and can be read after the fact."""
         out = rnd.run_root / "judge"
         out.mkdir(exist_ok=True)
-        (out / f"gen-{rnd.generation}.json").write_text(
+        (out / f"round-{rnd.round_no}.json").write_text(
             json.dumps(
                 {
-                    "generation": rnd.generation,
+                    "round": rnd.round_no,
                     "task": rnd.task,
                     "comparisons": len(rnd.pairs),
                     "board": rnd.board(),
@@ -417,7 +417,7 @@ class Judge:
         by round entry.
 
         Per-round scores are normalised inside their own field, so they are not
-        comparable across generations: a genome that went 5/5 against weak
+        comparable across rounds: a genome that went 5/5 against weak
         siblings and 1/5 against strong ones has not changed, its opposition
         has. The incumbent appears in consecutive rounds, and that shared node
         is exactly what makes a single fit across all of them identifiable —
@@ -445,12 +445,12 @@ class Judge:
         return fit(nodes, comparisons)
 
     def summary(self) -> dict:
-        """Everything the review screen shows: each generation's board and
+        """Everything the review screen shows: each round's board and
         outputs, the lineage the search recorded, and the one global fit."""
         with self.lock:
-            rounds = sorted(self.rounds.values(), key=lambda r: r.generation)
+            rounds = sorted(self.rounds.values(), key=lambda r: r.round_no)
         if not rounds:
-            return {"run": "", "finished": False, "pending": None, "generations": [],
+            return {"run": "", "finished": False, "pending": None, "rounds": [],
                     "overall": [], "can_advance": self.can_advance(), "child": self.child_state()}
         root = rounds[0].run_root
         lineage = {}
@@ -462,9 +462,9 @@ class Judge:
                     short = entry["genome"].split(":")[-1][:8]
                     lineage[short] = {
                         "parents": [p.split(":")[-1][:8] for p in entry.get("parents", [])],
-                        "operator": entry.get("operator", ""),
+                        "mutator": entry.get("mutator", ""),
                         "path": entry.get("path", ""),
-                        "generation": entry.get("generation"),
+                        "round": entry.get("round"),
                     }
         overall = self.global_fit()
         pending = next((r for r in rounds if not r.done), None)
@@ -474,21 +474,21 @@ class Judge:
             "can_advance": self.can_advance(),
             "child": self.child_state(),
             "pending": None if pending is None else {
-                "generation": pending.generation,
+                "round": pending.round_no,
                 "done": len(pending.verdicts),
                 "total": len(pending.pairs),
             },
             "overall": [
                 {"genome": g, "score": v["score"], "strength": v["strength"],
-                 "generations": sorted({r.generation for r in rounds
+                 "rounds": sorted({r.round_no for r in rounds
                                         if any(e["key"].startswith(g) for e in r.entries)})}
                 for g, v in sorted(overall.items(), key=lambda kv: -kv[1]["score"])
             ],
-            # A round with no pairs — generation 0 holds only the seed — has
+            # A round with no pairs — round 0 holds only the seed — has
             # nothing to show, and a tab leading to nothing is noise.
-            "generations": [
+            "rounds": [
                 {
-                    "generation": r.generation,
+                    "round": r.round_no,
                     "task": r.task,
                     "done": r.done,
                     "judged": len(r.verdicts),
@@ -499,7 +499,7 @@ class Judge:
                             "genome": e["key"].split("-t")[0],
                             "text": e["text"],
                             "instructions": e.get("instructions", ""),
-                            "operator": lineage.get(e["key"].split("-t")[0], {}).get("operator", ""),
+                            "mutator": lineage.get(e["key"].split("-t")[0], {}).get("mutator", ""),
                             "parents": lineage.get(e["key"].split("-t")[0], {}).get("parents", []),
                         }
                         for e in r.entries
@@ -513,14 +513,14 @@ class Judge:
     def boards(self) -> list:
         with self.lock:
             return [
-                {"generation": r.generation, "done": r.done, "board": r.board()}
-                for r in sorted(self.rounds.values(), key=lambda r: r.generation)
+                {"round": r.round_no, "done": r.done, "board": r.board()}
+                for r in sorted(self.rounds.values(), key=lambda r: r.round_no)
                 if r.verdicts or r.done
             ]
 
     def pending(self):
         """The round currently being judged, if any."""
-        for rnd in sorted(self.rounds.values(), key=lambda r: r.generation):
+        for rnd in sorted(self.rounds.values(), key=lambda r: r.round_no):
             if not rnd.done:
                 return rnd
         return None
@@ -529,7 +529,7 @@ class Judge:
         """Take back the last verdict in the round being judged.
 
         Scoped to that one round on purpose: this used to walk every round and
-        pop a verdict from each, so a single undo silently damaged generations
+        pop a verdict from each, so a single undo silently damaged rounds
         that were already finished."""
         with self.ready:
             rnd = self.pending()
@@ -539,21 +539,21 @@ class Judge:
             rnd.verdicts.pop(pair, None)
             self.save_verdicts(rnd)
             self.ready.notify_all()
-            return {"undone": True, "generation": rnd.generation, "left": len(rnd.verdicts)}
+            return {"undone": True, "round": rnd.round_no, "left": len(rnd.verdicts)}
 
-    def reset(self, generation: int) -> dict:
-        """Throw away a generation's verdicts and judge it again from scratch."""
+    def reset(self, round_no: int) -> dict:
+        """Throw away a round's verdicts and judge it again from scratch."""
         with self.ready:
-            match = [r for r in self.rounds.values() if r.generation == generation]
+            match = [r for r in self.rounds.values() if r.round_no == round_no]
             if not match:
-                return {"error": f"generation {generation} is not loaded"}
+                return {"error": f"round {round_no} is not loaded"}
             rnd = match[0]
             rnd.verdicts = {}
             self.save_verdicts(rnd)
-            board = rnd.run_root / "judge" / f"gen-{generation}.json"
+            board = rnd.run_root / "judge" / f"round-{round_no}.json"
             board.unlink(missing_ok=True)
             self.ready.notify_all()
-            return {"reset": generation, "comparisons": len(rnd.pairs)}
+            return {"reset": round_no, "comparisons": len(rnd.pairs)}
 
 
 JUDGE = Judge()
@@ -610,7 +610,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(JUDGE.summary())
             return
         if path == "/api/scores":
-            self.send_json({"generations": JUDGE.boards()})
+            self.send_json({"rounds": JUDGE.boards()})
             return
         if path == "/api/state":
             rnd = JUDGE.active()
@@ -622,7 +622,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(
                 {
                     "waiting": False,
-                    "generation": rnd.generation,
+                    "round": rnd.round_no,
                     "task": rnd.task,
                     "done": len(rnd.verdicts),
                     "total": len(rnd.pairs),
@@ -653,7 +653,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"ok": True})
             return
         if self.path == "/api/advance":
-            rounds = sorted(JUDGE.rounds.values(), key=lambda r: r.generation)
+            rounds = sorted(JUDGE.rounds.values(), key=lambda r: r.round_no)
             if not rounds:
                 self.send_json({"error": "no run is loaded"}, 400)
                 return
@@ -663,20 +663,20 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(JUDGE.undo())
             return
         if self.path == "/api/reset":
-            generation = payload.get("generation")
-            if not isinstance(generation, int):
-                self.send_json({"error": "a generation number is required"}, 400)
+            round_no = payload.get("round")
+            if not isinstance(round_no, int):
+                self.send_json({"error": "a round number is required"}, 400)
                 return
-            self.send_json(JUDGE.reset(generation))
+            self.send_json(JUDGE.reset(round_no))
             return
         if self.path == "/score":
             try:
                 genome_path = Path(payload["genome_path"])
                 run_root = genome_path.parent.parent
-                generation = int(payload["generation"])
+                round_no = int(payload["round"])
                 task_index = int(payload["task_index"])
                 entry_key = f"{genome_path.name[:8]}-t{task_index}r0"
-                rnd = JUDGE.round_for(run_root, generation, task_index, payload.get("task", ""))
+                rnd = JUDGE.round_for(run_root, round_no, task_index, payload.get("task", ""))
                 score = JUDGE.wait_for(rnd, entry_key)
             except Exception as err:  # a judge failure must not look like a zero
                 self.send_json({"error": str(err)}, 500)
@@ -691,7 +691,7 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=8917)
     parser.add_argument(
         "--spec",
-        help="an evolve spec; supplying it lets the page ask for one more generation",
+        help="an evolve spec; supplying it lets the page ask for one more round",
     )
     args = parser.parse_args()
     if args.spec:
@@ -703,7 +703,7 @@ def main() -> int:
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     print(f"judge listening on http://127.0.0.1:{args.port}")
     if JUDGE.spec:
-        print(f"judge: can run further generations from {JUDGE.spec}")
+        print(f"judge: can run further rounds from {JUDGE.spec}")
     print("open that page, then start the search in another terminal")
     try:
         server.serve_forever()

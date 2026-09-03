@@ -8,10 +8,12 @@
     <a href="https://lilianweng.github.io/posts/2026-07-04-harness/" target="_blank" rel="noopener">
     Harness Engineering for Self-Improvement</a> argues that the near-term path to recursive
     self-improvement runs through the <i>harness</i> — the system around the model — rather than
-    the weights, and that the binding constraint is the verifier. This is not that loop. It is the
-    substrate underneath one: a composable API for varying, isolating, identifying and scoring
-    agent configurations, with a human standing in for the verifier because that is the part
-    nobody has solved. Nothing here improves itself.
+    the weights, and that the binding constraint is the verifier. This <i>is</i> such a loop: it
+    varies, gates, evaluates, scores and selects agent configurations, which is what tenon's north
+    star means by the second author — an improvement loop revising an agent's files, coequal with
+    the person. The verifier is that person, because it is the part nobody has solved.
+    Nothing here improves itself. The loop improves an agent configuration, never its own code,
+    and nothing is promoted without a human reading the diff and deciding it should be.
   </div>
 
   <h4>The loop</h4>
@@ -39,15 +41,15 @@
     <text class="sub start" x="166" y="134">fixed</text>
   </svg>
 
-  <p><b>Propose</b> picks parents, recombines their genes, and applies a variation operator.
+  <p><b>Propose</b> picks parents, recombines their genes, and applies a variation mutator.
     <b>Gate</b> validates the result before anything expensive happens — a malformed candidate dies
     for the cost of a subprocess rather than a model run. <b>Evaluate</b> runs each survivor on the
     task in its own isolated checkout. <b>Score</b> turns a run into a number. <b>Select</b> decides
     who continues.</p>
 
   <h4>The budget is the design constraint</h4>
-  <p>Every evaluation is a full agent session. A generation of five candidates on one task is five
-    sessions; a search is tens of evaluations, not the millions an evolutionary algorithm normally
+  <p>Every variant is a full agent session. A round of five candidates on one task is five
+    sessions; a search is tens of variants, not the millions an evolutionary algorithm normally
     assumes. Almost everything else here follows from that: the gate exists so bad candidates cost
     nothing, deduplication exists so nothing is paid for twice, and the search algorithms stay
     deliberately simple because at this sample size sophistication cannot express itself.</p>
@@ -57,12 +59,14 @@
     <tr><th>layer</th><th>owns</th></tr>
     <tr><td><b>tenon</b></td><td>What an agent <i>is</i> — compiling a folder of files into working
       harness configuration, validating it, and giving it an identity.</td></tr>
-    <tr><td><b>fanout</b></td><td>One generation — k isolated checkouts, one agent run in each,
+    <tr><td><b>fanout</b></td><td>One round — k isolated checkouts, one agent run in each,
       results collected. It never scores anything.</td></tr>
-    <tr><td><b>evolve</b></td><td>The search across generations — propose, select, lineage.</td></tr>
+    <tr><td><b>evolve</b></td><td>The search across rounds — propose, select, lineage.</td></tr>
   </table>
   <p>tenon deliberately refuses to do evaluation, scoring or selection. That refusal is why the
-    search is a separate tool sitting on top rather than a feature inside it.</p>
+    search is a separate module in the same repository rather than a feature inside tenon: the
+    relationship runs one way — improve consumes tenon's CLI and tenon knows nothing of it — and
+    that direction is enforced by the module boundary rather than by a repository boundary.</p>
 </section>
 
 <section data-about="api" hidden>
@@ -75,7 +79,7 @@
       <span class="built">tournament</span></div>
     <div class="apicard"><code>combine</code><span class="role">which gene comes from which parent</span>
       <span class="built">uniform</span></div>
-    <div class="apicard"><code>operators</code><span class="role">how a child varies</span>
+    <div class="apicard"><code>mutators</code><span class="role">how a child varies</span>
       <span class="built none">no default</span></div>
     <div class="apicard"><code>score</code><span class="role">fitness</span>
       <span class="built none">no default</span></div>
@@ -83,7 +87,7 @@
       <span class="built">elitist</span></div>
   </div>
 
-  <p><code>score</code> and <code>operators</code> ship no default on purpose. A default fitness
+  <p><code>score</code> and <code>mutators</code> ship no default on purpose. A default fitness
     function would be the tool inventing an objective — precisely the move that makes a loop like
     this report progress it has not made.</p>
 
@@ -93,7 +97,7 @@
       entry per offspring. A single parent reproduces asexually; two or more recombine. Returning
       tuples is what lets one policy express both <i>who breeds</i> and <i>how often crossover
       happens</i>, instead of splitting that across two settings.</p>
-<pre class="io">→ in   { "generation": 2, "count": 5,
+<pre class="io">→ in   { "round": 2, "count": 5,
          "population": [ { "index": 0, "genome": "sha256:…", "score": 0.75,
                            "tags": {}, "genes": ["instructions.md", "skills/alpha"] }, … ] }
 
@@ -107,10 +111,10 @@
     <table>
       <tr><th>hook</th><th>returns</th></tr>
       <tr><td><code>combine</code></td><td><code>{"genes": {"skills/alpha": "sha256:…"}}</code> — a
-        plan of which parent supplies each locus. Or <code>{"materialized": true}</code> if the hook
+        plan keyed by locus, naming which parent supplies the gene there. Or <code>{"materialized": true}</code> if the hook
         wrote the child directory itself, which is the escape hatch for recombining below the
         component grain.</td></tr>
-      <tr><td><code>operators</code></td><td>Not a hook but a weighted list of commands, each run
+      <tr><td><code>mutators</code></td><td>Not a hook but a weighted list of commands, each run
         with the candidate as its working directory. Each is <b>named</b>, and the name lands in the
         lineage, so the record answers which <i>kind</i> of change produced the gains.</td></tr>
       <tr><td><code>score</code></td><td><code>{"score": 0.7}</code>, optionally with
@@ -196,14 +200,14 @@
     <summary>The island model, in full</summary>
     <p>Two policies and no change to evolve. <code>pair</code> groups the population by its
       <code>island</code> tag, draws both parents from within one, and tags the child with that
-      island. <code>select</code> keeps each island's own best, and every third generation replaces
+      island. <code>select</code> keeps each island's own best, and every third round replaces
       the weakest island's members with copies of the strongest island's — which is the move that
       makes the model work, and the reason a genome has to be able to occupy two slots.</p>
   </details>
 
   <h4>Genomes can change shape</h4>
   <p>Crossover only shuffles loci the parents already hold, so on its own the genome's
-    dimensionality is frozen at whatever the seed had. An operator that <i>adds</i> a gene is how an
+    dimensionality is frozen at whatever the seed had. A mutator that <i>adds</i> a gene is how an
     agent acquires a capability rather than rewording an existing one; one that removes a gene is
     the counterweight, since growth without pruning is bloat.</p>
   <p>Differently-shaped genomes still recombine because loci are aligned by <b>name</b>:
@@ -232,6 +236,10 @@
     <div class="t-row t-fp"><span class="t-path">fingerprint sha256:cb1bbf1d…</span><span class="t-tag">genome id</span></div>
   </div>
 
+  <p>Three words, kept distinct: a <b>locus</b> is a component path — <code>skills/alpha</code>,
+    <code>instructions.md</code>; a <b>gene</b> is the content at that path; a <b>genome</b> is the
+    map from loci to genes, which on disk is the agent directory itself.</p>
+
   <p>Because a gene is a whole authored component, crossover is file-level recombination rather than
     text surgery: for each locus either parent holds, the child inherits one parent's copy intact.</p>
 
@@ -244,7 +252,7 @@
       tool did not come along. They die before a model is opened, and the rule that rejected them is
       recorded by name.</li>
     <li><b>Deduplication.</b> A genome already scored is never paid for twice, and a mutation that
-      cycles back to a known genome is caught across generations.</li>
+      cycles back to a known genome is caught across rounds.</li>
     <li><b>Attribution.</b> The same fingerprint travels on every run, so a score cannot drift apart
       from the configuration that earned it.</li>
   </ul>
@@ -252,8 +260,8 @@
   <h4>Isolation</h4>
   <p>Every candidate gets its own git worktree on its own branch. Variants cannot see or corrupt one
     another, the agent is free to write files, and promoting a winner afterwards is a plain
-    <code>git checkout</code>. Worktrees are reclaimed once a generation is scored, so disk holds one
-    generation rather than all of them.</p>
+    <code>git checkout</code>. Worktrees are reclaimed once a round is scored, so disk holds one
+    round rather than all of them.</p>
 
   <h4>Reproducibility</h4>
   <p>A folder cannot express which model ran or which harness version. A tenon pin set pins those —
@@ -305,19 +313,19 @@
 
   <h4>The anchor, and why the scale is global</h4>
   <p>A round's scores are normalised inside that round's field, so they do not compare across
-    generations. A genome that went 5/5 against weak siblings and 1/5 against strong ones has not
+    rounds. A genome that went 5/5 against weak siblings and 1/5 against strong ones has not
     changed — its opposition has. That is not hypothetical; it is what the run below did.</p>
   <p>So the incumbent is re-judged in every round. That shared entry links the rounds into one
     connected comparison graph, which makes a <i>single</i> fit over every comparison identifiable.
-    It is the only basis on which a generation-1 genome and a generation-2 genome can honestly be
+    It is the only basis on which a round-1 genome and a round-2 genome can honestly be
     compared.</p>
 
   <svg class="viz" viewBox="0 0 720 268" role="img" aria-label="Lineage of the demo run: seed, five children, the winner, five more children">
     <defs><marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto">
       <path d="M1 1L9 5L1 9" class="head"/></marker></defs>
-    <text class="cap-t" x="10" y="16">generation 0</text>
+    <text class="cap-t" x="10" y="16">round 0</text>
     <g class="node"><rect x="300" y="22" width="120" height="42" rx="6"/><text class="mono" x="360" y="40">cb1bbf1d</text><text class="sub" x="360" y="55">0.425 · seed</text></g>
-    <text class="cap-t" x="10" y="100">generation 1</text>
+    <text class="cap-t" x="10" y="100">round 1</text>
     <path class="edge" d="M348 64 L110 106" marker-end="url(#a3)"/>
     <path class="edge" d="M354 64 L245 106" marker-end="url(#a3)"/>
     <path class="edge" d="M360 64 L360 106" marker-end="url(#a3)"/>
@@ -328,7 +336,7 @@
     <g class="node lead"><rect x="300" y="110" width="120" height="42" rx="6"/><text class="mono" x="360" y="128">360122bb</text><text class="sub lead-t" x="360" y="143">0.895 · won</text></g>
     <g class="node"><rect x="415" y="110" width="120" height="42" rx="6"/><text class="mono" x="475" y="128">71eb2f5c</text><text class="sub" x="475" y="143">0.585</text></g>
     <g class="node"><rect x="550" y="110" width="120" height="42" rx="6"/><text class="mono" x="610" y="128">655656b5</text><text class="sub" x="610" y="143">0.585</text></g>
-    <text class="cap-t" x="10" y="192">generation 2</text>
+    <text class="cap-t" x="10" y="192">round 2</text>
     <path class="edge accent" d="M348 152 L110 198" marker-end="url(#a3)"/>
     <path class="edge accent" d="M354 152 L245 198" marker-end="url(#a3)"/>
     <path class="edge accent" d="M360 152 L360 198" marker-end="url(#a3)"/>
@@ -340,8 +348,8 @@
     <g class="node"><rect x="415" y="202" width="120" height="42" rx="6"/><text class="mono" x="475" y="220">0c643a74</text><text class="sub" x="475" y="235">0.584</text></g>
     <g class="node"><rect x="550" y="202" width="120" height="42" rx="6"/><text class="mono" x="610" y="220">ea8ab4c7</text><text class="sub" x="610" y="235">0.584</text></g>
   </svg>
-  <p class="cap">The demo run. <code>360122bb</code> won generation 1 outright at 5/5, then was
-    re-judged inside generation 2 against its own children and came last at 1/5 — the anchor
+  <p class="cap">The demo run. <code>360122bb</code> won round 1 outright at 5/5, then was
+    re-judged inside round 2 against its own children and came last at 1/5 — the anchor
     revealing that the field had improved, not that the genome had got worse.</p>
 
   <h4>Two smaller decisions</h4>
@@ -350,16 +358,16 @@
     incumbent adds samples to the same genome and its estimate tightens rather than staying frozen
     at first contact.</p>
   <p><b>An unjudged genome scores 0.5, not 0.</b> The seed has nothing to compare against in
-    generation 0. Scoring it zero would mean anything at all beats it — and whether the search beat
+    round 0. Scoring it zero would mean anything at all beats it — and whether the search beat
     the seed is the first question it has to answer.</p>
 
   <h4>How a human is wired into a machine API</h4>
   <p>This is the part that connects back to the API. The search calls its scoring command
-    <i>once per run, sequentially, after the generation has finished</i>. A pairwise judge cannot
+    <i>once per run, sequentially, after the round has finished</i>. A pairwise judge cannot
     answer the first of those calls without seeing the others — and the search is blocked waiting,
     so the others never arrive.</p>
 
-  <svg class="viz" viewBox="0 0 720 210" role="img" aria-label="How the blocked scoring call is resolved by the judge reading the generation from disk">
+  <svg class="viz" viewBox="0 0 720 210" role="img" aria-label="How the blocked scoring call is resolved by the judge reading the round from disk">
     <defs><marker id="a4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto">
       <path d="M1 1L9 5L1 9" class="head"/></marker></defs>
     <text class="cap-t" x="60"  y="16" text-anchor="middle">evolve</text>
@@ -370,7 +378,7 @@
     <path class="edge" d="M68 52 H352" marker-end="url(#a4)"/>
     <text class="sub" x="210" y="46" text-anchor="middle">score(run 1) — and blocks</text>
     <path class="edge dash" d="M368 82 H420 V102 H372" marker-end="url(#a4)"/>
-    <text class="sub" x="470" y="88" text-anchor="start">reads the whole generation off disk</text>
+    <text class="sub" x="470" y="88" text-anchor="start">reads the whole round off disk</text>
     <path class="edge" d="M368 124 H652" marker-end="url(#a4)"/>
     <text class="sub" x="510" y="118" text-anchor="middle">15 comparisons</text>
     <path class="edge accent" d="M652 148 H368" marker-end="url(#a4)"/>
@@ -381,7 +389,7 @@
 
   <p>The way out is for the judge to not depend on its callers at all. By the time scoring starts,
     every variant's output is already on disk — so the first call makes the server read the whole
-    generation itself, run the round robin in your browser, and answer every blocked caller from the
+    round itself, run the round robin in your browser, and answer every blocked caller from the
     result. The scoring command stays a dumb client that blocks on HTTP.</p>
   <p>Nothing in the search knows a human is involved. It sees a command that takes a run on stdin and
     prints a number — the same contract a test-suite scorer satisfies. That is the sense in which
@@ -408,10 +416,10 @@
     default and with no visible control, because reading it first pulls your judgement toward the
     prompt rather than the output.</p>
 
-  <h4>3 · A finished generation becomes a scoreboard</h4>
+  <h4>3 · A finished round becomes a scoreboard</h4>
   <picture>
     <source srcset="/assets/03-leaderboard-dark.png" media="(prefers-color-scheme: dark)">
-    <img src="/assets/03-leaderboard-light.png" alt="Generation leaderboard with scores, strengths and records">
+    <img src="/assets/03-leaderboard-light.png" alt="Round leaderboard with scores, strengths and records">
   </picture>
   <p class="cap">Score is the fitted probability of beating a random opponent; strength is the raw
     latent value; record is the plain win count.</p>
@@ -421,23 +429,23 @@
     <source srcset="/assets/04-browse-dark.png" media="(prefers-color-scheme: dark)">
     <img src="/assets/04-browse-light.png" alt="A genome's answer beside its instructions">
   </picture>
-  <p class="cap">What it answered, next to the gene that produced it, with the operator that made it
+  <p class="cap">What it answered, next to the gene that produced it, with the mutator that made it
     and the parent it came from.</p>
 
   <h4>5 · Lineage</h4>
   <picture>
     <source srcset="/assets/05-lineage-dark.png" media="(prefers-color-scheme: dark)">
-    <img src="/assets/05-lineage-light.png" alt="The lineage table for a generation">
+    <img src="/assets/05-lineage-light.png" alt="The lineage table for a round">
   </picture>
-  <p class="cap">Generation 2 mid-judging — the banner offers to continue, the tab is marked
-    <span class="pill">partial</span>, and every candidate descends from generation 1's winner.</p>
+  <p class="cap">Round 2 mid-judging — the banner offers to continue, the tab is marked
+    <span class="pill">partial</span>, and every candidate descends from round 1's winner.</p>
 
-  <h4>6 · One scale across generations</h4>
+  <h4>6 · One scale across rounds</h4>
   <picture>
     <source srcset="/assets/06-overall-dark.png" media="(prefers-color-scheme: dark)">
-    <img src="/assets/06-overall-light.png" alt="All genomes from both generations on a single scale">
+    <img src="/assets/06-overall-light.png" alt="All genomes from both rounds on a single scale">
   </picture>
   <p class="cap">One fit over every comparison. <code>360122bb</code> carries
-    <span class="pill">gen 1, 2</span> — it appears in both rounds, and that shared entry is what
+    <span class="pill">round 1, 2</span> — it appears in both rounds, and that shared entry is what
     makes the single scale possible.</p>
 </section>

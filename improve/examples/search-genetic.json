@@ -11,31 +11,31 @@
   ],
   "repeats": 2,
   "score": "sh improve/examples/score-tests.sh",
-  "generations": 8,
+  "rounds": 8,
   "population": 6,
   "crossover_rate": 0.6,
   "mutation_rate": 0.8,
   "tournament": 3,
   "patience": 3,
-  "max_evaluations": 200,
+  "max_variants": 200,
   "concurrency": 4,
   "timeout": "900s",
   "rng_seed": 1,
-  "operators": [
+  "mutators": [
     {
       "name": "edit",
       "weight": 5,
-      "command": "sh \"$EVOLVE_CWD\"/improve/examples/operators/edit-llm.sh"
+      "command": "sh \"$EVOLVE_CWD\"/improve/examples/mutators/edit-llm.sh"
     },
     {
       "name": "grow",
       "weight": 3,
-      "command": "sh \"$EVOLVE_CWD\"/improve/examples/operators/grow-skill.sh"
+      "command": "sh \"$EVOLVE_CWD\"/improve/examples/mutators/grow-skill.sh"
     },
     {
       "name": "prune",
       "weight": 2,
-      "command": "python3 \"$EVOLVE_CWD\"/improve/examples/operators/prune-gene.py"
+      "command": "python3 \"$EVOLVE_CWD\"/improve/examples/mutators/prune-gene.py"
     }
   ]
 }

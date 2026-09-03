@@ -18,18 +18,18 @@ python3 improve/evolve.py run --spec improve/examples/search-paprika.json
 
 Open <http://127.0.0.1:8917>, and judge. The theme follows your system by default; the control
 in the header cycles light, dark and auto, and `?theme=dark` pins it in a link. `←` picks A, `→` picks B, `space` is
-a tie. The search blocks until the generation's comparisons are done, then
-takes the win rates as fitness and proposes the next generation.
+a tie. The search blocks until the round's comparisons are done, then
+takes the win rates as fitness and proposes the next round.
 
 ## How it fits evolve's API
 
-`score` is called once per trial, sequentially, after the whole generation has
+`score` is called once per variant, sequentially, after the whole round has
 run — so a pairwise judge cannot answer the first call without seeing the
 others, and evolve is blocked, so no others are coming.
 
 The server sidesteps that by not depending on the clients: fanout has finished
-writing the generation's state before scoring starts, so on the first request
-the server reads every variant of that generation off disk, runs the whole
+writing the round's state before scoring starts, so on the first request
+the server reads every variant of that round off disk, runs the whole
 round robin in the browser, and answers all the blocked clients from the
 result. No change to evolve was needed.
 
@@ -45,12 +45,12 @@ what you are trying to measure.
 exposes, what swapping each injection point buys you, what tenon contributes, and how a human
 gets wired into a machine scoring contract. It carries the walkthrough screenshots.
 
-**Review** is where a finished generation goes. It carries each generation's
+**Review** is where a finished round goes. It carries each round's
 leaderboard, the answer and the gene for any genome you click, and the lineage
-showing which parent and which operator produced it. An **All generations** tab
+showing which parent and which mutator produced it. An **All rounds** tab
 puts every genome on one scale.
 
-When the next generation finishes running, a banner offers to start judging it
+When the next round finishes running, a banner offers to start judging it
 and a desktop notification fires if you have granted permission — but the
 search waits on you either way, so you can stay on the review screen as long as
 you like.
@@ -69,8 +69,8 @@ the strongest, and it has no answer at all when the comparison graph is
 incomplete. `test_scoring.py` pins the difference — two genomes with identical
 1-1 records score 0.669 and 0.358 when their opponents differed in strength.
 
-**The fit is global, across every round.** A generation's own scores are
-normalised inside its own field, so they do not compare across generations: a
+**The fit is global, across every round.** A round's own scores are
+normalised inside its own field, so they do not compare across rounds: a
 genome that went 5/5 against weak siblings and 1/5 against strong ones has not
 changed, its opposition has. The incumbent appears in consecutive rounds, and
 that shared node is exactly what makes one fit over all comparisons
@@ -79,10 +79,10 @@ identifiable — which is the point of anchoring in the first place.
 Two details that matter:
 
 - **The incumbent is in every round.** `reevaluate: incumbent` puts it back in
-  each generation's comparisons, so win rates are anchored across generations.
-  Without that, a candidate winning 0.75 against its own generation's peers
-  could be worse than last generation's 0.80 and still displace it.
-- **An unjudgeable entry scores 0.5, not 0.** Generation 0 holds only the seed,
+  each round's comparisons, so win rates are anchored across rounds.
+  Without that, a candidate winning 0.75 against its own round's peers
+  could be worse than last round's 0.80 and still displace it.
+- **An unjudgeable entry scores 0.5, not 0.** Round 0 holds only the seed,
   so there is nothing to compare it against. Scoring it zero would mean the
   seed is beaten by anything at all, and whether evolution beat the seed is the
   first question the search has to answer.
@@ -92,15 +92,15 @@ Comparisons are blind — the panels are labelled A and B, never by lineage.
 ## The bundled search
 
 [`examples/search-paprika.json`](../examples/search-paprika.json) is k=5 over
-two generations on one task, with the agent pinned to Haiku:
+two rounds on one task, with the agent pinned to Haiku:
 
 | | |
 | --- | --- |
 | Task | explain the repository to a new contributor, under 120 words |
-| Candidates | 5 per generation, hill climb (one gene, so crossover has nowhere to go) |
+| Candidates | 5 per round, hill climb (one gene, so crossover has nowhere to go) |
 | Agent model | `claude-haiku-4-5-20251001`, pinned per genome |
 | Harness runs | 13 |
-| Comparisons you make | 30 — fifteen per generation, six entries each |
+| Comparisons you make | 30 — fifteen per round, six entries each |
 
 Swap `model` to `claude-sonnet-5` to ask the same question of a bigger model,
 or to compare the two on identical starting state.

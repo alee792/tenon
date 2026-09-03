@@ -3,15 +3,15 @@
 # worktree. Mechanical scorers like this are far safer than an LLM judge:
 # nothing in the loop can talk the test suite into a better number.
 #
-# stdin:  one trial JSON object (see EVOLVE.md)
+# stdin:  one variant JSON object (see EVOLVE.md)
 # stdout: {"score": <0..1>}
 set -eu
-trial=$(cat)
+variant=$(cat)
 workspace=${EVOLVE_WORKSPACE:-}
 [ -n "$workspace" ] || { echo '{"score": 0}'; exit 0; }
 
 # A variant whose dispatch never reached a completed turn scores nothing.
-status=$(printf '%s' "$trial" | python3 -c 'import json,sys; print(json.load(sys.stdin)["record"]["status"])')
+status=$(printf '%s' "$variant" | python3 -c 'import json,sys; print(json.load(sys.stdin)["record"]["status"])')
 [ "$status" = "done" ] || { echo '{"score": 0}'; exit 0; }
 
 cd "$workspace"

@@ -198,7 +198,7 @@
   <span id="nav" style="display:flex; gap:6px"></span>
   <button class="tab" id="theme" onclick="cycleTheme()" title="light / dark / system"></button>
 </header>
-<main id="root"><div class="empty">Waiting for a generation to finish running…</div></main>
+<main id="root"><div class="empty">Waiting for a round to finish running…</div></main>
 
 <script>
 // A pinned theme (?theme=dark) overrides the system preference. Mostly here so
@@ -242,22 +242,22 @@ async function tick(){
   summary = sum;
 
   const pending = sum.pending;
-  if (pending && pending.generation !== notified) {
-    notified = pending.generation;
-    ping(`Generation ${pending.generation} is ready — ${pending.total} comparisons`);
+  if (pending && pending.round !== notified) {
+    notified = pending.round;
+    ping(`Round ${pending.round} is ready — ${pending.total} comparisons`);
   }
 
   const showJudge = view === 'judge' || (view === 'auto' && pending && !state.waiting && state.pair);
   $('meta').textContent = pending
-    ? `generation ${pending.generation} · ${pending.done} of ${pending.total} judged`
-    : sum.finished ? `${sum.run} · search complete` : `${sum.run} · waiting for the next generation`;
+    ? `round ${pending.round} · ${pending.done} of ${pending.total} judged`
+    : sum.finished ? `${sum.run} · search complete` : `${sum.run} · waiting for the next round`;
   const frac = pending && pending.total ? pending.done / pending.total : (sum.finished ? 1 : 0);
   $('bar').style.width = (frac * 100) + '%';
 
   const showAbout = view === 'about';
   const nav = [
     pending ? `<button class="tab ${showJudge && !showAbout ? 'primary' : ''}" onclick="go('judge')">Judge</button>` : '',
-    sum.generations.length ? `<button class="tab ${!showJudge && !showAbout ? 'primary' : ''}" onclick="go('review')">Review</button>` : '',
+    sum.rounds.length ? `<button class="tab ${!showJudge && !showAbout ? 'primary' : ''}" onclick="go('review')">Review</button>` : '',
     `<button class="tab ${showAbout ? 'primary' : ''}" onclick="go('about')">About</button>`,
   ].join('');
   // Rewriting this every tick churns the DOM for no reason and drops anything
@@ -281,7 +281,7 @@ function ping(text){
 
 function renderJudge(s){
   if (s.waiting || !s.pair) {
-    $('root').innerHTML = '<div class="empty">Waiting for a generation to finish running…</div>';
+    $('root').innerHTML = '<div class="empty">Waiting for a round to finish running…</div>';
     return;
   }
   if (pairId === s.pair.id) return;   // never redraw under the reader's cursor
@@ -353,7 +353,7 @@ function bars(rows){
     <tr class="row-pick ${i === 0 ? 'lead' : ''}" onclick="pick('${r.genome}')">
       <td><span class="meter"><i style="width:${(r.score / top) * 100}%"></i></span>
           <span class="gene">${r.genome}</span>${
-            r.generations ? `<span class="pill">gen ${r.generations.join(', ')}</span>` : ''}</td>
+            r.rounds ? `<span class="pill">round ${r.rounds.join(', ')}</span>` : ''}</td>
       <td class="num">${fx(r.score)}</td>
       <td class="num">${fx(r.strength)}</td>
       <td class="num">${r.wins === undefined ? '' : `${r.wins} / ${r.played}`}</td>
@@ -362,44 +362,44 @@ function bars(rows){
 
 function renderReview(force){
   const s = summary;
-  if (!s || !s.generations.length) {
+  if (!s || !s.rounds.length) {
     $('root').innerHTML = '<div class="empty">Nothing judged yet.</div>';
     return;
   }
-  if (tab === null) tab = s.generations[s.generations.length - 1].generation;
+  if (tab === null) tab = s.rounds[s.rounds.length - 1].round;
   // Redraw only when something actually changed. Repainting on every poll
   // steals the scroll position and invalidates whatever the reader is
   // mid-click on.
   const key = JSON.stringify([tab, openGenome, s.finished, s.pending, s.can_advance,
                               s.child && [s.child.running, s.child.tail],
-                              s.generations.map(g => [g.generation, g.judged])]);
+                              s.rounds.map(g => [g.round, g.judged])]);
   if (!force && key === drawn) return;
   drawn = key;
-  const gen = s.generations.find(g => g.generation === tab) || s.generations[0];
-  const judged = s.generations.reduce((n, g) => n + g.judged, 0);
+  const rnd = s.rounds.find(g => g.round === tab) || s.rounds[0];
+  const judged = s.rounds.reduce((n, g) => n + g.judged, 0);
 
   const running = s.child && s.child.running;
-  const nextGen = (s.generations[s.generations.length - 1]?.generation ?? 0) + 1;
+  const nextRound = (s.rounds[s.rounds.length - 1]?.round ?? 0) + 1;
   const banner = s.pending && s.pending.done < s.pending.total ? `
     <div class="card banner">
-      <span><b>Generation ${s.pending.generation}</b> is ready —
+      <span><b>Round ${s.pending.round}</b> is ready —
         ${s.pending.total - s.pending.done} comparisons left.</span>
       <button class="primary" onclick="go('judge')">Start judging</button>
       <span class="faint">or stay here; the search waits on you either way.</span>
     </div>` : running ? `
     <div class="card banner">
-      <span><b>Generation ${nextGen}</b> is running — proposing candidates and running each in its
+      <span><b>Round ${nextRound}</b> is running — proposing candidates and running each in its
         own checkout. It will appear here to judge when it lands.</span>
       ${s.child.tail ? `<span class="faint mono-s">${esc(s.child.tail.split('\n').pop())}</span>` : ''}
     </div>` : `
     <div class="card banner">
       <span>Everything judged so far.${s.finished ? ' Nothing was promoted — review the winner and copy it across yourself if it holds up.' : ''}</span>
       ${s.can_advance
-        ? `<button class="primary" onclick="advance()">Run generation ${nextGen}</button>`
-        : `<span class="faint">Start the judge with <code>--spec</code> to run further generations from here.</span>`}
+        ? `<button class="primary" onclick="advance()">Run round ${nextRound}</button>`
+        : `<span class="faint">Start the judge with <code>--spec</code> to run further rounds from here.</span>`}
     </div>`;
 
-  const entry = gen.entries.find(e => e.genome === openGenome);
+  const entry = rnd.entries.find(e => e.genome === openGenome);
   const detail = !entry ? `<div class="card empty" style="padding:38px 24px">
       Pick a genome above to read its answer and the instructions that produced it.</div>` : `
     <div class="card side">
@@ -408,7 +408,7 @@ function renderReview(force){
     </div>
     <div class="card side">
       <h2><span class="gene">${entry.genome}</span> · its instructions
-        ${entry.operator ? `<span class="pill">${esc(entry.operator)}</span>` : ''}
+        ${entry.mutator ? `<span class="pill">${esc(entry.mutator)}</span>` : ''}
         ${entry.parents.length ? `<span class="pill">from ${entry.parents.join(', ')}</span>` : ''}</h2>
       <pre style="max-height:44vh">${esc(entry.instructions)}</pre>
     </div>`;
@@ -416,10 +416,10 @@ function renderReview(force){
   $('root').innerHTML = `
     ${banner}
     <div class="tabs">
-      ${s.generations.map(g => `<button class="tab" aria-current="${g.generation === tab}"
-          onclick="setTab(${g.generation})">Generation ${g.generation}${
+      ${s.rounds.map(g => `<button class="tab" aria-current="${g.round === tab}"
+          onclick="setTab(${g.round})">Round ${g.round}${
           g.done ? '' : ' <span class="pill">partial</span>'}</button>`).join('')}
-      <button class="tab" aria-current="${tab === 'all'}" onclick="setTab('all')">All generations</button>
+      <button class="tab" aria-current="${tab === 'all'}" onclick="setTab('all')">All rounds</button>
     </div>
     ${tab === 'all' ? `
       <h3>every genome on one scale — one fit over all ${judged} comparisons</h3>
@@ -427,33 +427,33 @@ function renderReview(force){
         <tr><th>genome</th><th>score</th><th>strength</th><th></th></tr>
         ${bars(s.overall)}
       </table></div>
-      <p class="faint" style="margin-top:10px">A generation's own scores are normalised inside its
-        own field, so they do not compare across generations. The incumbent appears in consecutive
+      <p class="faint" style="margin-top:10px">A round's own scores are normalised inside its
+        own field, so they do not compare across rounds. The incumbent appears in consecutive
         rounds, and that shared entry is what makes this single fit possible.</p>
       ` : `
-      <div class="card task"><span class="faint">task</span><br>${esc(gen.task)}</div>
-      <h3>generation ${gen.generation} — ${gen.judged} of ${gen.comparisons} comparisons
-        ${gen.judged ? `<button class="ghost mini" onclick="resetGen(${gen.generation})">reset and judge again</button>` : ''}</h3>
+      <div class="card task"><span class="faint">task</span><br>${esc(rnd.task)}</div>
+      <h3>round ${rnd.round} — ${rnd.judged} of ${rnd.comparisons} comparisons
+        ${rnd.judged ? `<button class="ghost mini" onclick="resetRound(${rnd.round})">reset and judge again</button>` : ''}</h3>
       <div class="card"><table>
         <tr><th>genome</th><th>score</th><th>strength</th><th>record</th></tr>
-        ${bars(gen.board)}
+        ${bars(rnd.board)}
       </table></div>
       <h3>outputs</h3>
       <div class="${entry ? 'split' : ''}">${detail}</div>
       <h3>lineage</h3>
       <div class="card"><table>
-        <tr><th>genome</th><th>came from</th><th>operator</th></tr>
-        ${gen.entries.map(e => `<tr class="row-pick" onclick="pick('${e.genome}')">
+        <tr><th>genome</th><th>came from</th><th>mutator</th></tr>
+        ${rnd.entries.map(e => `<tr class="row-pick" onclick="pick('${e.genome}')">
             <td class="gene">${e.genome}</td>
             <td class="gene">${e.parents.length ? e.parents.join(', ') : '—'}</td>
-            <td>${esc(e.operator || 'seed')}</td></tr>`).join('')}
+            <td>${esc(e.mutator || 'seed')}</td></tr>`).join('')}
       </table></div>`}`;
 }
 
-async function resetGen(generation){
-  if (!confirm(`Discard generation ${generation}'s verdicts and judge it again from scratch?`)) return;
+async function resetRound(round){
+  if (!confirm(`Discard round ${round}'s verdicts and judge it again from scratch?`)) return;
   const out = await (await fetch('/api/reset', {method:'POST',
-    headers:{'Content-Type':'application/json'}, body: JSON.stringify({generation})})).json();
+    headers:{'Content-Type':'application/json'}, body: JSON.stringify({round})})).json();
   if (out.error) { alert(out.error); return; }
   drawn = null; pairId = null;
   go('judge');
@@ -470,8 +470,8 @@ async function advance(){
 function setTab(t){ tab = t; openGenome = null; writeHash(); renderReview(true); }
 function pick(genome){
   if (tab === 'all') {
-    const owner = summary.generations.find(g => g.entries.some(e => e.genome === genome));
-    if (owner) tab = owner.generation;
+    const owner = summary.rounds.find(g => g.entries.some(e => e.genome === genome));
+    if (owner) tab = owner.round;
   }
   openGenome = openGenome === genome ? null : genome;
   writeHash();

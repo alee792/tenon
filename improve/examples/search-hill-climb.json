@@ -10,18 +10,18 @@
   ],
   "repeats": 2,
   "score": "sh improve/examples/score-tests.sh",
-  "generations": 6,
+  "rounds": 6,
   "population": 4,
   "patience": 2,
-  "max_evaluations": 60,
+  "max_variants": 60,
   "concurrency": 4,
   "timeout": "900s",
   "rng_seed": 1,
-  "operators": [
+  "mutators": [
     {
       "name": "edit",
       "weight": 1,
-      "command": "sh \"$EVOLVE_CWD\"/improve/examples/operators/edit-llm.sh"
+      "command": "sh \"$EVOLVE_CWD\"/improve/examples/mutators/edit-llm.sh"
     }
   ]
 }

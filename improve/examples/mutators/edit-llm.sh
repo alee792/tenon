@@ -1,5 +1,5 @@
 #!/bin/sh
-# An LLM-driven mutation operator. Runs with the candidate genome directory as
+# An LLM-driven mutator. Runs with the candidate genome directory as
 # its working directory and edits exactly one gene in place.
 #
 # Keep the edit to ONE gene. A mutation that touches three files at once makes

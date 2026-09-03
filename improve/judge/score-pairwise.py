@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """evolve `score` command that defers to the human pairwise judge.
 
-It forwards the trial to the judge server and blocks until that generation's
+It forwards the variant to the judge server and blocks until that round's
 round robin is finished, then returns the entry's win rate. Start the server
 first; a search whose judge is not running should fail loudly rather than
 quietly scoring everything zero.
@@ -17,17 +17,17 @@ PORT = os.environ.get("EVOLVE_JUDGE_PORT", "8917")
 
 
 def main() -> int:
-    trial = sys.stdin.read()
+    variant = sys.stdin.read()
     # A variant whose dispatch never completed has no output to compare, so it
     # is scored zero here rather than silently going missing from the round.
-    record = json.loads(trial).get("record", {})
+    record = json.loads(variant).get("record", {})
     if record.get("status") != "done":
         print(f"variant did not complete ({record.get('status') or 'unknown'}); scoring 0", file=sys.stderr)
         print(json.dumps({"score": 0.0}))
         return 0
     request = urllib.request.Request(
         f"http://127.0.0.1:{PORT}/score",
-        data=trial.encode(),
+        data=variant.encode(),
         headers={"Content-Type": "application/json"},
     )
     try:
