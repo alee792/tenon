@@ -9,7 +9,7 @@
     "Add a table-driven test for the duration parser."
   ],
   "repeats": 2,
-  "score": "sh fanout/examples/score-tests.sh",
+  "score": "sh improve/examples/score-tests.sh",
   "generations": 6,
   "population": 4,
   "patience": 2,
@@ -21,7 +21,7 @@
     {
       "name": "edit",
       "weight": 1,
-      "command": "sh \"$EVOLVE_CWD\"/fanout/examples/operators/edit-llm.sh"
+      "command": "sh \"$EVOLVE_CWD\"/improve/examples/operators/edit-llm.sh"
     }
   ]
 }

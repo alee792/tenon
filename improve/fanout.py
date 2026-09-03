@@ -12,7 +12,7 @@ Per variant it does exactly this, and nothing more:
 
   1. git worktree add        an isolated workspace on its own branch
   2. mutate (optional)       a caller-supplied command over the agent files
-  3. tenon fingerprint show  record the variant's source fingerprint
+  3. tenon check             gate the variant and record its fingerprint
   4. tenon apply             compile the agent into that workspace
   5. tenon run               dispatch the task as bounded JSONL turns
 
@@ -59,17 +59,30 @@ MAX_RUN_TIMEOUT = 30 * 60
 PENDING = "pending"
 PREPARING = "preparing"
 MUTATING = "mutating"
-FINGERPRINTING = "fingerprinting"
+CHECKING = "checking"
 APPLYING = "applying"
 RUNNING = "running"
 DONE = "done"
 FAILED = "failed"
 CANCELLED = "cancelled"
-TERMINAL = {DONE, FAILED, CANCELLED}
+# ERRORED is not a finding about the variant. tenon reports outcome "error"
+# when the environment, not the source, is at fault — an unreadable pin set,
+# an unwritable path, a harness that would not start. FAILED says "this
+# variant is bad" and downstream scores it; ERRORED says "we learned nothing
+# about this variant" and downstream must not. Terminal all the same: the run
+# is over for this variant either way.
+ERRORED = "errored"
+TERMINAL = {DONE, FAILED, CANCELLED, ERRORED}
 
 
 class FanoutError(Exception):
     """A failure that should print as one line, not a traceback."""
+
+
+class TenonEnvironmentError(FanoutError):
+    """tenon terminated with outcome "error", or its stream ended with no
+    terminator at all. Either way the environment failed, not the variant:
+    the result is ERRORED and is never scored."""
 
 
 # --------------------------------------------------------------------------
@@ -137,7 +150,7 @@ class Variant:
     index: int
     task: list
     mutate: str = ""
-    manifest: str = ""
+    pins: str = ""
     env: dict = field(default_factory=dict)
 
     def to_json(self) -> dict:
@@ -146,7 +159,7 @@ class Variant:
             "index": self.index,
             "task": self.task,
             "mutate": self.mutate,
-            "manifest": self.manifest,
+            "pins": self.pins,
             "env": self.env,
         }
 
@@ -237,7 +250,7 @@ def build_spec(args, spec_file: dict) -> Spec:
 
     shared_task = as_task_list(pick(args.task, "task"), "task")
     shared_mutate = pick(args.mutate, "mutate", "") or ""
-    shared_manifest = pick(args.manifest, "manifest", "") or ""
+    shared_pins = pick(args.pins, "pins", "") or ""
 
     raw_variants = spec_file.get("variants") or []
     if raw_variants and args.k:
@@ -258,7 +271,7 @@ def build_spec(args, spec_file: dict) -> Spec:
                     index=i,
                     task=task,
                     mutate=raw.get("mutate", shared_mutate) or "",
-                    manifest=raw.get("manifest", shared_manifest) or "",
+                    pins=raw.get("pins", shared_pins) or "",
                     env={str(k): str(v) for k, v in (raw.get("env") or {}).items()},
                 )
             )
@@ -267,7 +280,7 @@ def build_spec(args, spec_file: dict) -> Spec:
         if k < 1:
             raise FanoutError("k must be at least 1")
         variants = [
-            Variant(name=f"v{i}", index=i, task=shared_task, mutate=shared_mutate, manifest=shared_manifest)
+            Variant(name=f"v{i}", index=i, task=shared_task, mutate=shared_mutate, pins=shared_pins)
             for i in range(1, k + 1)
         ]
 
@@ -376,6 +389,8 @@ class Supervisor:
                     "status": PENDING,
                     "detail": "",
                     "fingerprint": "",
+                    "source_digest": "",
+                    "outcome": "",
                     "branch": "",
                     "workspace": "",
                     "agent": "",
@@ -454,11 +469,18 @@ class Supervisor:
             workspace = self._prepare_worktree(name, vdir)
             agent = self._resolve_agent(name, vdir, workspace)
             self._mutate(name, variant, vdir, agent, workspace)
-            fingerprint = self._fingerprint(name, variant, vdir, agent, workspace)
+            fingerprint = self._check(name, variant, vdir, agent, workspace)
             self.set(name, fingerprint=fingerprint)
             self._apply(name, variant, vdir, agent, workspace)
             self._dispatch(name, variant, vdir, agent, workspace)
             self.set(name, status=DONE, detail="", finished_at=time.time())
+        except TenonEnvironmentError as err:
+            # Not the variant's fault, so not FAILED: an environment failure
+            # must not reach whatever scores this run as evidence about the
+            # configuration under test.
+            self.set(name, status=ERRORED, detail=str(err), finished_at=time.time())
+            if not self.spec["keep_going"]:
+                self.cancel()
         except FanoutError as err:
             terminal = CANCELLED if self.cancelled.is_set() else FAILED
             self.set(name, status=terminal, detail=str(err), finished_at=time.time())
@@ -504,6 +526,11 @@ class Supervisor:
 
     def _child_env(self, variant: dict, vdir: Path, agent: Path, workspace: Path) -> dict:
         env = dict(os.environ)
+        # fanout always passes --harness explicitly (a harness sweep is one of
+        # its use cases), so an inherited TENON_HARNESS can only change what a
+        # mutate hook's own tenon calls target. Drop it rather than let it
+        # silently retarget a child.
+        env.pop("TENON_HARNESS", None)
         env.update(
             {
                 "FANOUT_RUN": self.spec["run"],
@@ -539,24 +566,54 @@ class Supervisor:
         if code != 0:
             raise FanoutError(f"mutate exited {code}; see {log}")
 
-    def _fingerprint(self, name: str, variant: dict, vdir: Path, agent: Path, workspace: Path) -> str:
-        self.set(name, status=FINGERPRINTING)
-        log = vdir / "fingerprint.jsonl"
-        err = vdir / "fingerprint.err"
+    def _check(self, name: str, variant: dict, vdir: Path, agent: Path, workspace: Path) -> str:
+        """Gate the variant and mint its identity in one process.
+
+        The harness is passed explicitly so this is the same gate `apply`
+        runs three lines later: a harness-specific rejection costs one
+        process here instead of two. No --emit: fanout wants a fingerprint,
+        and a per-file inventory it would discard is hot-path I/O."""
+        self.set(name, status=CHECKING)
+        log = vdir / "check.jsonl"
+        err = vdir / "check.err"
         with log.open("wb") as out, err.open("wb") as errf:
             proc = self._spawn(
                 name,
-                [self.spec["tenon"], "fingerprint", "show", str(agent), "--diagnostics", "jsonl"],
+                [
+                    self.spec["tenon"],
+                    "check",
+                    str(agent),
+                    "--harness",
+                    self.spec["harness"],
+                    "--format",
+                    "jsonl",
+                ],
                 cwd=agent,
                 stdout=out,
                 stderr=errf,
                 env=self._child_env(variant, vdir, agent, workspace),
             )
-            code = proc.wait()
+            proc.wait()
         self._reap(name)
-        if code != 0:
-            raise FanoutError(f"tenon fingerprint show exited {code}; see {err}")
-        return read_fingerprint(log)
+        # The exit code cannot tell these apart: gate_failed and error both
+        # exit 1. Only the terminator's outcome can, and the difference is
+        # whether downstream scores this variant at all.
+        terminator, diagnostics = read_terminator(log, f"tenon check ({err})")
+        outcome = terminator.get("outcome", "")
+        self.set(name, outcome=outcome)
+        if outcome == "ok":
+            return terminator.get("fingerprint", "")
+        if outcome == "gate_failed":
+            digest = terminator.get("source_digest", "")
+            self.set(name, source_digest=digest)
+            ids = ",".join(d.get("id", "") for d in diagnostics if d.get("severity") == "error")
+            raise FanoutError(
+                f"tenon check rejected {agent}: {ids or 'no diagnostics'}; "
+                f"source_digest={digest or 'unknown'}; see {log}"
+            )
+        raise TenonEnvironmentError(
+            f"tenon check could not run: {terminator.get('error', 'unknown')}; see {err}"
+        )
 
     def _apply(self, name: str, variant: dict, vdir: Path, agent: Path, workspace: Path) -> None:
         self.set(name, status=APPLYING)
@@ -569,22 +626,44 @@ class Supervisor:
             "--workspace",
             str(workspace),
         ]
-        if variant.get("manifest"):
-            argv += ["--manifest", variant["manifest"]]
-        log = vdir / "apply.log"
-        with log.open("wb") as out:
+        argv += ["--format", "jsonl"]
+        if variant.get("pins"):
+            argv += ["--pins", variant["pins"]]
+        log = vdir / "apply.jsonl"
+        err = vdir / "apply.err"
+        with log.open("wb") as out, err.open("wb") as errf:
             proc = self._spawn(
                 name,
                 argv,
                 cwd=workspace,
                 stdout=out,
-                stderr=subprocess.STDOUT,
+                stderr=errf,
                 env=self._child_env(variant, vdir, agent, workspace),
             )
-            code = proc.wait()
+            proc.wait()
         self._reap(name)
-        if code != 0:
-            raise FanoutError(f"tenon apply exited {code}; see {log}")
+        terminator, _ = read_terminator(log, f"tenon apply ({err})")
+        outcome = terminator.get("outcome", "")
+        if outcome == "ok":
+            self.set(
+                name,
+                written=terminator.get("written") or [],
+                removed=terminator.get("removed") or [],
+                managed_tools=terminator.get("managed_tools") or [],
+            )
+            return
+        if outcome == "gate_failed":
+            # check passed on this same source moments ago and apply runs the
+            # same gate, so this is a contract violation worth naming loudly.
+            digest = terminator.get("source_digest", "")
+            self.set(name, outcome=outcome, source_digest=digest)
+            raise FanoutError(
+                f"tenon apply rejected a source tenon check accepted; "
+                f"source_digest={digest or 'unknown'}; see {log}"
+            )
+        raise TenonEnvironmentError(
+            f"tenon apply could not run: {terminator.get('error', 'unknown')}; see {err}"
+        )
 
     def _dispatch(self, name: str, variant: dict, vdir: Path, agent: Path, workspace: Path) -> None:
         self.set(name, status=RUNNING)
@@ -603,8 +682,8 @@ class Supervisor:
         ]
         if self.spec["turn_timeout"]:
             argv += ["--turn-timeout", f"{self.spec['turn_timeout']}s"]
-        if variant.get("manifest"):
-            argv += ["--manifest", variant["manifest"]]
+        if variant.get("pins"):
+            argv += ["--pins", variant["pins"]]
 
         lines = [
             json.dumps({"input_id": f"{self.spec['run']}-{name}-{i}", "text": text})
@@ -631,9 +710,36 @@ class Supervisor:
             code = proc.wait()
         self._reap(name)
         turns = summarize_turns(events)
-        self.set(name, turns=turns, run_exit_code=code)
-        if code != 0:
-            raise FanoutError(f"tenon run exited {code}; see {err}")
+        completion = read_run_completion(events, f"tenon run ({err})")
+        self.set(name, turns=turns, run_exit_code=code, outcome=completion.get("outcome", ""))
+        counts = completion.get("turns") or {}
+        # run.completed's counts are the dispatcher's own tally. If the
+        # per-input reduction disagrees, the stream this reduction read was
+        # truncated, and every count derived from it is wrong.
+        reduced = {}
+        for record in turns:
+            key = "process_failed" if record["status"] == "driver_failed" else record["status"]
+            reduced[key] = reduced.get(key, 0) + 1
+        if counts and {k: v for k, v in counts.items() if v} != reduced:
+            raise TenonEnvironmentError(
+                f"tenon run reported turns {counts} but {events} reduces to {reduced}; "
+                "the event stream is truncated"
+            )
+        outcome = completion.get("outcome", "")
+        if outcome == "ok":
+            # A completed dispatch, whatever its turns did. turns.failed is a
+            # score input, not a fanout failure.
+            return
+        if outcome == "gate_failed":
+            digest = completion.get("source_digest", "")
+            self.set(name, source_digest=digest)
+            raise FanoutError(
+                f"tenon run rejected the agent at dispatch; "
+                f"source_digest={digest or 'unknown'}; see {events}"
+            )
+        raise TenonEnvironmentError(
+            f"tenon run could not run: {completion.get('error', 'unknown')}; see {err}"
+        )
 
     # -- driving the pool --------------------------------------------------
 
@@ -655,11 +761,20 @@ class Supervisor:
         return 1 if failed else 0
 
 
-def read_fingerprint(path: Path) -> str:
-    """The jsonl fingerprint stream ends with one rollup object carrying the
-    agent's source fingerprint and no per-file path."""
-    fingerprint = ""
-    for line in path.read_text().splitlines():
+def read_terminator(path: Path, what: str) -> tuple:
+    """Split a tenon --format jsonl stream into its terminator and everything
+    before it.
+
+    Every jsonl-mode tenon command ends with exactly one object carrying an
+    "outcome": "ok", "gate_failed", or "error". That field is the
+    authoritative signal — exit 1 covers both a rejected source and a broken
+    environment, and no field's mere presence distinguishes them. Objects
+    before the terminator are diagnostics.
+
+    A stream with no terminator is a truncated pipe, never a rejection."""
+    terminator: dict = {}
+    diagnostics: list = []
+    for line in path.read_text(errors="replace").splitlines():
         line = line.strip()
         if not line:
             continue
@@ -667,11 +782,44 @@ def read_fingerprint(path: Path) -> str:
             obj = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(obj, dict) and obj.get("fingerprint") and "path" not in obj:
-            fingerprint = obj["fingerprint"]
-    if not fingerprint:
-        raise FanoutError(f"no fingerprint rollup in {path}")
-    return fingerprint
+        if not isinstance(obj, dict):
+            continue
+        if obj.get("outcome"):
+            terminator = obj
+        else:
+            diagnostics.append(obj)
+    if not terminator:
+        raise TenonEnvironmentError(f"{what} ended with no outcome; the stream in {path} is truncated")
+    return terminator, diagnostics
+
+
+def read_run_completion(events: Path, what: str) -> dict:
+    """The last run.completed event in a dispatch stream.
+
+    run has no --format: its stdout is the event stream, and its terminator
+    is an event like any other. It carries the dispatch's outcome, the turn
+    counts, and on failure the error prose or the rejected source's digest."""
+    completion: dict = {}
+    if events.exists():
+        for line in events.read_text(errors="replace").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict) and event.get("type") == "run.completed":
+                completion = event
+    if not completion:
+        raise TenonEnvironmentError(f"{what} emitted no run.completed event; the stream in {events} is truncated")
+    return {
+        "outcome": completion.get("outcome", ""),
+        "turns": completion.get("turns") or {},
+        "error": completion.get("error", ""),
+        "source_digest": completion.get("source_digest", ""),
+        "fingerprint": completion.get("fingerprint", ""),
+    }
 
 
 def summarize_turns(events: Path) -> list:
@@ -893,6 +1041,12 @@ def cmd_collect(args) -> int:
             "status": record["status"],
             "detail": record.get("detail", ""),
             "fingerprint": record.get("fingerprint", ""),
+            # A rejected variant has no fingerprint — tenon mints one only for
+            # a source that passes. source_digest names the bytes that failed,
+            # so a rejection is attributable; it is not a fingerprint and never
+            # joins with one.
+            "source_digest": record.get("source_digest", ""),
+            "outcome": record.get("outcome", ""),
             "harness": spec["harness"],
             "branch": record.get("branch", ""),
             "base_sha": record.get("base_sha", ""),
@@ -1008,8 +1162,8 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--harness", choices=["claude", "codex"], help="target harness")
     start.add_argument("--task", help="prompt dispatched as one turn")
     start.add_argument("--k", type=int, help="number of variants (mutually exclusive with a spec variants list)")
-    start.add_argument("--mutate", help="shell command run in each variant's agent dir before fingerprinting")
-    start.add_argument("--manifest", help="agent manifest supplied to apply and run")
+    start.add_argument("--mutate", help="shell command run in each variant's agent dir before the gate")
+    start.add_argument("--pins", help="pin set supplied to apply and run")
     start.add_argument("--concurrency", type=int, help="variants in flight at once (default: min(k, 4))")
     start.add_argument("--timeout", help="whole-process deadline per variant (default: 600s, tenon's cap is 30m)")
     start.add_argument("--turn-timeout", help="per-turn deadline (default: none)")

@@ -20,7 +20,7 @@ shell command you supply, and selection reads `fanout collect`'s JSON.
 | --- | --- |
 | 1. Isolate | `git worktree add -b fanout/<run>/<variant> <dir> <base>` |
 | 2. Mutate *(optional)* | your shell command, run in the variant's agent directory |
-| 3. Identify | `tenon fingerprint show AGENT --diagnostics jsonl` |
+| 3. Gate and identify | `tenon check AGENT --harness H --format jsonl` |
 | 4. Compile | `tenon apply AGENT --harness H --workspace <dir>` |
 | 5. Dispatch | `tenon run AGENT --workspace <dir> --harness H --input jsonl` |
 
@@ -34,7 +34,7 @@ flowchart TD
     subgraph V1["variant v1"]
         direction TB
         A1["git worktree add -b fanout/run/v1"] --> B1["mutate (yours, optional)"]
-        B1 --> C1["tenon fingerprint show"]
+        B1 --> C1["tenon check --format jsonl"]
         C1 --> D1["tenon apply --workspace"]
         D1 --> E1["tenon run --input jsonl"]
     end
@@ -57,7 +57,7 @@ already stamps on every apply record and dispatch event.
 Python 3.9+, `git`, and a `tenon` binary. No third-party packages.
 
 ```bash
-ln -s "$PWD/fanout/fanout.py" /usr/local/bin/fanout
+ln -s "$PWD/improve/fanout.py" /usr/local/bin/fanout
 ```
 
 Point it at a tenon with `--tenon PATH` or `FANOUT_TENON`; otherwise it takes
@@ -81,10 +81,16 @@ fanout status try
 fanout collect try --json
 ```
 
-`collect` prints one record per variant — status, fingerprint, terminal turn
-statuses, branch, head SHA, patch path, and (with `--text`) the agent's
-reassembled output. That JSON is the handoff to whatever ranks top-k. fanout
-computes no score and picks no winner.
+`collect` prints one record per variant — status, tenon's `outcome`,
+fingerprint, `source_digest`, terminal turn statuses, branch, head SHA, patch
+path, and (with `--text`) the agent's reassembled output. That JSON is the
+handoff to whatever ranks top-k. fanout computes no score and picks no winner.
+
+A variant that tenon rejected has no fingerprint — tenon mints one only for a
+source that passes — so its `source_digest` names the bytes that failed
+instead. A variant whose status is `errored` failed for an environmental
+reason, not because of anything the variant did: score it and you are scoring
+your infrastructure.
 
 ## Top-k with different mutations
 
@@ -105,7 +111,7 @@ directory with `FANOUT_VARIANT`, `FANOUT_INDEX`, `FANOUT_AGENT_DIR`,
     { "name": "terse",    "mutate": "printf '\nPrefer the smallest correct diff.\n' >> instructions.md" },
     { "name": "tdd",      "mutate": "cp -R ../../../variants/tdd-skill skills/tdd" },
     { "name": "baseline" },
-    { "name": "manifest-pinned", "manifest": "/abs/path/to/manifest.json" }
+    { "name": "pin-pinned", "pins": "/abs/path/to/pins.json" }
   ]
 }
 ```
@@ -124,7 +130,7 @@ baseline   done    fp=sha256:a3c02ec18  turns=completed  files=4  fanout/prompt-
 ```
 
 Flags override spec fields, so one spec covers a sweep and the command line
-covers the axis you are moving today (`--base`, `--harness`, `--manifest`).
+covers the axis you are moving today (`--base`, `--harness`, `--pins`).
 
 ## Where the agent project lives
 
@@ -175,8 +181,8 @@ Under `$FANOUT_HOME` (default `~/.fanout`), or `--state-dir`:
     <run>-<name>/              the git worktree (leaf name unique per variant)
     agent/                     only when --agent was absolute
     mutate.log
-    fingerprint.jsonl          tenon's fingerprint stream, rollup included
-    apply.log
+    check.jsonl, check.err     tenon check's stream, terminator included
+    apply.jsonl, apply.err     tenon apply's stream, terminator included
     events.jsonl               tenon run's dispatch events
     run.err
     diff.patch                 written by collect

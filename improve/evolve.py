@@ -12,11 +12,12 @@ its contract:
     a `skills/<name>/` directory, a `tools/<file>`, a `subagents/<name>.md`.
     Crossover is therefore file-level recombination, not text surgery.
 
-  * `tenon validate --diagnostics jsonl` is one call that both gates a
-    candidate and mints its identity: stable diagnostic identifiers on
-    failure, the source fingerprint on success. So the fingerprint is the
-    genome id — content-addressed, gate-proven, and free to dedupe against,
-    which means a genome already evaluated is never paid for twice.
+  * `tenon check --format jsonl` is one call that both gates a candidate
+    and mints its identity: stable diagnostic identifiers and the digest of
+    the bytes that failed on rejection, the source fingerprint on success. So
+    the fingerprint is the genome id — content-addressed, gate-proven, and
+    free to dedupe against, which means a genome already evaluated is never
+    paid for twice, and a rejection names what was rejected.
 
 Tenon mints those units; this loop composes the chain. The lineage lives in
 `lineage.jsonl` here, never in tenon.
@@ -58,6 +59,17 @@ GENE_FILES = ("instructions.md",)
 
 class EvolveError(Exception):
     """A failure that should print as one line, not a traceback."""
+
+
+class TenonEnvironmentError(EvolveError):
+    """tenon terminated with outcome "error", or its stream carried no
+    terminator at all.
+
+    The environment failed, not the candidate: an unreadable pin set, an
+    unwritable path, a harness that would not start. It must never be
+    recorded as a rejection — a search whose leaderboard absorbs
+    infrastructure noise is measuring the wrong thing — so it propagates out
+    of admit rather than returning None."""
 
 
 # --------------------------------------------------------------------------
@@ -132,7 +144,7 @@ def recombine(parents: list, target: Path, rng: random.Random) -> None:
     """Uniform crossover over the gene set, for any number of parents. Each
     locus is drawn independently from the parents that carry it. The offspring
     may well be incoherent — a skill referencing a tool that did not come
-    along — which is exactly what the validate gate is for."""
+    along — which is exactly what the tenon gate is for."""
     pools = [genes(p) for p in parents]
     loci = sorted({name for pool in pools for name in pool})
     plan = {}
@@ -219,15 +231,35 @@ def genome_view(m: Member, index: int = -1) -> dict:
 # --------------------------------------------------------------------------
 
 
-def gate(tenon: str, harness: str, agent: Path) -> tuple:
-    """One call, two answers: the fingerprint that names a valid candidate, or
-    the stable diagnostic identifiers that rejected it."""
+@dataclass(frozen=True)
+class Verdict:
+    """The gate's answer, as one record.
+
+    Three outcomes do not fit in two fields: a candidate can pass, be
+    rejected, or never have been judged at all. Exactly one of fingerprint
+    and source_digest is meaningful, and warnings ride along on a *passing*
+    verdict so a mutator can still see what the gate grumbled about."""
+
+    ok: bool
+    fingerprint: str = ""
+    source_digest: str = ""
+    rejected: tuple = ()
+    warnings: tuple = ()
+
+
+def gate(tenon: str, harness: str, agent: Path) -> Verdict:
+    """One call, three answers: a fingerprint, a rejection, or nothing at all.
+
+    The terminator's `outcome` is the authoritative signal. Exit code cannot
+    substitute for it — a rejected source and a broken environment both exit
+    1 — and neither can the presence of a field: a `fingerprint` key appears
+    on more than one shape, and a diagnostic `id` appears on warnings too."""
     proc = subprocess.run(
-        [tenon, "validate", str(agent), "--harness", harness, "--diagnostics", "jsonl"],
+        [tenon, "check", str(agent), "--harness", harness, "--format", "jsonl"],
         capture_output=True,
         text=True,
     )
-    fingerprint, rejected = "", []
+    terminator, diagnostics = {}, []
     for line in proc.stdout.splitlines():
         line = line.strip()
         if not line:
@@ -236,13 +268,34 @@ def gate(tenon: str, harness: str, agent: Path) -> tuple:
             obj = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if obj.get("id"):
-            rejected.append(obj["id"])
-        elif obj.get("fingerprint"):
-            fingerprint = obj["fingerprint"]
-    if proc.returncode != 0 and not rejected:
-        rejected = [f"validate.exit.{proc.returncode}"]
-    return fingerprint, rejected
+        if not isinstance(obj, dict):
+            continue
+        if obj.get("outcome"):
+            terminator = obj
+        else:
+            diagnostics.append(obj)
+    if not terminator:
+        # An absence is indistinguishable from a truncated pipe, so it is
+        # never read as a verdict about the candidate.
+        raise TenonEnvironmentError(
+            f"tenon check emitted no outcome for {agent} (exit {proc.returncode}): "
+            f"{proc.stderr.strip()[:200]}"
+        )
+    outcome = terminator["outcome"]
+    if outcome == "ok":
+        return Verdict(
+            ok=True,
+            fingerprint=terminator.get("fingerprint", ""),
+            warnings=tuple(d.get("id", "") for d in diagnostics if d.get("severity") == "warning"),
+        )
+    if outcome == "gate_failed":
+        return Verdict(
+            ok=False,
+            source_digest=terminator.get("source_digest", ""),
+            rejected=tuple(d.get("id", "") for d in diagnostics if d.get("severity") == "error"),
+            warnings=tuple(d.get("id", "") for d in diagnostics if d.get("severity") == "warning"),
+        )
+    raise TenonEnvironmentError(f"tenon check could not run against {agent}: {terminator.get('error', 'unknown')}")
 
 
 # --------------------------------------------------------------------------
@@ -443,9 +496,14 @@ class Search:
     def admit(self, path: Path, generation: int, parents: list, operator: str):
         """Gate a materialized candidate and give it its identity. Returns the
         genome — the already-known one when the content is a duplicate, so it
-        can fill a second slot — or None when tenon rejected it."""
-        fingerprint, rejected = gate(self.cfg.tenon, self.cfg.harness, path)
-        if rejected:
+        can fill a second slot — or None when tenon rejected it.
+
+        None means *rejected*, and the caller counts it against the operator.
+        An environment failure is not that, so TenonEnvironmentError
+        propagates: the candidate is neither admitted nor scored against."""
+        verdict = gate(self.cfg.tenon, self.cfg.harness, path)
+        if not verdict.ok:
+            rejected = list(verdict.rejected)
             self.record(
                 {
                     "generation": generation,
@@ -453,11 +511,22 @@ class Search:
                     "operator": operator,
                     "parents": parents,
                     "diagnostics": rejected,
+                    # The digest names the bytes that failed, and it is
+                    # recorded before the directory is deleted two lines
+                    # below — so a rejection is attributable afterwards. It
+                    # lives in its own key and never in `genome`: a digest
+                    # names bytes, a fingerprint names a proven
+                    # configuration, and the two must not share a namespace.
+                    "source_digest": verdict.source_digest,
                 }
             )
-            self.log(f"  rejected ({operator}): {', '.join(rejected[:3])}")
+            digest = verdict.source_digest.split(":")[-1][:8] or "unknown"
+            self.log(f"  rejected {digest} ({operator}): {', '.join(rejected[:3]) or 'no diagnostics'}")
             shutil.rmtree(path, ignore_errors=True)
             return None
+        fingerprint = verdict.fingerprint
+        if verdict.warnings:
+            self.log(f"  warnings ({operator}): {', '.join(verdict.warnings[:3])}")
         if fingerprint in self.known:
             self.record(
                 {
@@ -704,7 +773,7 @@ class Search:
                     "name": f"{g.short}-t{t}r{r}",
                     "task": task,
                     "mutate": f"{sys.executable} {Path(__file__).resolve()} _inject {g.path}",
-                    **({"manifest": self.manifest_for(g)} if self.cfg.model else {}),
+                    **({"pins": self.pins_for(g)} if self.cfg.model else {}),
                 }
                 for g, t, task, r in trials
             ],
@@ -820,25 +889,29 @@ class Search:
             )
             self.log(f"  {genome.short}  score {genome.score:.4f}  sd {genome.stdev:.4f}  [{genome.operator}]")
 
-    def manifest_for(self, genome: Genome) -> str:
-        """One manifest per genome, so the model can be pinned across a moving
+    def pins_for(self, genome: Genome) -> str:
+        """One pin set per genome, so the model can be pinned across a moving
         population.
 
-        A manifest binds an expected source fingerprint, and every mutation
-        changes that fingerprint — so a single shared manifest would fail
+        A pin set binds an expected source fingerprint, and every mutation
+        changes that fingerprint — so a single shared pin set would fail
         verification on every candidate but the seed. Writing one per genome is
         the same trick tenon documents for comparing harnesses, turned around:
         many genomes crossed with one pin set instead of one commit crossed
-        with many."""
-        out = self.root / "manifests"
+        with many.
+
+        Pins are written by the gate: there is no ordering to get wrong
+        between proving a source and pinning it."""
+        out = self.root / "pins"
         out.mkdir(exist_ok=True)
         path = out / f"{genome.short}.json"
         if not path.exists():
-            # A manifest records the agent name from its directory's basename,
+            # A pin set records the agent name from its directory's basename,
             # and apply checks it. The genome directory is named after a
-            # fingerprint, so writing the manifest there and applying it to the
-            # agent path inside a worktree drifts on the name and fails closed.
-            # Stage the genome under the name the worktree will see.
+            # fingerprint, so writing the pins there and applying them to the
+            # agent path inside a worktree drifts on the name
+            # (pins.drift.agent) and fails closed. Stage the genome under the
+            # name the worktree will see.
             staged = out / genome.short / Path(self.cfg.agent).name
             if staged.exists():
                 shutil.rmtree(staged)
@@ -846,16 +919,32 @@ class Search:
             shutil.copytree(genome.path, staged, symlinks=True)
             proc = subprocess.run(
                 [
-                    self.cfg.tenon, "manifest", "write", str(staged),
+                    self.cfg.tenon, "check", str(staged),
                     "--harness", self.cfg.harness, "--model", self.cfg.model,
-                    "--output", str(path),
+                    "--write-pins", str(path), "--format", "jsonl",
                 ],
                 capture_output=True,
                 text=True,
             )
             shutil.rmtree(staged.parent, ignore_errors=True)
-            if proc.returncode != 0:
-                raise EvolveError(f"tenon manifest write failed for {genome.short}: {proc.stderr.strip()[:200]}")
+            # Exit 0 is not the claim that matters; the terminator naming the
+            # path it wrote is.
+            written, outcome = "", ""
+            for line in proc.stdout.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(obj, dict) and obj.get("outcome"):
+                    outcome, written = obj["outcome"], obj.get("pins_written", "")
+            if outcome != "ok" or written != str(path):
+                raise EvolveError(
+                    f"tenon check --write-pins failed for {genome.short} "
+                    f"(outcome {outcome or 'none'}): {proc.stderr.strip()[:200]}"
+                )
         return str(path)
 
     def reclaim(self, generation: int) -> None:
@@ -1063,7 +1152,7 @@ class Search:
             materialize(self.cfg.seed, work)
             seed = self.admit(work, 0, [], "seed")
             if seed is None:
-                raise EvolveError("the seed genome did not pass tenon validate; fix it before searching")
+                raise EvolveError("the seed genome did not pass tenon check; fix it before searching")
             self.log(f"generation 0 — seed {seed.short}")
             first_generation = 1
 
@@ -1216,6 +1305,8 @@ def cmd_lineage(args) -> int:
         parents = ",".join(p.split(":")[-1][:8] for p in entry.get("parents", [])) or "-"
         score = f"{entry['score']:.4f}" if entry.get("score") is not None else "-"
         extra = ",".join(entry.get("diagnostics", []))[:48]
+        if entry.get("source_digest"):
+            extra = f"src={entry['source_digest'].split(':')[-1][:8]} {extra}".rstrip()
         print(
             f"gen{entry['generation']:<3} {entry['status']:<10} {gid:<9} "
             f"parents={parents:<19} score={score:<9} {entry.get('operator','')} {extra}"
@@ -1286,6 +1377,11 @@ def main(argv: list) -> int:
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)
+    except TenonEnvironmentError as err:
+        # Exit 3, not 1: the caller retries or escalates an environment
+        # failure, and must not read it as "the search rejected everything".
+        print(f"evolve: tenon environment failure: {err}", file=sys.stderr)
+        return 3
     except EvolveError as err:
         print(f"evolve: {err}", file=sys.stderr)
         return 1

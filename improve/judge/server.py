@@ -18,9 +18,9 @@ round-robin in the browser, and answers all the blocked clients from the
 result.
 
 Usage:
-  python3 fanout/judge/server.py [--port 8917]
+  python3 improve/judge/server.py [--port 8917]
 
-Then point a search's score command at fanout/judge/score-pairwise.py.
+Then point a search's score command at improve/judge/score-pairwise.py.
 """
 
 from __future__ import annotations

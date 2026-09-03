@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests for the pairwise judge's cardinal projection.
 
-Run: python3 fanout/judge/test_scoring.py
+Run: python3 improve/judge/test_scoring.py
 """
 
 import itertools

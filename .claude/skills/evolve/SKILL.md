@@ -1,17 +1,17 @@
 ---
 name: evolve
-description: Run a hill climb or genetic search over a tenon agent project — propose mutated or recombined agent folders, gate them with tenon validate, evaluate each generation through fanout, and select. Use when the user wants to optimize an agent's instructions, skills, or tools against a measurable objective, iterate across generations rather than a single fan-out, or inspect the lineage of an in-flight or finished search.
+description: Run a hill climb or genetic search over a tenon agent project — propose mutated or recombined agent folders, gate them with tenon check, evaluate each generation through fanout, and select. Use when the user wants to optimize an agent's instructions, skills, or tools against a measurable objective, iterate across generations rather than a single fan-out, or inspect the lineage of an in-flight or finished search.
 ---
 
 # evolve
 
-`fanout/evolve.py` is the outer loop over `fanout`: propose → gate → evaluate
-→ select, repeated across generations. Read `fanout/EVOLVE.md` for the design
-and `fanout/README.md` for the generation runner underneath it.
+`improve/evolve.py` is the outer loop over `fanout`: propose → gate → evaluate
+→ select, repeated across generations. Read `improve/EVOLVE.md` for the design
+and `improve/README.md` for the generation runner underneath it.
 
 A genome is an agent directory; a gene is one authored component
-(`instructions.md`, a `skills/<name>/`, a `tools/<file>`). `tenon validate
---diagnostics jsonl` both gates a candidate and mints its fingerprint, which
+(`instructions.md`, a `skills/<name>/`, a `tools/<file>`). `tenon check
+--format jsonl` both gates a candidate and mints its fingerprint, which
 serves as the genome id — so invalid offspring die before a model is opened,
 and an already-scored genome is never paid for twice.
 
@@ -37,19 +37,19 @@ means nothing, which is worse than no search at all.
 ## Running it
 
 ```bash
-python3 fanout/evolve.py run --spec search.json
+python3 improve/evolve.py run --spec search.json
 ```
 
 ```bash
-python3 fanout/evolve.py lineage RUN
+python3 improve/evolve.py lineage RUN
 ```
 
 ```bash
-python3 fanout/evolve.py best RUN
+python3 improve/evolve.py best RUN
 ```
 
-Copy `fanout/examples/search-hill-climb.json` or `search-genetic.json` and
-edit; `fanout/examples/score-tests.sh` and `mutate-llm.sh` are working
+Copy `improve/examples/search-hill-climb.json` or `search-genetic.json` and
+edit; `improve/examples/score-tests.sh` and `mutate-llm.sh` are working
 operators to adapt.
 
 ## Guidance
@@ -74,14 +74,14 @@ operators to adapt.
   keeps regenerating known genomes; widen the mutation or change `rng_seed`.
 - **Island models and MAP-Elites are policies, not features.** Tag the slot in
   `pair` or `score`, honour the tag in `select`; see
-  `fanout/examples/policies/pair-island.py`. Do not add machinery to evolve for
+  `improve/examples/policies/pair-island.py`. Do not add machinery to evolve for
   them.
 - **Report re-evaluation drift.** `reevaluate` defaults to the incumbent; when
   its score moves on re-scoring, that is the correction working — surface it
   rather than reporting only the headline number.
 - **Reach for a policy hook before changing evolve.** `pair`, `combine`,
   `select`, `score`, and every variation operator are all commands. If the user wants a
-  different search behaviour, write a policy in `fanout/examples/policies/`
+  different search behaviour, write a policy in `improve/examples/policies/`
   rather than editing the loop.
 - **Do not invent tasks, fitness, or mutations** to fill a gap in the user's
   spec. Ask.

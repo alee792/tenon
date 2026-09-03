@@ -1,18 +1,18 @@
 ---
 name: fanout
-description: Dispatch and supervise k isolated tenon agents — one git worktree, one source fingerprint, and one branch each — then report per-variant results for top-k selection. Use when the user wants to run the same task across several agent variants, sweep prompt or skill mutations, compare harnesses or manifest pins on identical starting state, or manage the lifecycle (start, status, logs, stop, collect, clean) of a fan-out already running.
+description: Dispatch and supervise k isolated tenon agents — one git worktree, one source fingerprint, and one branch each — then report per-variant results for top-k selection. Use when the user wants to run the same task across several agent variants, sweep prompt or skill mutations, compare harnesses or pin sets on identical starting state, or manage the lifecycle (start, status, logs, stop, collect, clean) of a fan-out already running.
 ---
 
 # fanout
 
-`fanout/fanout.py` runs `k` variants of a tenon agent project concurrently,
+`improve/fanout.py` runs `k` variants of a tenon agent project concurrently,
 each in its own git worktree. Per variant: `git worktree add` → optional
-mutation command → `tenon fingerprint show` → `tenon apply` → `tenon run`.
+mutation command → `tenon check` → `tenon apply` → `tenon run`.
 
 It is a separate tool over tenon's CLI, not a tenon subcommand. Tenon's
 north star keeps evaluation, scoring, and selection out of scope; fanout
 holds that same line — it manages lifecycle and reports, and never scores or
-picks a winner. Read `fanout/README.md` before changing its behavior.
+picks a winner. Read `improve/README.md` before changing its behavior.
 
 ## Running it
 
@@ -20,17 +20,17 @@ Prefer a spec file for anything with more than one distinct variant; use
 flags for a uniform sweep. Flags override spec fields.
 
 ```bash
-python3 fanout/fanout.py start --run RUN --agent ./agent --harness claude --k 3 --task "..."
+python3 improve/fanout.py start --run RUN --agent ./agent --harness claude --k 3 --task "..."
 ```
 
 ```bash
-python3 fanout/fanout.py start --spec sweep.json --detach
+python3 improve/fanout.py start --spec sweep.json --detach
 ```
 
 A `tenon` binary must be resolvable — `--tenon PATH`, `FANOUT_TENON`, or on
 `PATH`. Build one with `go build -o ./tenon ./cmd/tenon`.
 
-`fanout/example-spec.json` is a working three-variant sweep to copy.
+`improve/example-spec.json` is a working three-variant sweep to copy.
 
 ## Lifecycle commands
 

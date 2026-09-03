@@ -16,5 +16,5 @@ concrete rule, or cut a line that is not earning its place. Preserve the YAML
 frontmatter exactly. Write the whole file back to $gene and change no other
 file." >/dev/null
 
-# A malformed edit is fine to emit — tenon validate rejects it before any
+# A malformed edit is fine to emit — the tenon gate rejects it before any
 # model is opened for evaluation, and the diagnostic id lands in the lineage.

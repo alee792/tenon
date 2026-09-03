@@ -9,12 +9,12 @@
     "Explain what this repository does to a new contributor, in under 120 words."
   ],
   "repeats": 1,
-  "score": "python3 fanout/judge/score-pairwise.py",
+  "score": "python3 improve/judge/score-pairwise.py",
   "operators": [
     {
       "name": "edit",
       "weight": 1,
-      "command": "sh \"$EVOLVE_CWD/fanout/judge/mutate-instructions.sh\""
+      "command": "sh \"$EVOLVE_CWD/improve/judge/mutate-instructions.sh\""
     }
   ],
   "generations": 2,

@@ -9,11 +9,11 @@ better?" is the judgement people are reliable at, so this serves pairwise
 comparisons and derives the scalar fitness from the outcomes.
 
 ```bash
-python3 fanout/judge/server.py
+python3 improve/judge/server.py
 ```
 
 ```bash
-python3 fanout/evolve.py run --spec fanout/examples/search-paprika.json
+python3 improve/evolve.py run --spec improve/examples/search-paprika.json
 ```
 
 Open <http://127.0.0.1:8917>, and judge. The theme follows your system by default; the control
@@ -105,10 +105,10 @@ two generations on one task, with the agent pinned to Haiku:
 Swap `model` to `claude-sonnet-5` to ask the same question of a bigger model,
 or to compare the two on identical starting state.
 
-**Model pinning is per genome.** A tenon manifest binds an expected source
+**Model pinning is per genome.** A tenon pin set binds an expected source
 fingerprint, and every mutation changes that fingerprint, so one shared
-manifest would fail verification on every candidate but the seed. Setting
-`model` in the spec makes evolve write one manifest per genome — the same
+pin set would fail verification on every candidate but the seed. Setting
+`model` in the spec makes evolve write one pin set per genome — the same
 trick tenon documents for comparing harnesses, turned around: many genomes
 crossed with one pin set, rather than one commit crossed with many.
 

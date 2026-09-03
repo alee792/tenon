@@ -22,7 +22,7 @@ same for `plugins/`, `mcp/`, `schedules/` — is a gene. Crossover is file-level
 recombination, not text surgery: for every gene either parent holds, the
 offspring inherits one parent's copy.
 
-**The fingerprint is the genome id.** `tenon validate --diagnostics jsonl` is
+**The fingerprint is the genome id.** `tenon check --format jsonl` is
 a single call that both gates a candidate and names it — stable diagnostic
 identifiers on rejection, the source fingerprint on success. That gives three
 things for free:
@@ -71,15 +71,15 @@ never writes to the source agent. `evolve best` prints a diff to review.
 ```
 
 ```bash
-python3 fanout/evolve.py run --spec search.json
+python3 improve/evolve.py run --spec search.json
 ```
 
 ```bash
-python3 fanout/evolve.py lineage instructions-climb
+python3 improve/evolve.py lineage instructions-climb
 ```
 
 ```bash
-python3 fanout/evolve.py best instructions-climb
+python3 improve/evolve.py best instructions-climb
 ```
 
 Genetic runs add `crossover_rate`, `mutation_rate`, and `tournament`;
@@ -220,7 +220,7 @@ so finishing one and being unable to build on it is the worst failure this
 tool has. Every generation is checkpointed:
 
 ```bash
-python3 fanout/evolve.py run --spec search.json --resume
+python3 improve/evolve.py run --spec search.json --resume
 ```
 
 `--resume` rebuilds the search from its own record — `lineage.jsonl` carries
