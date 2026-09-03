@@ -644,6 +644,7 @@ class Supervisor:
         self._reap(name)
         terminator, _ = read_terminator(log, f"tenon apply ({err})")
         outcome = terminator.get("outcome", "")
+        self.set(name, outcome=outcome)
         if outcome == "ok":
             self.set(
                 name,
@@ -656,7 +657,7 @@ class Supervisor:
             # check passed on this same source moments ago and apply runs the
             # same gate, so this is a contract violation worth naming loudly.
             digest = terminator.get("source_digest", "")
-            self.set(name, outcome=outcome, source_digest=digest)
+            self.set(name, source_digest=digest)
             raise FanoutError(
                 f"tenon apply rejected a source tenon check accepted; "
                 f"source_digest={digest or 'unknown'}; see {log}"

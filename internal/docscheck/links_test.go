@@ -42,6 +42,21 @@ func TestRelativeLinksResolve(t *testing.T) {
 	if err != nil {
 		t.Fatalf("walk docs: %v", err)
 	}
+	// The improve module's markdown links out into docs/ and examples/ with
+	// relative paths, so a move on either side breaks them silently unless
+	// they are verified here alongside everything else.
+	err = filepath.WalkDir(filepath.Join(root, "improve"), func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && strings.HasSuffix(path, ".md") {
+			files = append(files, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk improve: %v", err)
+	}
 
 	for _, file := range files {
 		content, err := os.ReadFile(file)

@@ -89,4 +89,6 @@ go build -o tenon ./cmd/tenon
   including [known limitations](docs/product-spec.md#known-limitations)
 - [Use cases](docs/use-cases.md) — the concrete jobs tenon does today
 - [North star](docs/north-star.md) — what the project holds constant
+- [The improve module](improve/README.md) — fan-out and search over agent
+  projects, built on tenon's CLI rather than inside it
 - [Contributing](CONTRIBUTING.md)

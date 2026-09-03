@@ -16,6 +16,26 @@ and the first entries under *Added* describe the shipped commands.
 
 ### Added
 
+- The **improve module** joins the repository at `improve/`: `fanout`, which
+  dispatches k isolated variants of an agent project one git worktree each,
+  and `evolve`, the hill-climbing and genetic search loop around it, with a
+  judge for human pairwise scoring. It consumes tenon's CLI and adds nothing
+  to tenon's contract — evaluation, scoring and selection stay out of scope
+  here and live there, now enforced by a module boundary rather than a
+  repository one. It is Python 3.11, standard library only, gated by
+  `scripts/check-improve.sh` and its own CI job.
+
+  Its calls were retargeted onto the surface
+  [ADR 0027](docs/adr/0027-consolidate-the-read-surface.md) settled: `tenon
+  check --format jsonl` in place of `fingerprint show` and `validate`,
+  `check --write-pins` in place of `manifest write`, and `--pins` in place of
+  `--manifest`. Both callers now read each stream's terminating `outcome`
+  instead of inferring a verdict from an exit code or a field's presence —
+  which means a rejected source and a failed environment are finally
+  distinguishable, so infrastructure noise can no longer be scored as a
+  finding about a candidate, and a rejected candidate is named by the
+  `source_digest` the gate reports.
+
 - `tenon check` is now the single gate over an agent project, absorbing
   `tenon validate` and `tenon fingerprint show`
   ([ADR 0027](docs/adr/0027-consolidate-the-read-surface.md)). Without

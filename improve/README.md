@@ -54,7 +54,9 @@ already stamps on every apply record and dispatch event.
 
 ## Install
 
-Python 3.9+, `git`, and a `tenon` binary. No third-party packages.
+Python **3.11 or newer**, `git`, and a `tenon` binary. Nothing else: the whole
+module is standard library, so there is no `pyproject.toml`, no lockfile, and
+no virtualenv to create. `evolve` and the judge are run directly.
 
 ```bash
 ln -s "$PWD/improve/fanout.py" /usr/local/bin/fanout
@@ -62,6 +64,20 @@ ln -s "$PWD/improve/fanout.py" /usr/local/bin/fanout
 
 Point it at a tenon with `--tenon PATH` or `FANOUT_TENON`; otherwise it takes
 the first `tenon` on `PATH`. Build one with `go build -o ./tenon ./cmd/tenon`.
+
+## Tests
+
+```bash
+./scripts/check-improve.sh
+```
+
+That compiles every module in `improve/` — the cheap syntax gate over the
+files with no tests — and runs the judge's scoring tests, which are a stdlib
+self-runner needing no network and no tenon binary:
+
+```bash
+python3 improve/judge/test_scoring.py
+```
 
 ## Quick start
 
