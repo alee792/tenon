@@ -27,18 +27,16 @@ offspring inherits one parent's copy of the gene there.
 
 **Which paths are genes is configuration, not a constant.** `spec.genes.dirs`
 and `spec.genes.files` default to `["skills", "tools", "subagents",
-"plugins", "mcp", "schedules"]` and `["instructions.md"]` — the set this tool
-has always recombined. They are a **mirror of what tenon's loader
+"plugins", "mcp", "schedules", "harnesses"]` and `["instructions.md"]` —
+everything tenon's loader inventories today. They are a **mirror of what tenon's loader
 inventories**, and a mirror drifts: the day tenon recognises a new component
 directory, a search that does not know about it silently stops recombining
 that component and carries it along with the first parent instead, which
 looks like a search that simply never varies there. Keep them level with the
-agent-project layout. Tenon's loader today inventories `instructions.md`,
-`skills/`, `tools/`, `subagents/`, `plugins/`, `mcp/`, `schedules/` and
-`harnesses/`; `harnesses/` is deliberately not a default gene, because
-whether per-harness overrides should recombine independently of the source
-they override is a decision for the search rather than for this file. Add it
-to `genes.dirs` when it is.
+agent-project layout. `harnesses/` is a default gene like the rest: a
+per-harness override is authored surface, and a search that cannot vary it
+cannot find a harness-specific fix. A search that wants harness config held
+fixed lists `genes.dirs` without it.
 
 **The fingerprint is the genome id.** The adapter's `gate` is
 a single call that both gates a candidate and names it — stable diagnostic

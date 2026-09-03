@@ -69,11 +69,11 @@ SCHEMA_VERSION = 1
 # without waiting for this file — and EVOLVE.md says it must be kept level
 # with the agent-project layout.
 #
-# The default is deliberately the set this tool has always recombined, not
-# everything tenon loads: `harnesses/` is authored surface too, and whether
-# per-harness overrides should recombine independently is a search's decision
-# rather than a default. Put it in `spec.genes.dirs` to include it.
-DEFAULT_GENE_DIRS = ("skills", "tools", "subagents", "plugins", "mcp", "schedules")  # not tenon argv: tools, mcp
+# The default is everything tenon's loader inventories today, `harnesses/`
+# included: a per-harness override is authored surface like any other
+# component, and a search that cannot vary it cannot find a harness-specific
+# fix. Drop it from `spec.genes.dirs` to hold harness config fixed.
+DEFAULT_GENE_DIRS = ("skills", "tools", "subagents", "plugins", "mcp", "schedules", "harnesses")  # not tenon argv: tools, mcp
 DEFAULT_GENE_FILES = ("instructions.md",)
 
 
