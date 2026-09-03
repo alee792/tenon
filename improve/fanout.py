@@ -587,6 +587,9 @@ class Supervisor:
                 stdout=out,
                 stderr=subprocess.STDOUT,
                 env=self.child_env(variant, vdir, agent, workspace),
+                # Its own session, so cancelling a hook takes down whatever
+                # the hook spawned rather than orphaning it.
+                new_session=True,
             )
             code = proc.wait()
         self._reap(name)

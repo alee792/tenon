@@ -606,6 +606,20 @@ def test_dispatch_times_out_without_reading_any_error_prose():
     assert result.per_input == () and result.turns == {}
 
 
+def test_dispatch_refuses_a_budget_the_backstop_cannot_cover():
+    """Above MAX_DISPATCH_TIMEOUT_S the tenon backstop is clamped to tenon's
+    cap and would fire before the adapter's clock, so a timeout would come
+    back as an environment error rather than timed_out. fanout refuses such a
+    budget; a direct caller must be told rather than silently degraded."""
+    t = adapter.Tenon(sys.executable, "claude", spawn=lambda *a, **k: None)
+    try:
+        t.dispatch(Path("."), Path("."), [], timeout_s=adapter.MAX_DISPATCH_TIMEOUT_S + 1)
+    except ValueError as err:
+        assert "MAX_DISPATCH_TIMEOUT_S" in str(err)
+    else:
+        raise AssertionError("a budget above the cap was accepted")
+
+
 def test_dispatch_times_out_when_nothing_would_drain_its_pipes():
     """`events_path` and `stderr_path` are optional, and with neither, stdout
     and stderr are PIPEs. A dispatch that wrote the whole payload to stdin

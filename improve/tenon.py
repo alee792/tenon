@@ -740,6 +740,12 @@ class Tenon:
         # MAX_DISPATCH_TIMEOUT_S cannot be given that headroom — callers that
         # bound a budget bound it there, so this clamp is the floor of last
         # resort rather than the policy.
+        if int(timeout_s) > MAX_DISPATCH_TIMEOUT_S:
+            raise ValueError(
+                f"timeout_s={timeout_s} exceeds MAX_DISPATCH_TIMEOUT_S={MAX_DISPATCH_TIMEOUT_S}: "
+                "above it tenon's own deadline would fire first and a timeout would "
+                "surface as an environment error instead of timed_out"
+            )
         backstop = min(int(timeout_s) + TIMEOUT_BACKSTOP_HEADROOM_S, TENON_RUN_TIMEOUT_CAP_S)
         argv += ["--timeout", f"{backstop}s"]
         if turn_timeout_s:

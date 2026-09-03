@@ -62,6 +62,16 @@ def test_genes_itself_must_be_an_object():
     assert "genes" in refused(["skills"])
 
 
+def test_a_locus_must_be_one_component_under_the_agent_root():
+    """`genes()` reads `root / name` and `assemble()` writes `target / name`, so
+    a name carrying a separator or a dot-segment would reach outside both."""
+    assert "genes.dirs" in refused({"dirs": ["../.."]})
+    assert "genes.dirs" in refused({"dirs": ["skills/alpha"]})
+    assert "genes.files" in refused({"files": [".."]})
+    assert "genes.files" in refused({"files": [".hidden"]})
+    evolve.GeneLayout.of({"dirs": ["skills", "tools"], "files": ["instructions.md"]})  # not tenon argv: tools
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for test in tests:

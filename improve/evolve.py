@@ -110,6 +110,11 @@ def _gene_names(raw: dict, key: str, default: tuple) -> tuple:
     for name in value:
         if not isinstance(name, str) or not name.strip():
             raise EvolveError(f"spec: genes.{key} must be a list of non-empty names")
+        # A locus is one component name under the agent root. Anything with a
+        # separator or a dot-segment would make genes() read, and assemble()
+        # write, outside the directories they are handed.
+        if "/" in name or "\\" in name or name in (".", "..") or name.startswith("."):
+            raise EvolveError(f"spec: genes.{key} entries must be single component names, not {name!r}")
     return tuple(value)
 
 
