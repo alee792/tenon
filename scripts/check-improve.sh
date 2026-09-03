@@ -19,4 +19,7 @@ fi
 
 # compileall is the syntax gate over the modules with no tests of their own.
 python3 -m compileall -q improve
+# The adapter's fixture tests, and the confinement grep that keeps every other
+# module out of tenon's CLI vocabulary.
+python3 improve/test_tenon.py
 python3 improve/judge/test_scoring.py

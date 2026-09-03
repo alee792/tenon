@@ -1,0 +1,1 @@
+{"id":"instructions.frontmatter.missing","severity":"error","path":"instructions.md","rule":"instructions.md must start with YAML frontmatter delimited by --- lines"}

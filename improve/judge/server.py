@@ -332,7 +332,8 @@ class Judge:
         self.child_log = run_root / f"round-{nxt}.log"
         handle = self.child_log.open("ab")
         self.child = subprocess.Popen(
-            [sys.executable, str(self.evolve), "run", "--spec", str(self.spec),
+            # not tenon argv — evolve's own command line
+            [sys.executable, str(self.evolve), "run", "--spec", str(self.spec),  # not tenon argv
              "--resume", "--rounds", str(nxt)],
             cwd=str(self.evolve.parent.parent),
             stdout=handle,

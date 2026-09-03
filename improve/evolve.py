@@ -48,28 +48,62 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# Every tenon call goes through the adapter, which is the only module in
+# improve/ that names a tenon subcommand or flag; improve/test_tenon.py greps
+# this file to keep it that way.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import tenon as tenon_api  # noqa: E402
+from tenon import TenonEnvironment  # noqa: E402
+
 SCHEMA_VERSION = 1
 
 # The authored surface of a tenon agent project. instructions.md is one gene;
 # each child of these directories is one gene. Anything else in the folder is
 # carried along with its parent and never recombined on its own.
-GENE_DIRS = ("skills", "tools", "subagents", "plugins", "mcp", "schedules")
-GENE_FILES = ("instructions.md",)
+#
+# This is a MIRROR of what tenon's loader inventories, and a mirror drifts:
+# the day tenon adds a component directory, a search that does not know about
+# it silently stops recombining that component and carries it along with the
+# first parent instead. So it is spec config (`spec.genes.dirs` /
+# `spec.genes.files`) rather than a constant — a run can track a newer tenon
+# without waiting for this file — and EVOLVE.md says it must be kept level
+# with the agent-project layout.
+#
+# The default is deliberately the set this tool has always recombined, not
+# everything tenon loads: `harnesses/` is authored surface too, and whether
+# per-harness overrides should recombine independently is a search's decision
+# rather than a default. Put it in `spec.genes.dirs` to include it.
+DEFAULT_GENE_DIRS = ("skills", "tools", "subagents", "plugins", "mcp", "schedules")  # not tenon argv
+DEFAULT_GENE_FILES = ("instructions.md",)
+
+
+@dataclass(frozen=True)
+class GeneLayout:
+    """Which paths in an agent project are recombinable units."""
+
+    dirs: tuple = DEFAULT_GENE_DIRS
+    files: tuple = DEFAULT_GENE_FILES
+
+    @staticmethod
+    def of(raw) -> "GeneLayout":
+        raw = raw or {}
+        if not isinstance(raw, dict):
+            raise EvolveError("spec: genes must be an object with dirs and files")
+        return GeneLayout(
+            dirs=tuple(raw.get("dirs", DEFAULT_GENE_DIRS)),
+            files=tuple(raw.get("files", DEFAULT_GENE_FILES)),
+        )
 
 
 class EvolveError(Exception):
     """A failure that should print as one line, not a traceback."""
 
 
-class TenonEnvironmentError(EvolveError):
-    """tenon terminated with outcome "error", or its stream carried no
-    terminator at all.
-
-    The environment failed, not the candidate: an unreadable pin set, an
-    unwritable path, a harness that would not start. It must never be
-    recorded as a rejection — a search whose leaderboard absorbs
-    infrastructure noise is measuring the wrong thing — so it propagates out
-    of admit rather than returning None."""
+# TenonEnvironment is the adapter's, and fanout and evolve share it: one
+# exception type for "the environment failed, not the candidate" — an
+# unreadable pin set, an unwritable path, a harness that would not start. It
+# must never be recorded as a rejection, so it propagates out of admit rather
+# than returning None, and main() gives it its own exit code.
 
 
 def shown(value) -> str:
@@ -120,15 +154,15 @@ class Member:
     tags: dict = field(default_factory=dict)
 
 
-def genes(root: Path) -> dict:
+def genes(root: Path, layout: GeneLayout = GeneLayout()) -> dict:
     """Map each locus to the path of the gene at it. A locus is a component
     path — `instructions.md`, `skills/alpha` — and the gene is the content
     there; a genome is that map."""
     found: dict = {}
-    for name in GENE_FILES:
+    for name in layout.files:
         if (root / name).is_file():
             found[name] = root / name
-    for directory in GENE_DIRS:
+    for directory in layout.dirs:
         parent = root / directory
         if not parent.is_dir():
             continue
@@ -151,26 +185,26 @@ def materialize(source: Path, target: Path) -> None:
     shutil.copytree(source, target, symlinks=True)
 
 
-def recombine(parents: list, target: Path, rng: random.Random) -> None:
+def recombine(parents: list, target: Path, rng: random.Random, layout: GeneLayout = GeneLayout()) -> None:
     """Uniform crossover over the gene set, for any number of parents. Each
     locus is drawn independently from the parents that carry it. The offspring
     may well be incoherent — a skill referencing a tool that did not come
     along — which is exactly what the tenon gate is for."""
-    pools = [genes(p) for p in parents]
+    pools = [genes(p, layout) for p in parents]
     loci = sorted({name for pool in pools for name in pool})
     plan = {}
     for name in loci:
         holders = [i for i, pool in enumerate(pools) if name in pool]
         plan[name] = holders[rng.randrange(len(holders))]
-    assemble(parents, plan, target)
+    assemble(parents, plan, target, layout)
 
 
-def assemble(parents: list, plan: dict, target: Path) -> None:
+def assemble(parents: list, plan: dict, target: Path, layout: GeneLayout = GeneLayout()) -> None:
     """Materialize an offspring from a per-locus plan of {locus: parent index}.
     This is the mechanism every combine policy shares: a policy decides which
     parent supplies the gene at each locus, and this puts the files where they
     belong."""
-    pools = [genes(p) for p in parents]
+    pools = [genes(p, layout) for p in parents]
     target.mkdir(parents=True, exist_ok=True)
     for name, index in plan.items():
         if index >= len(pools) or name not in pools[index]:
@@ -179,7 +213,7 @@ def assemble(parents: list, plan: dict, target: Path) -> None:
     # Carry non-gene files (README, lockfiles, go.mod) from the first parent so
     # the offspring is a runnable directory, not just a bag of genes.
     for entry in sorted(parents[0].iterdir()):
-        if entry.name in GENE_FILES or entry.name in GENE_DIRS:
+        if entry.name in layout.files or entry.name in layout.dirs:
             continue
         if not (target / entry.name).exists():
             copy_gene(entry, target / entry.name)
@@ -217,7 +251,7 @@ def hook(command: str, payload: dict, what: str) -> dict:
     raise EvolveError(f"the {what} hook printed no JSON object")
 
 
-def genome_view(m: Member, index: int = -1) -> dict:
+def genome_view(m: Member, index: int = -1, layout: GeneLayout = GeneLayout()) -> dict:
     """What a policy hook is told about one population slot. Loci are included
     so a combine policy can plan without walking the filesystem, and `index` is
     the stable way to name a slot when two slots hold the same genome."""
@@ -234,80 +268,8 @@ def genome_view(m: Member, index: int = -1) -> dict:
         "mutator": g.mutator,
         "parents": g.parents,
         "path": str(g.path),
-        "genes": sorted(genes(g.path)),
+        "genes": sorted(genes(g.path, layout)),
     }
-
-
-# --------------------------------------------------------------------------
-# tenon gate
-# --------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class Verdict:
-    """The gate's answer, as one record.
-
-    Three outcomes do not fit in two fields: a candidate can pass, be
-    rejected, or never have been judged at all. Exactly one of fingerprint
-    and source_digest is meaningful, and warnings ride along on a *passing*
-    verdict so a mutator can still see what the gate grumbled about."""
-
-    ok: bool
-    fingerprint: str = ""
-    source_digest: str = ""
-    rejected: tuple = ()
-    warnings: tuple = ()
-
-
-def gate(tenon: str, harness: str, agent: Path) -> Verdict:
-    """One call, three answers: a fingerprint, a rejection, or nothing at all.
-
-    The terminator's `outcome` is the authoritative signal. Exit code cannot
-    substitute for it — a rejected source and a broken environment both exit
-    1 — and neither can the presence of a field: a `fingerprint` key appears
-    on more than one shape, and a diagnostic `id` appears on warnings too."""
-    proc = subprocess.run(
-        [tenon, "check", str(agent), "--harness", harness, "--format", "jsonl"],
-        capture_output=True,
-        text=True,
-    )
-    terminator, diagnostics = {}, []
-    for line in proc.stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(obj, dict):
-            continue
-        if obj.get("outcome"):
-            terminator = obj
-        else:
-            diagnostics.append(obj)
-    if not terminator:
-        # An absence is indistinguishable from a truncated pipe, so it is
-        # never read as a verdict about the candidate.
-        raise TenonEnvironmentError(
-            f"tenon check emitted no outcome for {agent} (exit {proc.returncode}): "
-            f"{proc.stderr.strip()[:200]}"
-        )
-    outcome = terminator["outcome"]
-    if outcome == "ok":
-        return Verdict(
-            ok=True,
-            fingerprint=terminator.get("fingerprint", ""),
-            warnings=tuple(d.get("id", "") for d in diagnostics if d.get("severity") == "warning"),
-        )
-    if outcome == "gate_failed":
-        return Verdict(
-            ok=False,
-            source_digest=terminator.get("source_digest", ""),
-            rejected=tuple(d.get("id", "") for d in diagnostics if d.get("severity") == "error"),
-            warnings=tuple(d.get("id", "") for d in diagnostics if d.get("severity") == "warning"),
-        )
-    raise TenonEnvironmentError(f"tenon check could not run against {agent}: {terminator.get('error', 'unknown')}")
 
 
 # --------------------------------------------------------------------------
@@ -326,6 +288,7 @@ class Config:
     tenon: str
     fanout: str
     state_dir: Path
+    genes: GeneLayout
     tasks: list
     repeats: int
     score: str
@@ -354,6 +317,9 @@ class Config:
         payload = {k: v for k, v in self.__dict__.items()}
         for key in ("repo", "seed", "state_dir"):
             payload[key] = str(payload[key])
+        # The gene layout round-trips as the same object shape the spec uses,
+        # so a recorded search says which loci it recombined.
+        payload["genes"] = {"dirs": list(self.genes.dirs), "files": list(self.genes.files)}
         payload["schema_version"] = SCHEMA_VERSION
         return payload
 
@@ -446,6 +412,7 @@ def load_config(path: Path) -> Config:
         harness=raw.get("harness", "claude"),
         tenon=tenon,
         fanout=fanout,
+        genes=GeneLayout.of(raw.get("genes")),
         state_dir=state_dir,
         tasks=tasks,
         repeats=int(raw.get("repeats", 1)),
@@ -487,6 +454,9 @@ class Search:
         self.genomes_dir = self.root / "genomes"
         self.lineage_path = self.root / "lineage.jsonl"
         self.rng = random.Random(cfg.rng_seed)
+        # Every tenon call this search makes goes through here, bound once to
+        # the binary and the harness the spec chose.
+        self.tenon = tenon_api.Tenon(cfg.tenon, cfg.harness)
         self.known: dict = {}
         # Tags a score hook observed at runtime, keyed by genome; merged onto
         # each slot so a behavioural descriptor can come from the evaluation
@@ -511,9 +481,9 @@ class Search:
         can fill a second slot — or None when tenon rejected it.
 
         None means *rejected*, and the caller counts it against the mutator.
-        An environment failure is not that, so TenonEnvironmentError
+        An environment failure is not that, so TenonEnvironment
         propagates: the candidate is neither admitted nor scored against."""
-        verdict = gate(self.cfg.tenon, self.cfg.harness, path)
+        verdict = self.tenon.gate(path)
         if not verdict.ok:
             rejected = list(verdict.rejected)
             self.record(
@@ -542,9 +512,9 @@ class Search:
             # collapses it onto genomes_dir — and the next line deletes that
             # directory, taking every genome in the run with it. An ok
             # verdict that names nothing is a broken tenon, not a candidate.
-            raise TenonEnvironmentError("tenon check reported ok without a fingerprint")
+            raise TenonEnvironment("the gate reported ok without a fingerprint")
         if verdict.warnings:
-            self.log(f"  warnings ({mutator}): {', '.join(verdict.warnings[:3])}")
+            self.log(f"  warnings ({mutator}): {', '.join(verdict.warned[:3])}")
         if fingerprint in self.known:
             self.record(
                 {
@@ -600,7 +570,7 @@ class Search:
                 "EVOLVE_RUN": self.cfg.run,
                 "EVOLVE_MUTATOR": mutator["name"],
                 "EVOLVE_PARENT_REPORT": str(report),
-                "EVOLVE_GENES": ",".join(sorted(genes(path))),
+                "EVOLVE_GENES": ",".join(sorted(genes(path, self.cfg.genes))),
                 # A mutator's working directory is the genome it edits, so a
                 # relative command path in the spec would resolve against the
                 # genome rather than the project. This is the anchor to use.
@@ -612,7 +582,7 @@ class Search:
         return mutator["name"]
 
     def parent_report(self, member: Member) -> dict:
-        view = genome_view(member)
+        view = genome_view(member, layout=self.cfg.genes)
         if member.genome.report and Path(member.genome.report).is_file():
             view["variants"] = json.loads(Path(member.genome.report).read_text())
         return view
@@ -663,7 +633,7 @@ class Search:
                     "round": round_no,
                     "count": count,
                     "strategy": self.cfg.strategy,
-                    "population": [genome_view(m, i) for i, m in enumerate(population)],
+                    "population": [genome_view(m, i, self.cfg.genes) for i, m in enumerate(population)],
                 },
                 "pair",
             )
@@ -714,14 +684,14 @@ class Search:
         and evolve assembles it — or materializes the directory itself when it
         wants a grain finer than whole components."""
         if self.cfg.combine_policy == "uniform":
-            recombine([p.genome.path for p in parents], work, self.rng)
+            recombine([p.genome.path for p in parents], work, self.rng, self.cfg.genes)
             return
         out = hook(
             self.cfg.combine_policy,
             {
                 "round": round_no,
                 "out_dir": str(work),
-                "parents": [genome_view(p, i) for i, p in enumerate(parents)],
+                "parents": [genome_view(p, i, self.cfg.genes) for i, p in enumerate(parents)],
             },
             "combine",
         )
@@ -738,7 +708,7 @@ class Search:
             if gid not in index:
                 raise EvolveError(f"the combine plan names {gid!r}, which is not one of this offspring's parents")
             resolved[name] = index[gid]
-        assemble([p.genome.path for p in parents], resolved, work)
+        assemble([p.genome.path for p in parents], resolved, work, self.cfg.genes)
 
     def tournament(self, population: list) -> Member:
         # Round 1 has only the seed to draw from, so the tournament can
@@ -853,20 +823,25 @@ class Search:
             for t, task, r in [(t, task, r) for g, t, task, r in variants if g is genome]:
                 variant = f"{genome.short}-t{t}r{r}"
                 record = records.get(variant)
-                if record is None:
-                    samples.append(0.0)
-                    continue
-                if record.get("status") == "errored":
-                    # tenon reported outcome "error": the environment failed,
-                    # not the candidate. Every scorer shipped here turns a
-                    # non-done status into 0.0, so passing this on would
-                    # record infrastructure noise as evidence about the
-                    # genome. Drop the sample instead — a genome left with no
-                    # samples at all stays unscored and is evaluated again.
-                    detail = (record.get("detail") or "").splitlines()
+                # Three ways a variant can teach us nothing about the genome,
+                # and all three are the same class. tenon reported outcome
+                # "error" (the environment failed, not the candidate); a
+                # sibling's fail-fast cancelled this one before it ran; or the
+                # variant is missing from collect entirely. Every scorer
+                # shipped here turns a non-done status into 0.0, so passing
+                # any of them on would record infrastructure noise as evidence
+                # about the genome. Drop the sample instead — a genome left
+                # with no samples at all stays unscored and is evaluated
+                # again, which is the honest outcome of having learned
+                # nothing.
+                # fanout's lifecycle vocabulary, read as data: evolve shells
+                # out to fanout rather than importing it.
+                unscorable = "missing" if record is None else record.get("status", "")
+                if unscorable in ("missing", "errored", "cancelled"):
+                    detail = ((record or {}).get("detail") or "").splitlines()
                     self.log(
-                        f"  WARNING: {variant} errored, not scored "
-                        f"(outcome {record.get('outcome') or 'none'})"
+                        f"  WARNING: {variant} {unscorable}, not scored "
+                        f"(outcome {(record or {}).get('outcome') or 'none'})"
                         + (f": {detail[0][:160]}" if detail else "")
                     )
                     continue
@@ -940,7 +915,7 @@ class Search:
         path = out / f"{genome.short}.json"
         if not path.exists():
             # A pin set records the agent name from its directory's basename,
-            # and apply checks it. The genome directory is named after a
+            # and compile checks it. The genome directory is named after a
             # fingerprint, so writing the pins there and applying them to the
             # agent path inside a worktree drifts on the name
             # (pins.drift.agent) and fails closed. Stage the genome under the
@@ -950,56 +925,20 @@ class Search:
                 shutil.rmtree(staged)
             staged.parent.mkdir(parents=True, exist_ok=True)
             shutil.copytree(genome.path, staged, symlinks=True)
-            proc = subprocess.run(
-                [
-                    self.cfg.tenon, "check", str(staged),
-                    "--harness", self.cfg.harness, "--model", self.cfg.model,
-                    "--write-pins", str(path), "--format", "jsonl",
-                ],
-                capture_output=True,
-                text=True,
-            )
-            shutil.rmtree(staged.parent, ignore_errors=True)
-            # Exit 0 is not the claim that matters; the terminator naming the
-            # path it wrote is.
-            written, outcome, error, ids = "", "", "", []
-            for line in proc.stdout.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(obj, dict):
-                    continue
-                if obj.get("outcome"):
-                    outcome = obj["outcome"]
-                    written = obj.get("pins_written", "")
-                    error = obj.get("error", "")
-                elif obj.get("severity") == "error":
-                    ids.append(obj.get("id", ""))
-            if outcome in ("", "error"):
-                # An unwritable pins path, or a stream with no terminator at
-                # all. The environment failed, not the genome, and the search
-                # must stop rather than count this against the candidate.
-                raise TenonEnvironmentError(
-                    f"tenon check --write-pins could not run for {genome.short}: "
-                    f"{error or proc.stderr.strip()[:200] or 'no outcome'}"
-                )
-            if outcome == "gate_failed":
+            try:
+                # The adapter confirms the terminator named the path it wrote
+                # rather than trusting exit 0, and raises when it did not.
+                verdict = self.tenon.gate(staged, write_pins=path, model=self.cfg.model)
+            finally:
+                shutil.rmtree(staged.parent, ignore_errors=True)
+            if not verdict.ok:
                 # This same content passed the gate on the way in, so a
                 # rejection here is tenon contradicting itself, not a verdict
                 # on the candidate. Name what it rejected.
                 raise EvolveError(
-                    f"tenon check --write-pins rejected {genome.short}, which the gate "
-                    f"already admitted — a contract violation, not a finding about the "
-                    f"genome: {', '.join(i for i in ids if i) or 'no diagnostics'}"
-                )
-            if outcome != "ok" or written != str(path):
-                raise EvolveError(
-                    f"tenon check --write-pins ended {outcome!r} for {genome.short} and "
-                    f"wrote pins to {written or 'nothing'} rather than {path}"
+                    f"the gate rejected {genome.short} while writing its pins, having "
+                    f"already admitted it — a contract violation, not a finding about "
+                    f"the genome: {', '.join(i for i in verdict.rejected if i) or 'no diagnostics'}"
                 )
         return str(path)
 
@@ -1013,7 +952,7 @@ class Search:
             [
                 sys.executable,
                 self.cfg.fanout,
-                "clean",
+                "clean",  # not tenon argv — fanout's own subcommand
                 f"round-{round_no}",
                 "--force",
                 "--keep-state",
@@ -1093,8 +1032,8 @@ class Search:
                 "round": round_no,
                 "keep": keep,
                 "strategy": self.cfg.strategy,
-                "population": [genome_view(m, i) for i, m in enumerate(population)],
-                "candidates": [genome_view(m, i) for i, m in enumerate(candidates)],
+                "population": [genome_view(m, i, self.cfg.genes) for i, m in enumerate(population)],
+                "candidates": [genome_view(m, i, self.cfg.genes) for i, m in enumerate(candidates)],
             },
             "select",
         )
@@ -1445,7 +1384,7 @@ def main(argv: list) -> int:
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)
-    except TenonEnvironmentError as err:
+    except TenonEnvironment as err:
         # Exit 3, not 1: the caller retries or escalates an environment
         # failure, and must not read it as "the search rejected everything".
         print(f"evolve: tenon environment failure: {err}", file=sys.stderr)

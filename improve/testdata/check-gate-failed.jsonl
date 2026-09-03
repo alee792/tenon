@@ -1,0 +1,2 @@
+{"id":"instructions.frontmatter.missing","severity":"error","path":"instructions.md","rule":"instructions.md must start with YAML frontmatter delimited by --- lines"}
+{"outcome":"gate_failed","source_digest":"sha256:58413c4d7ada1c80cc1ba6a1f400e9016c936f1c5f9e1eaf5b60d4fa5bf5e107"}

@@ -12,9 +12,12 @@ Per variant it does exactly this, and nothing more:
 
   1. git worktree add        an isolated workspace on its own branch
   2. mutate (optional)       a caller-supplied command over the agent files
-  3. tenon check             gate the variant and record its fingerprint
-  4. tenon apply             compile the agent into that workspace
-  5. tenon run               dispatch the task as bounded JSONL turns
+  3. gate                    prove the variant and record its fingerprint
+  4. compile                 write the agent's configuration into that workspace
+  5. dispatch                run the task as bounded JSONL turns
+
+Steps 3-5 are the tenon adapter's roles (`improve/tenon.py`), which is the
+only module here that names a tenon subcommand or flag.
 
 It then reports. It does not mutate, score, or select — `fanout collect`
 emits one JSON record per variant (fingerprint, terminal turn status,
@@ -48,6 +51,14 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# Every tenon call goes through the adapter, which is the only module in
+# improve/ that names a tenon subcommand or flag; improve/test_tenon.py greps
+# this file to keep it that way. Import it by directory rather than by package
+# so fanout runs the same whatever the cwd.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import tenon as tenon_api  # noqa: E402
+from tenon import GateContradiction, TenonEnvironment  # noqa: E402
+
 SCHEMA_VERSION = 1
 
 # tenon bounds `run --timeout` at 30 minutes; refuse a larger request here so
@@ -79,10 +90,11 @@ class FanoutError(Exception):
     """A failure that should print as one line, not a traceback."""
 
 
-class TenonEnvironmentError(FanoutError):
-    """tenon terminated with outcome "error", or its stream ended with no
-    terminator at all. Either way the environment failed, not the variant:
-    the result is ERRORED and is never scored."""
+# TenonEnvironment is the adapter's, and fanout and evolve share it: one
+# exception type for "the environment failed, not the variant", so a caller
+# that spans both tools catches one thing. It deliberately does NOT descend
+# from FanoutError — an environment failure is not a fanout failure, and
+# main() prints it on its own line.
 
 
 # --------------------------------------------------------------------------
@@ -250,7 +262,7 @@ def build_spec(args, spec_file: dict) -> Spec:
 
     shared_task = as_task_list(pick(args.task, "task"), "task")
     shared_mutate = pick(args.mutate, "mutate", "") or ""
-    shared_pins = pick(args.pins, "pins", "") or ""
+    shared_pins = pick(args.pins, "pins", "") or ""  # not tenon argv — a spec key
 
     raw_variants = spec_file.get("variants") or []
     if raw_variants and args.k:
@@ -271,7 +283,7 @@ def build_spec(args, spec_file: dict) -> Spec:
                     index=i,
                     task=task,
                     mutate=raw.get("mutate", shared_mutate) or "",
-                    pins=raw.get("pins", shared_pins) or "",
+                    pins=raw.get("pins", shared_pins) or "",  # not tenon argv — a spec key
                     env={str(k): str(v) for k, v in (raw.get("env") or {}).items()},
                 )
             )
@@ -419,17 +431,23 @@ class Supervisor:
 
     # -- process plumbing --------------------------------------------------
 
-    def _spawn(self, name: str, argv: list, cwd: Path, stdout, stderr, stdin=None, env=None):
+    def _spawn(
+        self, name: str, argv: list, cwd=None, stdout=None, stderr=None, stdin=None,
+        env=None, new_session: bool = False,
+    ):
         if self.cancelled.is_set():
             raise FanoutError("cancelled")
         proc = subprocess.Popen(
             argv,
-            cwd=str(cwd),
+            cwd=str(cwd) if cwd is not None else None,
             stdout=stdout,
             stderr=stderr,
             stdin=stdin,
             env=env,
             text=False,
+            # A dispatch runs in its own process group so cancelling it takes
+            # down the harness it started, not just the dispatcher.
+            start_new_session=new_session,
         )
         with self.lock:
             self.children[name] = proc
@@ -445,19 +463,9 @@ class Supervisor:
         with self.lock:
             live = list(self.children.values())
         for proc in live:
-            try:
-                proc.terminate()
-            except OSError:
-                pass
-        deadline = time.time() + 10
-        for proc in live:
-            try:
-                proc.wait(timeout=max(0.1, deadline - time.time()))
-            except Exception:
-                try:
-                    proc.kill()
-                except OSError:
-                    pass
+            # Group-wide, so a cancelled variant leaves no model process
+            # behind burning budget for a run that is already over.
+            tenon_api.terminate_tree(proc, grace_s=10)
 
     # -- the per-variant pipeline -----------------------------------------
 
@@ -475,11 +483,20 @@ class Supervisor:
             self._apply(name, variant, vdir, agent, workspace)
             self._dispatch(name, variant, vdir, agent, workspace)
             self.set(name, status=DONE, detail="", finished_at=time.time())
-        except TenonEnvironmentError as err:
+        except TenonEnvironment as err:
             # Not the variant's fault, so not FAILED: an environment failure
             # must not reach whatever scores this run as evidence about the
             # configuration under test.
-            self.set(name, status=ERRORED, detail=str(err), finished_at=time.time())
+            self.set(
+                name,
+                status=ERRORED,
+                # Whatever phase we reached, the outcome that ended this
+                # variant is the environment one; leaving the previous
+                # phase's "ok" on the record would read as a clean run.
+                outcome="error",
+                detail=str(err),
+                finished_at=time.time(),
+            )
             if not self.spec["keep_going"]:
                 self.cancel()
         except FanoutError as err:
@@ -567,194 +584,144 @@ class Supervisor:
         if code != 0:
             raise FanoutError(f"mutate exited {code}; see {log}")
 
+    def _tenon(self, name: str, variant: dict, vdir: Path, agent: Path, workspace: Path):
+        """The adapter, bound to this variant's harness, environment, and to
+        fanout's own child tracking — so a cancelled run still terminates
+        every tenon process it started."""
+        return tenon_api.Tenon(
+            self.spec["tenon"],
+            self.spec["harness"],
+            env=self._child_env(variant, vdir, agent, workspace),
+            spawn=lambda argv, **kw: self._spawn(name, argv, **kw),
+        )
+
     def _check(self, name: str, variant: dict, vdir: Path, agent: Path, workspace: Path) -> str:
         """Gate the variant and mint its identity in one process.
 
-        The harness and the pin set are passed explicitly so this is the
-        same gate `apply` runs three lines later: a harness-specific or
+        The harness and the pin set are passed explicitly so this is the same
+        gate compile runs three lines later: a harness-specific or
         pin-specific rejection costs one process here instead of two, and it
         is recorded as a rejection of this variant rather than surfacing
-        later as an apply contract violation. No --emit: fanout wants a
-        fingerprint, and a per-file inventory it would discard is hot-path
-        I/O."""
+        later as a compile contract violation. No inventory is emitted:
+        fanout wants a fingerprint, and a per-file listing it would discard is
+        hot-path I/O.
+
+        The exit code cannot tell a rejection from a broken environment —
+        both exit 1 — so the adapter reads the terminator's outcome, and the
+        difference is whether downstream scores this variant at all."""
         self.set(name, status=CHECKING)
-        log = vdir / "check.jsonl"
-        err = vdir / "check.err"
-        argv = [
-            self.spec["tenon"],
-            "check",
-            str(agent),
-            "--harness",
-            self.spec["harness"],
-            "--format",
-            "jsonl",
-        ]
-        if variant.get("pins"):
-            argv += ["--pins", variant["pins"]]
-        with log.open("wb") as out, err.open("wb") as errf:
-            proc = self._spawn(
-                name,
-                argv,
+        log, errlog = vdir / "check.jsonl", vdir / "check.err"
+        try:
+            verdict = self._tenon(name, variant, vdir, agent, workspace).gate(
+                agent,
+                pins=variant.get("pins") or None,
                 cwd=agent,
-                stdout=out,
-                stderr=errf,
-                env=self._child_env(variant, vdir, agent, workspace),
+                log=log,
+                errlog=errlog,
             )
-            proc.wait()
-        self._reap(name)
-        # The exit code cannot tell these apart: gate_failed and error both
-        # exit 1. Only the terminator's outcome can, and the difference is
-        # whether downstream scores this variant at all.
-        terminator, diagnostics = read_terminator(log, f"tenon check ({err})")
-        outcome = terminator.get("outcome", "")
-        self.set(name, outcome=outcome)
-        if outcome == "ok":
-            return terminator.get("fingerprint", "")
-        if outcome == "gate_failed":
-            digest = terminator.get("source_digest", "")
-            ids = [d.get("id", "") for d in diagnostics if d.get("severity") == "error"]
-            # The diagnostic ids are the finding. They go on the record, not
-            # only into the exception text, so `collect` can say what was
-            # rejected without anyone reading the log.
-            self.set(name, source_digest=digest, diagnostics=ids)
-            raise FanoutError(
-                f"tenon check rejected {agent}: {','.join(ids) or 'no diagnostics'}; "
-                f"source_digest={digest or 'unknown'}; see {log}"
-            )
-        raise TenonEnvironmentError(
-            f"tenon check could not run: {terminator.get('error', 'unknown')}; see {err}"
+        finally:
+            self._reap(name)
+        if verdict.ok:
+            self.set(name, outcome="ok")
+            return verdict.fingerprint
+        # The diagnostic ids are the finding. They go on the record, not only
+        # into the exception text, so `collect` can say what was rejected
+        # without anyone reading the log.
+        ids = list(verdict.rejected)
+        self.set(
+            name,
+            outcome="gate_failed",
+            source_digest=verdict.source_digest,
+            diagnostics=ids,
+        )
+        raise FanoutError(
+            f"the gate rejected {agent}: {','.join(ids) or 'no diagnostics'}; "
+            f"source_digest={verdict.source_digest or 'unknown'}; see {log}"
         )
 
     def _apply(self, name: str, variant: dict, vdir: Path, agent: Path, workspace: Path) -> None:
         self.set(name, status=APPLYING)
-        argv = [
-            self.spec["tenon"],
-            "apply",
-            str(agent),
-            "--harness",
-            self.spec["harness"],
-            "--workspace",
-            str(workspace),
-        ]
-        argv += ["--format", "jsonl"]
-        if variant.get("pins"):
-            argv += ["--pins", variant["pins"]]
-        log = vdir / "apply.jsonl"
-        err = vdir / "apply.err"
-        with log.open("wb") as out, err.open("wb") as errf:
-            proc = self._spawn(
-                name,
-                argv,
+        log, errlog = vdir / "apply.jsonl", vdir / "apply.err"
+        try:
+            applied = self._tenon(name, variant, vdir, agent, workspace).compile(
+                agent,
+                workspace,
+                pins=variant.get("pins") or None,
                 cwd=workspace,
-                stdout=out,
-                stderr=errf,
-                env=self._child_env(variant, vdir, agent, workspace),
+                log=log,
+                errlog=errlog,
             )
-            proc.wait()
-        self._reap(name)
-        terminator, diagnostics = read_terminator(log, f"tenon apply ({err})")
-        outcome = terminator.get("outcome", "")
-        self.set(name, outcome=outcome)
-        if outcome == "ok":
-            self.set(
-                name,
-                written=terminator.get("written") or [],
-                removed=terminator.get("removed") or [],
-                managed_tools=terminator.get("managed_tools") or [],
-            )
-            return
-        if outcome == "gate_failed":
-            # check passed on this same source moments ago, with the same
-            # harness and the same pin set, so apply ran the same gate and
+        except GateContradiction as err:
+            # The gate passed on this same source moments ago, with the same
+            # harness and the same pin set, so compile ran the same gate and
             # this is a contract violation worth naming loudly. Naming it
             # means recording what it rejected, not only that it did.
-            digest = terminator.get("source_digest", "")
-            ids = [d.get("id", "") for d in diagnostics if d.get("severity") == "error"]
-            self.set(name, source_digest=digest, diagnostics=ids)
-            raise FanoutError(
-                f"tenon apply rejected a source tenon check accepted with the same "
-                f"harness and pins: {','.join(ids) or 'no diagnostics'}; "
-                f"source_digest={digest or 'unknown'}; see {log}"
+            ids = [d.id for d in err.diagnostics]
+            self.set(
+                name,
+                outcome="gate_failed",
+                source_digest=err.source_digest,
+                diagnostics=ids,
             )
-        raise TenonEnvironmentError(
-            f"tenon apply could not run: {terminator.get('error', 'unknown')}; see {err}"
+            raise FanoutError(f"{err}; see {log}") from None
+        finally:
+            self._reap(name)
+        self.set(
+            name,
+            outcome="ok",
+            written=list(applied.written),
+            removed=list(applied.removed),
+            managed_tools=list(applied.managed_tools),
         )
 
     def _dispatch(self, name: str, variant: dict, vdir: Path, agent: Path, workspace: Path) -> None:
         self.set(name, status=RUNNING)
-        argv = [
-            self.spec["tenon"],
-            "run",
-            str(agent),
-            "--workspace",
-            str(workspace),
-            "--harness",
-            self.spec["harness"],
-            "--input",
-            "jsonl",
-            "--timeout",
-            f"{self.spec['timeout']}s",
-        ]
-        if self.spec["turn_timeout"]:
-            argv += ["--turn-timeout", f"{self.spec['turn_timeout']}s"]
-        if variant.get("pins"):
-            argv += ["--pins", variant["pins"]]
-
-        lines = [
-            json.dumps({"input_id": f"{self.spec['run']}-{name}-{i}", "text": text})
+        events, errlog = vdir / "events.jsonl", vdir / "run.err"
+        inputs = [
+            {"input_id": f"{self.spec['run']}-{name}-{i}", "text": text}
             for i, text in enumerate(variant["task"], start=1)
         ]
-        payload = ("\n".join(lines) + "\n").encode()
-        events = vdir / "events.jsonl"
-        err = vdir / "run.err"
-        with events.open("wb") as out, err.open("wb") as errf:
-            proc = self._spawn(
-                name,
-                argv,
+        try:
+            result = self._tenon(name, variant, vdir, agent, workspace).dispatch(
+                agent,
+                workspace,
+                inputs,
+                pins=variant.get("pins") or None,
+                timeout_s=self.spec["timeout"],
+                turn_timeout_s=self.spec["turn_timeout"],
+                events_path=events,
+                stderr_path=errlog,
                 cwd=workspace,
-                stdout=out,
-                stderr=errf,
-                stdin=subprocess.PIPE,
-                env=self._child_env(variant, vdir, agent, workspace),
             )
-            try:
-                proc.stdin.write(payload)
-                proc.stdin.close()
-            except BrokenPipeError:
-                pass
-            code = proc.wait()
-        self._reap(name)
-        turns = summarize_turns(events)
-        completion = read_run_completion(events, f"tenon run ({err})")
-        self.set(name, turns=turns, run_exit_code=code, outcome=completion.get("outcome", ""))
-        counts = completion.get("turns") or {}
-        # run.completed's counts are the dispatcher's own tally. If the
-        # per-input reduction disagrees, the stream this reduction read was
-        # truncated, and every count derived from it is wrong.
-        reduced = {}
-        for record in turns:
-            key = "process_failed" if record["status"] == "driver_failed" else record["status"]
-            reduced[key] = reduced.get(key, 0) + 1
-        if counts and {k: v for k, v in counts.items() if v} != reduced:
-            raise TenonEnvironmentError(
-                f"tenon run reported turns {counts} but {events} reduces to {reduced}; "
-                "the event stream is truncated"
-            )
-        outcome = completion.get("outcome", "")
-        if outcome == "ok":
+        finally:
+            self._reap(name)
+        self.set(
+            name,
+            turns=list(result.per_input),
+            run_exit_code=result.exit_code,
+            outcome=result.outcome,
+        )
+        if result.outcome == "ok":
             # A completed dispatch, whatever its turns did. turns.failed is a
             # score input, not a fanout failure.
             return
-        if outcome == "gate_failed":
-            digest = completion.get("source_digest", "")
-            self.set(name, source_digest=digest)
+        if result.outcome == "timed_out":
+            # A variant slower than its budget is a finding ABOUT the variant,
+            # so it is FAILED and scored, not ERRORED and dropped. Dropping it
+            # would let a search drift toward whatever fits the budget without
+            # ever paying for being slow.
             raise FanoutError(
-                f"tenon run rejected the agent at dispatch; "
-                f"source_digest={digest or 'unknown'}; see {events}"
+                f"the variant's {self.spec['timeout']}s budget expired and the dispatch "
+                f"was terminated; {sum(result.turns.values())} of {len(inputs)} turns "
+                f"finished; see {events}"
             )
-        raise TenonEnvironmentError(
-            f"tenon run could not run: {completion.get('error', 'unknown')}; see {err}"
-        )
+        if result.outcome == "gate_failed":
+            self.set(name, source_digest=result.source_digest)
+            raise FanoutError(
+                f"dispatch rejected the agent at the gate; "
+                f"source_digest={result.source_digest or 'unknown'}; see {events}"
+            )
+        raise TenonEnvironment(f"dispatch ended {result.outcome!r}; see {errlog}")
 
     # -- driving the pool --------------------------------------------------
 
@@ -776,112 +743,14 @@ class Supervisor:
         return 1 if failed else 0
 
 
-def read_terminator(path: Path, what: str) -> tuple:
-    """Split a tenon --format jsonl stream into its terminator and everything
-    before it.
-
-    Every jsonl-mode tenon command ends with exactly one object carrying an
-    "outcome": "ok", "gate_failed", or "error". That field is the
-    authoritative signal — exit 1 covers both a rejected source and a broken
-    environment, and no field's mere presence distinguishes them. Objects
-    before the terminator are diagnostics.
-
-    A stream with no terminator is a truncated pipe, never a rejection."""
-    terminator: dict = {}
-    diagnostics: list = []
-    for line in path.read_text(errors="replace").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(obj, dict):
-            continue
-        if obj.get("outcome"):
-            terminator = obj
-        else:
-            diagnostics.append(obj)
-    if not terminator:
-        raise TenonEnvironmentError(f"{what} ended with no outcome; the stream in {path} is truncated")
-    return terminator, diagnostics
-
-
-def read_run_completion(events: Path, what: str) -> dict:
-    """The last run.completed event in a dispatch stream.
-
-    run has no --format: its stdout is the event stream, and its terminator
-    is an event like any other. It carries the dispatch's outcome, the turn
-    counts, and on failure the error prose or the rejected source's digest."""
-    completion: dict = {}
-    if events.exists():
-        for line in events.read_text(errors="replace").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(event, dict) and event.get("type") == "run.completed":
-                completion = event
-    if not completion:
-        raise TenonEnvironmentError(f"{what} emitted no run.completed event; the stream in {events} is truncated")
-    return {
-        "outcome": completion.get("outcome", ""),
-        "turns": completion.get("turns") or {},
-        "error": completion.get("error", ""),
-        "source_digest": completion.get("source_digest", ""),
-        "fingerprint": completion.get("fingerprint", ""),
-    }
-
-
 def summarize_turns(events: Path) -> list:
-    """Reduce a dispatch event stream to one terminal record per input id."""
-    terminal = {
-        "turn.completed": "completed",
-        "turn.failed": "failed",
-        "turn.cancelled": "cancelled",
-        "turn.uncertain": "uncertain",
-        "driver.process_failed": "driver_failed",
-    }
-    order: list = []
-    seen: dict = {}
+    """Reduce a dispatch event stream to one terminal record per input id.
+
+    The reduction itself lives in the adapter, beside the terminator reader it
+    is cross-checked against; this reads the file `collect` and `logs` name."""
     if not events.exists():
         return []
-    # A dispatcher terminalizes any input a previous one abandoned before it
-    # accepts an input of its own, emitting turn.uncertain for each, and
-    # deliberately leaves those out of run.completed's counts: they belong to
-    # the run that abandoned them. This reduction is cross-checked against
-    # those counts, so it has to draw the same line — the first
-    # input.accepted — or a complete stream reads as a truncated one.
-    accepted = False
-    for line in events.read_text(errors="replace").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        kind = event.get("type")
-        if kind == "input.accepted":
-            accepted = True
-            continue
-        if kind not in terminal or not accepted:
-            continue
-        input_id = event.get("input_id") or ""
-        if input_id not in seen:
-            order.append(input_id)
-        seen[input_id] = {
-            "input_id": input_id,
-            "status": terminal[kind],
-            "reason": event.get("reason", ""),
-            "session_id": event.get("session_id", ""),
-            "fingerprint": event.get("fingerprint", ""),
-        }
-    return [seen[i] for i in order]
+    return list(tenon_api.summarize_turns(events.read_text(errors="replace")))
 
 
 def agent_text(events: Path) -> str:
@@ -1260,6 +1129,9 @@ def main(argv: list) -> int:
     args = parser.parse_args(argv)
     try:
         return args.func(args)
+    except TenonEnvironment as err:
+        print(f"fanout: tenon environment failure: {err}", file=sys.stderr)
+        return 1
     except FanoutError as err:
         print(f"fanout: {err}", file=sys.stderr)
         return 1

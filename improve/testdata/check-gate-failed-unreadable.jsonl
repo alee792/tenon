@@ -1,0 +1,2 @@
+{"id":"project.root.missing","severity":"error","path":".","rule":"the agent root must be an existing directory: /nope/nothing"}
+{"outcome":"gate_failed"}
