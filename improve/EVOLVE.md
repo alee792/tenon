@@ -111,7 +111,7 @@ mutator made, so the record answers *which kind of change produced the gains*
 with no extra instrumentation:
 
 ```
-mutator               n    mean    best
+mutator                n    mean    best
 crossover+grow         3   0.417   0.625
 edit                   8   0.312   0.500
 grow                   1   0.125   0.125
@@ -154,7 +154,7 @@ scores 0. `EVOLVE_WORKSPACE` is exported so a test-suite scorer can just `cd`
 into the variant's checkout — see
 [`examples/score-tests.sh`](examples/score-tests.sh).
 
-A variant fanout marked `errored` — tenon reported outcome
+A variant that fanout marked `errored` — tenon reported outcome
 `error`, so the environment failed rather than the candidate — is never handed
 to `score` at all. It is logged as a warning and dropped, and a genome left
 with no other sample stays unscored (`-` in the log and `null` in the lineage)
