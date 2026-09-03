@@ -1,0 +1,1 @@
+{"schema_version":1,"sequence":1,"type":"run.completed","harness":"claude","conversation":"local","fingerprint":"","outcome":"gate_failed","turns":{"completed":0,"failed":0,"uncertain":0,"process_failed":0,"cancelled":0},"source_digest":"sha256:58413c4d7ada1c80cc1ba6a1f400e9016c936f1c5f9e1eaf5b60d4fa5bf5e107"}

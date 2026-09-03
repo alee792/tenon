@@ -1024,7 +1024,7 @@ and the last-resort signal.
 ### G34. What the leaderboard still scores that it should not
 
 PR 1 of the improve import (#64) made `outcome: error` unscorable:
-fanout lands the variant in `errored`, evolve's `score_generation` skips
+fanout lands the variant in `errored`, evolve's `score_round` skips
 it, and a genome with no measurement carries `score: null` rather than
 `0.0`. Two neighbours of that rule were left as they were, deliberately,
 because each is a behaviour decision rather than a bug:
@@ -1041,5 +1041,29 @@ because each is a behaviour decision rather than a bug:
   Whether a timeout is an environment failure or a finding about the
   variant is a policy the spec should state, not a fall-through.
 
-Both belong with the adapter (PR 3), where the outcome vocabulary gets its
-one decoder and the scorers stop reading raw status strings.
+**Both are settled, in PR 3 (#66), where the outcome vocabulary got its one
+decoder.**
+
+*Missing and cancelled* joined `errored` as unscored: all three mean the loop
+learned nothing about the genome, and every shipped scorer would have turned
+each into a `0.0` that reads as evidence. `score_round` drops the sample
+and warns; a genome with no sample left stays `score: null` and is evaluated
+again.
+
+*A timeout is a FINDING about the variant*, not an environment failure. The
+agent really was slower than the budget, and dropping it lets a search drift
+toward whatever fits the budget without ever paying for being slow. The
+implementation does not read tenon's error prose — that would make the policy
+a string comparison against text tenon is free to reword, and tenon's own
+`--timeout` overrun is structurally identical to any other environment failure
+(`outcome: "error"`, `error: "context deadline exceeded"`, verified against
+the binary). Instead the adapter owns the wall clock: it terminates the
+dispatch's process group on expiry — SIGTERM, then SIGKILL after a grace, so
+the harness and its tool servers go too — and returns `outcome: "timed_out"`
+with whatever turns finished first. fanout maps that to `failed`, and evolve
+scores it like any other failed variant.
+
+The remaining wish is tenon-side and small: a deadline that ends the stream
+distinguishably (an `outcome` of its own, or a `reason` on `run.completed`)
+would let a consumer read the fact rather than enforce it. Until then the
+enforcement lives here, which is also where the budget is chosen.

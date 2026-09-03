@@ -1,0 +1,5 @@
+{"path":"instructions.md","hash":"sha256:5d7cb81d0db3d901b68f8ba04d9384853fb77519bf707e21070dd2f7758515e2","executable":false}
+{"path":"skills/direction-audit/SKILL.md","hash":"sha256:811fed2a47bf1b408a48dd8ea7762edf2ae85e00e71e9b41a38d5b175064f6ad","executable":false}
+{"path":"skills/docs-style/SKILL.md","hash":"sha256:e7cda6495b7d581c30701edefb4b467b14737047d030bc8d0d5ff1a8c12c3659","executable":false}
+{"path":"skills/north-star-review/SKILL.md","hash":"sha256:de24eb563f52622b08151605a43515af2c1911d105d035de26ed435f15ef6dbb","executable":false}
+{"outcome":"ok","agent":"maintainer","fingerprint":"sha256:74ef9f4a0f28656f44c5aa2aba6b861be1579487689cca0940c5b97df406bec1"}

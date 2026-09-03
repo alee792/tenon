@@ -1,0 +1,1 @@
+{"outcome":"ok","agent":"maintainer","harness":"claude","workspace":"/work/ws","fingerprint":"sha256:74ef9f4a0f28656f44c5aa2aba6b861be1579487689cca0940c5b97df406bec1","written":[".claude/skills/direction-audit/SKILL.md",".claude/skills/docs-style/SKILL.md",".claude/skills/north-star-review/SKILL.md",".mcp.json","CLAUDE.md"],"removed":null,"managed_tools":["echo"]}
