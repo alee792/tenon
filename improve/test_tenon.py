@@ -20,9 +20,13 @@ Stdlib self-runner, no pytest: `python3 improve/test_tenon.py`.
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -45,7 +49,22 @@ def fixture(name: str) -> str:
 # is how every one of these was written before the adapter existed. The word
 # "run" appears constantly as English and as a Python identifier, so the
 # pattern deliberately matches only the quoted-literal form.
-SUBCOMMANDS = ("check", "apply", "drift", "run", "clean", "mcp", "stage", "pins")
+SUBCOMMANDS = (
+    "check",
+    "apply",
+    "drift",
+    "run",
+    "clean",
+    "mcp",
+    "stage",
+    "pins",
+    "schedule",
+    "fingerprint",
+    "validate",
+    "plugin",
+    "tools",
+    "hooks",
+)
 # The flags are unambiguous: nothing else in this module spells them.
 FLAGS = (
     "--format",
@@ -59,10 +78,24 @@ FLAGS = (
     "--input",
     "--conversation",
     "--model",
+    "--timeout",
+    "--force",
+    "--input-id",
+    "--max-active-turns",
 )
 
+# An argv element is a quoted literal followed by whatever ends it: a comma
+# when it has a successor, or the bracket that closes the list when it is
+# last. `[binary, "clean"]` is as much a tenon invocation as
+# `[binary, "clean", ...]`, and the pattern must see both.
+#
+# Accepting a closing bracket means the pattern must then refuse the two
+# shapes that look identical and are not argv: a subscript, `spec["run"]`,
+# and a call argument, `record.get("fingerprint", "")`. Both are excluded by
+# what precedes the quote — a `[` that follows a name, or a `(` — because
+# neither ever precedes an element of a list being built as argv.
 _SUBCOMMAND_RE = re.compile(
-    r"""(?<![\w.])(["'])(%s)\1\s*,""" % "|".join(SUBCOMMANDS)
+    r"""(?<![\w.(])(?<![\w\]]\[)(["'])(%s)\1\s*[,\]]""" % "|".join(SUBCOMMANDS)
 )
 _FLAG_RE = re.compile(
     r"""(["'])(%s)\1""" % "|".join(re.escape(f) for f in FLAGS)
@@ -76,8 +109,28 @@ _FLAG_RE = re.compile(
 #   * an argparse line defines OUR CLI, never tenon's argv;
 #   * anything else says so in place, on the line, so the exemption is read
 #     next to the code it excuses rather than in a list somewhere else.
+#
+# The in-place marker is SCOPED TO THE WORDS IT NAMES. A blanket line
+# exemption is the one thing this grep cannot afford: a line marked because
+# it mentions the spec key `pins` would go on excusing a real `"apply"` argv
+# that lands beside it later. Bare, the marker excuses only the two words
+# that are ordinary English or ordinary spec vocabulary; anything else must
+# be named, `# not tenon argv: tools, mcp`, and then only those are excused.
 _ARGPARSE_RE = re.compile(r"\badd_(argument|parser)\(")
 MARKER = "# not tenon argv"
+MARKER_DEFAULT = ("run", "pins")
+_MARKER_RE = re.compile(re.escape(MARKER) + r"(\s*:\s*([^\u2014]*))?")
+
+
+def _excused(line: str) -> set:
+    """The tokens an in-place marker on this line excuses."""
+    found = _MARKER_RE.search(line)
+    if not found:
+        return set()
+    named = (found.group(2) or "").strip()
+    if not named:
+        return set(MARKER_DEFAULT)
+    return {word.strip() for word in named.split(",") if word.strip()}
 
 
 def confinement_violations(text: str) -> list:
@@ -85,9 +138,11 @@ def confinement_violations(text: str) -> list:
     out = []
     for number, line in enumerate(text.splitlines(), start=1):
         stripped = line.strip()
-        if stripped.startswith("#") or MARKER in line or _ARGPARSE_RE.search(line):
+        if stripped.startswith("#") or _ARGPARSE_RE.search(line):
             continue
-        if _SUBCOMMAND_RE.search(line) or _FLAG_RE.search(line):
+        named = {m.group(2) for m in _SUBCOMMAND_RE.finditer(line)}
+        named |= {m.group(2) for m in _FLAG_RE.finditer(line)}
+        if named - _excused(line):
             out.append((number, stripped))
     return out
 
@@ -133,16 +188,52 @@ def test_confinement_fires_on_a_planted_violation():
         'argv += ["--harness", harness]',
         'argv += ["--workspace", str(workspace)]',
         'argv += ["--emit", "files"]',
+        'argv += ["--timeout", "600s"]',
+        'argv += ["--force"]',
+        'argv += ["--input-id", ident]',
+        'argv += ["--max-active-turns", "4"]',
+        'argv = [binary, "schedule", "run", str(agent)]',
+        'argv = [binary, "plugin", "status"]',
+        'argv = [binary, "validate", str(agent)]',
+        'argv = [binary, "fingerprint", "show"]',
+        'argv = [binary, "tools", "list"]',
+        'argv = [binary, "hooks", "list"]',
+        # A subcommand in LAST position closes the list rather than taking a
+        # comma. It is the same invocation and must be caught the same way.
+        'argv = [binary, "clean"]',
+        'proc = spawn([self.binary, "check"])',
     ]
     for line in planted:
         assert confinement_violations(line), f"the confinement grep no longer matches {line!r}"
     # And it does not fire on ordinary prose or identifiers.
     for line in ["def run(self):", "self.run_git(repo)", "# tenon check is the gate", "runs = []"]:
         assert not confinement_violations(line), f"the confinement grep over-matches {line!r}"
+    # Nor on the two shapes that a last-position match would otherwise catch:
+    # a subscript and a call argument are not argv.
+    for line in ['self.spec["run"]', 'record.get("fingerprint", "")', "summary['run']"]:
+        assert not confinement_violations(line), f"the confinement grep over-matches {line!r}"
     # The two exemptions apply, and only where they are written.
     assert not confinement_violations('start.add_argument("--harness", help="target harness")')
-    assert not confinement_violations('argv = [self.fanout, "clean", name]  ' + MARKER)
-    assert confinement_violations('argv = [self.fanout, "clean", name]')
+
+
+def test_the_in_place_marker_excuses_only_the_words_it_names():
+    """A blanket line exemption is what this grep cannot afford: the line
+    marked for its `pins` spec key would go on excusing a real argv that
+    lands beside it later."""
+    # Bare, the marker covers the two ordinary words and nothing else.
+    assert not confinement_violations('pins = args.pins or ""  ' + MARKER)
+    assert confinement_violations('argv = [self.fanout, "clean", name]  ' + MARKER)
+    # Named, it covers exactly what it names.
+    assert not confinement_violations('argv = [self.fanout, "clean", name]  ' + MARKER + ": clean")
+    assert not confinement_violations('D = ("skills", "tools", "mcp")  ' + MARKER + ": tools, mcp")
+    # And a word it does not name still fires, on the very same line.
+    assert confinement_violations(
+        'argv = [self.fanout, "clean", "--workspace", ws]  ' + MARKER + ": clean"
+    )
+    # Prose after an em dash is commentary, not a name.
+    assert not confinement_violations(
+        'argv = [self.fanout, "clean"]  ' + MARKER + ": clean \u2014 fanout's own subcommand"
+    )
 
 
 def test_the_adapter_itself_still_names_the_cli():
@@ -239,26 +330,95 @@ def test_files_records_are_the_authored_inventory():
 
 
 # --------------------------------------------------------------------------
+# replaying a fixture THROUGH the adapter
+# --------------------------------------------------------------------------
+
+
+class FakeProc:
+    """A finished tenon process whose output is a recorded fixture.
+
+    It honours the two stream shapes `Tenon` uses: a file handle, which the
+    adapter reads back from disk, and a PIPE, which it takes from
+    `communicate`. Nothing else about a process is simulated — these tests
+    are about the parse, and the process plumbing has tests of its own."""
+
+    def __init__(self, out: bytes, err: bytes, code: int, stdout, stderr):
+        self._out, self._err, self.returncode = out, err, code
+        self._stdout, self._stderr = stdout, stderr
+
+    def communicate(self, input=None, timeout=None):
+        out = err = None
+        if hasattr(self._stdout, "write"):
+            self._stdout.write(self._out)
+        else:
+            out = self._out
+        if hasattr(self._stderr, "write"):
+            self._stderr.write(self._err)
+        else:
+            err = self._err
+        return out, err
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+
+class Replay:
+    """A `spawn` that answers each call with the next recorded fixture.
+
+    The point is that the fixture goes through `Tenon.compile`,
+    `Tenon.drifted` and `Tenon.clean` — argv construction, stream capture,
+    terminator decoding, dataclass — rather than through a second parser
+    written in the test, which would only prove the test agrees with itself."""
+
+    def __init__(self, *names, exit_code: int = 0, err: bytes = b""):
+        # A name is a recorded fixture; raw bytes are for the one thing no
+        # recording can supply — a terminator word tenon does not emit yet.
+        self.streams = [n if isinstance(n, bytes) else fixture(n).encode() for n in names]
+        self.exit_code = exit_code
+        self.err = err
+        self.argv = []
+
+    def __call__(self, argv, *, cwd=None, stdout=None, stderr=None, stdin=None,
+                 env=None, new_session=False):
+        self.argv.append(list(argv))
+        return FakeProc(self.streams.pop(0), self.err, self.exit_code, stdout, stderr)
+
+
+def replaying(*names, **kw) -> adapter.Tenon:
+    return adapter.Tenon("tenon", "claude", spawn=Replay(*names, **kw))
+
+
+# --------------------------------------------------------------------------
 # compile
 # --------------------------------------------------------------------------
 
 
 def test_apply_terminator_becomes_applied():
-    terminator, _ = adapter.read_terminator(fixture("apply-ok"))
-    assert terminator["outcome"] == "ok"
-    applied = adapter.Applied(
-        fingerprint=terminator["fingerprint"],
-        agent=terminator.get("agent", ""),
-        harness=terminator.get("harness", ""),
-        workspace=terminator.get("workspace", ""),
-        # tenon serializes an empty removed list as null, not [].
-        written=tuple(terminator.get("written") or ()),
-        removed=tuple(terminator.get("removed") or ()),
-        managed_tools=tuple(terminator.get("managed_tools") or ()),
-    )
+    applied = replaying("apply-ok").compile(Path("agent"), Path("/work/ws"))
     assert applied.harness == "claude"
+    assert applied.fingerprint.startswith("sha256:")
     assert "CLAUDE.md" in applied.written
+    # tenon serializes an empty removed list as null, not [].
     assert applied.removed == ()
+    assert applied.managed_tools == ("echo",)
+
+
+def test_apply_gate_failure_is_a_contract_violation_not_a_verdict():
+    """check and apply run the same gate, so a source the gate accepted and
+    apply rejects is tenon contradicting itself — never a finding about the
+    candidate, and never something a caller can mistake for one."""
+    t = replaying("check-gate-failed", exit_code=1)
+    try:
+        t.compile(Path("agent"), Path("/work/ws"))
+    except adapter.GateContradiction as err:
+        assert err.source_digest.startswith("sha256:")
+        assert err.diagnostics and all(d.severity == "error" for d in err.diagnostics)
+        assert err.diagnostics[0].id in str(err)
+    else:
+        raise AssertionError("an apply-side gate failure must raise GateContradiction")
 
 
 # --------------------------------------------------------------------------
@@ -266,24 +426,8 @@ def test_apply_terminator_becomes_applied():
 # --------------------------------------------------------------------------
 
 
-def drift_report(name: str) -> adapter.DriftReport:
-    """The parse `drifted` performs, over a recorded stream."""
-    terminator, diagnostics = adapter.read_terminator(fixture(name))
-    outcome = terminator["outcome"]
-    if outcome == "ok":
-        return adapter.DriftReport(
-            matched=True,
-            fingerprint=terminator.get("fingerprint", ""),
-            unchanged=tuple(terminator.get("unchanged") or ()),
-        )
-    if outcome == "drift":
-        return adapter.DriftReport(matched=False, findings=tuple(diagnostics))
-    return adapter.DriftReport(
-        matched=False,
-        gate_failed=True,
-        source_digest=terminator.get("source_digest", ""),
-        findings=tuple(d for d in diagnostics if d.severity == "error"),
-    )
+def drift_report(name: str, **kw) -> adapter.DriftReport:
+    return replaying(name, **kw).drifted(Path("agent"), Path("/work/ws"))
 
 
 def test_drift_ok():
@@ -292,16 +436,29 @@ def test_drift_ok():
 
 
 def test_drift_reports_the_changed_paths_and_carries_no_digest():
-    r = drift_report("drift-drift")
+    r = drift_report("drift-drift", exit_code=1)
     assert not r.matched and not r.gate_failed
     assert r.findings and r.findings[0].path == "CLAUDE.md"
     assert r.source_digest == "", "a drift terminator carries no digest: the source passed"
 
 
 def test_drift_gate_failed_is_distinguishable_from_drift():
-    r = drift_report("drift-gate-failed")
+    r = drift_report("drift-gate-failed", exit_code=1)
     assert not r.matched and r.gate_failed
     assert r.source_digest.startswith("sha256:")
+
+
+def test_drift_with_an_unknown_outcome_is_an_environment_failure():
+    """The vocabulary is tenon's to extend. A word this adapter has never
+    seen says nothing about the workspace, so it is never reduced to
+    `matched=False` — which would read as a drift finding and be scored."""
+    t = adapter.Tenon("tenon", "claude", spawn=Replay(b'{"outcome":"rearranged"}\n'))
+    try:
+        t.drifted(Path("agent"), Path("/work/ws"))
+    except adapter.TenonEnvironment as err:
+        assert "rearranged" in str(err)
+    else:
+        raise AssertionError("an unknown drift outcome must raise TenonEnvironment")
 
 
 # --------------------------------------------------------------------------
@@ -310,26 +467,67 @@ def test_drift_gate_failed_is_distinguishable_from_drift():
 
 
 def test_clean_ok_lists_what_it_removed():
-    terminator, _ = adapter.read_terminator(fixture("clean-ok"))
-    removed = [r["removed"] for r in adapter.read_records(fixture("clean-ok")) if r.get("removed")]
-    assert terminator["outcome"] == "ok"
-    assert terminator["removed"] == len(removed) and "CLAUDE.md" in removed
+    removed = replaying("clean-ok").clean(Path("/work/ws"))
+    assert "CLAUDE.md" in removed and len(removed) == 5
 
 
 def test_clean_blocked_is_a_finding_with_named_paths():
-    terminator, _ = adapter.read_terminator(fixture("clean-blocked"))
-    blocked = [r for r in adapter.read_records(fixture("clean-blocked")) if r.get("blocked")]
-    assert terminator["outcome"] == "blocked"
-    assert blocked[0]["blocked"] == "CLAUDE.md" and blocked[0]["reason"] == "modified"
+    try:
+        replaying("clean-blocked", exit_code=1).clean(Path("/work/ws"))
+    except adapter.Blocked as err:
+        assert err.paths and err.paths[0]["blocked"] == "CLAUDE.md"
+        assert err.paths[0]["reason"] == "modified"
+        assert "force=True to overwrite" in str(err), "modified IS forceable; say so"
+        assert err.removed == ()
+    else:
+        raise AssertionError("a blocked clean must raise Blocked")
+
+
+def test_clean_blocked_on_containment_does_not_advise_forcing():
+    """tenon refuses --force for the containment reasons: forcing widens what
+    it removes inside a workspace and never where it removes. Advising it
+    would be advice that cannot work."""
+    try:
+        replaying("clean-blocked-containment", exit_code=1).clean(Path("/work/ws"))
+    except adapter.Blocked as err:
+        message = str(err)
+        assert "escapes-workspace" in message
+        assert "does not override" in message
+        assert "pass force=True" not in message
+    else:
+        raise AssertionError("a containment-blocked clean must raise Blocked")
+
+
+def test_a_blocked_clean_carries_what_it_removed_first():
+    """tenon re-classifies each path immediately before removing it, so a
+    clean can stop partway: the workspace is in neither the before state nor
+    the after one, and the removals that already happened are the only record
+    of which."""
+    try:
+        replaying("clean-blocked-partial", exit_code=1).clean(Path("/work/ws"))
+    except adapter.Blocked as err:
+        assert ".mcp.json" in err.removed and len(err.removed) == 4
+        assert err.paths[0]["blocked"] == "CLAUDE.md"
+        assert "4 file(s) were removed before it stopped" in str(err)
+    else:
+        raise AssertionError("a partially blocked clean must raise Blocked")
 
 
 def test_clean_without_a_record_is_an_environment_failure():
     try:
-        adapter.read_terminator(fixture("clean-error"))
+        replaying("clean-error", exit_code=1).clean(Path("/work/ws"))
     except adapter.TenonEnvironment:
         pass
     else:
         raise AssertionError("clean against a workspace with no record must raise")
+
+
+def test_clean_passes_force_through_only_when_asked():
+    replay = Replay("clean-ok", "clean-ok")
+    t = adapter.Tenon("tenon", "claude", spawn=replay)
+    t.clean(Path("/work/ws"))
+    t.clean(Path("/work/ws"), force=True)
+    assert "--force" not in replay.argv[0] and "--force" in replay.argv[1]
 
 
 # --------------------------------------------------------------------------
@@ -406,6 +604,166 @@ def test_dispatch_times_out_without_reading_any_error_prose():
         )
     assert result.outcome == "timed_out"
     assert result.per_input == () and result.turns == {}
+
+
+def test_dispatch_times_out_when_nothing_would_drain_its_pipes():
+    """`events_path` and `stderr_path` are optional, and with neither, stdout
+    and stderr are PIPEs. A dispatch that wrote the whole payload to stdin
+    before arming the clock deadlocks against a child that fills stderr
+    first: the parent blocks in write, the child blocks in write, and the
+    deadline never fires because it never started. One `communicate` writes
+    the input and drains every pipe under one clock, so it cannot happen."""
+    binary = sys.executable
+    # Floods stderr past a pipe buffer BEFORE reading a line of stdin, then
+    # hangs: nothing to parse, nothing to match on but the clock.
+    script = (
+        "import sys,time;"
+        "sys.stderr.write('x' * 400000);"
+        "sys.stderr.flush();"
+        "sys.stdin.read();"
+        "time.sleep(60)"
+    )
+    spawned = []
+
+    def spawn(argv, cwd=None, new_session=False, **kw):
+        proc = subprocess.Popen(
+            [binary, "-c", script], start_new_session=new_session, **kw
+        )
+        spawned.append(proc)
+        return proc
+
+    t = adapter.Tenon(binary, "claude", spawn=spawn)
+    # A payload larger than a pipe buffer, so the stdin write cannot complete
+    # on its own either.
+    inputs = [{"input_id": f"i{i}", "text": "y" * 4000} for i in range(50)]
+    box = {}
+
+    def run():
+        box["started"] = time.time()
+        box["result"] = t.dispatch(Path("agent"), Path("/work/ws"), inputs, timeout_s=1)
+        box["elapsed"] = time.time() - box["started"]
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(30)
+    if worker.is_alive():
+        for proc in spawned:
+            proc.kill()
+        raise AssertionError(
+            "dispatch never returned: a pipe nobody drains, or a clock armed "
+            "after the payload was written"
+        )
+    assert box["result"].outcome == "timed_out"
+    assert box["elapsed"] < 20, f"the clock took {box['elapsed']:.1f}s to fire"
+    for proc in spawned:
+        assert proc.poll() is not None, "the dispatch left an orphan behind"
+
+
+# --------------------------------------------------------------------------
+# terminating a tree
+# --------------------------------------------------------------------------
+
+
+def alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def test_terminate_tree_does_not_kill_the_process_doing_the_terminating():
+    """A child spawned WITHOUT its own session shares this process's group,
+    and `killpg` on that group is suicide: the supervisor SIGTERMs itself,
+    its whole thread pool, and in the foreground case the user's shell job.
+
+    The proof runs inside a helper that leads its own session, so a
+    regression fails this one test instead of taking the test runner with
+    it — which is exactly what the bug does."""
+    helper = (
+        "import os,subprocess,sys,time\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "import tenon\n"
+        "slow = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        "assert os.getpgid(slow.pid) == os.getpgid(0), 'the child must share our group'\n"
+        "tenon.terminate_tree(slow, grace_s=1)\n"
+        "print(slow.poll())\n"
+        "print('survived', flush=True)\n"
+    )
+    done = subprocess.run(
+        [sys.executable, "-c", helper, str(HERE)],
+        capture_output=True, text=True, timeout=60, start_new_session=True,
+    )
+    assert "survived" in done.stdout, (
+        "terminate_tree killed the process that called it; stdout="
+        f"{done.stdout!r} stderr={done.stderr!r}"
+    )
+    status = int(done.stdout.splitlines()[0])
+    assert status is not None and status < 0, f"the shared-group child was not signalled: {status}"
+
+
+def test_terminate_tree_takes_down_a_grandchild_of_a_session_leader():
+    """The group is the whole point when the child DOES own one: signalling
+    the dispatcher alone leaves the harness it started — and any tool server
+    under that — running and burning budget."""
+    src = (
+        "import subprocess,sys,time;"
+        "g=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']);"
+        "print(g.pid, flush=True);"
+        "time.sleep(60)"
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-c", src], stdout=subprocess.PIPE, start_new_session=True
+    )
+    grandchild = int(proc.stdout.readline())
+    try:
+        adapter.terminate_tree(proc, grace_s=2)
+        assert proc.poll() is not None, "the session leader survived"
+        deadline = time.time() + 10
+        while alive(grandchild) and time.time() < deadline:
+            time.sleep(0.05)
+        assert not alive(grandchild), "the grandchild outlived the run that owned it"
+    finally:
+        proc.stdout.close()
+        if alive(grandchild):
+            os.kill(grandchild, 9)
+
+
+# --------------------------------------------------------------------------
+# the child environment fanout hands its hooks
+# --------------------------------------------------------------------------
+
+
+def test_fanout_child_env_is_the_adapters():
+    """fanout used to keep a private copy of `child_env`. It now calls the
+    adapter's, and this pins the behaviour that copy had: the TENON_HARNESS
+    pop, the FANOUT_* additions, and the variant's own env winning last.
+
+    It lives with the adapter's tests because it is the adapter's function
+    that has to keep the promise."""
+    sys.modules.pop("fanout", None)
+    import fanout  # noqa: E402
+
+    supervisor = fanout.Supervisor.__new__(fanout.Supervisor)
+    supervisor.spec = {"run": "r1", "harness": "claude", "tenon": "/bin/tenon"}
+    variant = {"name": "v1", "index": 2, "env": {"FANOUT_HARNESS": "mine", "EXTRA": "1"}}
+    os.environ["TENON_HARNESS"] = "codex"
+    os.environ["KEEP_ME"] = "yes"
+    try:
+        env = supervisor.child_env(variant, Path("/work/v1"), Path("/work/a"), Path("/work/ws"))
+    finally:
+        os.environ.pop("TENON_HARNESS", None)
+        os.environ.pop("KEEP_ME", None)
+    assert "TENON_HARNESS" not in env, "an inherited harness must not retarget a hook's tenon"
+    assert env["KEEP_ME"] == "yes", "the rest of the environment is inherited"
+    assert env["FANOUT_RUN"] == "r1" and env["FANOUT_VARIANT"] == "v1"
+    assert env["FANOUT_INDEX"] == "2" and env["FANOUT_TENON"] == "/bin/tenon"
+    assert env["FANOUT_AGENT_DIR"] == "/work/a" and env["FANOUT_WORKSPACE"] == "/work/ws"
+    assert env["FANOUT_VARIANT_DIR"] == "/work/v1"
+    assert env["EXTRA"] == "1"
+    assert env["FANOUT_HARNESS"] == "mine", "the variant's own env wins last"
 
 
 def test_a_truncated_event_stream_is_an_environment_failure():
@@ -500,14 +858,47 @@ def test_iterate_names_an_apply_gate_failure_as_a_contract_violation():
     assert it.phase_failed == "apply" and it.source_digest == "sha256:cc"
 
 
+TIMED_OUT = adapter.Dispatch(outcome="timed_out", turns={"completed": 0})
+
+
 def test_iterate_records_a_timed_out_run_as_a_finding():
+    t = FakeTenon(gate=OK_VERDICT, compile=OK_APPLIED, dispatch=TIMED_OUT, drifted=OK_DRIFT)
+    it = t.iterate(Path("a"), Path("w"), [])
+    assert not it.ok and it.phase_failed == "run" and it.outcome == "timed_out"
+
+
+def test_a_timed_out_run_still_gets_its_post_run_drift():
+    """A half-finished agent is exactly the one that may have rewritten its
+    own configuration, so the drift runs — but the run is still what failed,
+    and `timed_out` is still the scored finding."""
+    t = FakeTenon(gate=OK_VERDICT, compile=OK_APPLIED, dispatch=TIMED_OUT, drifted=OK_DRIFT)
+    it = t.iterate(Path("a"), Path("w"), [])
+    assert t.calls == ["gate", "compile", "dispatch", "drifted"]
+    assert it.phase_failed == "run" and it.outcome == "timed_out"
+    assert it.post_drift is OK_DRIFT
+
+
+def test_a_timed_out_run_that_also_drifted_reports_both():
+    drifted = adapter.DriftReport(matched=False, findings=(adapter.Diagnostic("d", "error"),))
+    t = FakeTenon(gate=OK_VERDICT, compile=OK_APPLIED, dispatch=TIMED_OUT, drifted=drifted)
+    it = t.iterate(Path("a"), Path("w"), [])
+    # The run is what failed; the drift is evidence, not a second phase.
+    assert it.phase_failed == "run" and it.outcome == "timed_out"
+    assert it.post_drift is drifted and not it.post_drift.matched
+
+
+def test_a_gate_failed_dispatch_skips_the_post_run_drift():
+    """No run happened, so there is nothing for a drift to have observed —
+    and a process spent to learn that is a process wasted at search scale."""
     t = FakeTenon(
         gate=OK_VERDICT,
         compile=OK_APPLIED,
-        dispatch=adapter.Dispatch(outcome="timed_out", turns={"completed": 0}),
+        dispatch=adapter.Dispatch(outcome="gate_failed", source_digest="sha256:dd"),
     )
     it = t.iterate(Path("a"), Path("w"), [])
-    assert not it.ok and it.phase_failed == "run" and it.outcome == "timed_out"
+    assert t.calls == ["gate", "compile", "dispatch"]
+    assert it.phase_failed == "run" and it.outcome == "gate_failed"
+    assert it.post_drift is None and it.source_digest == "sha256:dd"
 
 
 def test_iterate_lets_an_environment_failure_raise_out():

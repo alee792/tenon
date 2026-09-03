@@ -58,6 +58,19 @@ from typing import Iterable
 # SIGTERM; the grace is for that, not for the model.
 TERMINATE_GRACE_S = 10.0
 
+# The timeout relationship, stated once.
+#
+# tenon bounds `run --timeout` at 30 minutes. This adapter owns the verdict
+# (see `dispatch`), so tenon's deadline must never fire first: it is handed
+# the caller's budget plus HEADROOM, and a budget larger than
+# MAX_DISPATCH_TIMEOUT_S cannot be given that headroom under tenon's cap.
+# Callers that bound a budget — fanout, and evolve through it — bound it at
+# MAX_DISPATCH_TIMEOUT_S, not at tenon's cap, or the two clocks coincide and
+# a timed-out variant is reported as an environment error instead.
+TENON_RUN_TIMEOUT_CAP_S = 30 * 60
+TIMEOUT_BACKSTOP_HEADROOM_S = 30
+MAX_DISPATCH_TIMEOUT_S = TENON_RUN_TIMEOUT_CAP_S - TIMEOUT_BACKSTOP_HEADROOM_S
+
 
 class TenonEnvironment(Exception):
     """tenon terminated with `outcome: "error"`, or its stream carried no
@@ -79,10 +92,21 @@ class Blocked(Exception):
     A FINDING about the workspace, not an environment failure: the workspace
     really does hold an edit nobody adopted, and the caller decides whether
     to force. Distinct from TenonEnvironment, which `clean` reserves for a
-    workspace with no apply record for the harness at all."""
+    workspace with no apply record for the harness at all.
 
-    def __init__(self, message: str, *, paths: tuple = ()):
+    `force=True` is a remedy for SOME reasons only. tenon refuses `--force`
+    for the containment reasons — a recorded path that leaves the workspace,
+    one reached through a symlinked parent, one whose parent chain could not
+    be read — because forcing widens what tenon removes inside a workspace
+    and never where it removes. The message says which of the two it is."""
+
+    def __init__(self, message: str, *, paths: tuple = (), removed: tuple = ()):
         self.paths = paths
+        # A blocked clean can still be a PARTIAL clean: tenon removes what it
+        # can and stops at the first path it will not touch, so the removals
+        # that preceded the terminator are real and the workspace is in
+        # neither the before state nor the after one.
+        self.removed = removed
         super().__init__(message)
 
 
@@ -641,11 +665,14 @@ class Tenon:
     ) -> tuple:
         """Remove what compile wrote, from the workspace's own apply record.
 
-        Returns the removed paths. `blocked` — a recorded file was modified
-        since apply — raises Blocked, which is a finding about the workspace
-        and has a remedy (`force=True`). A workspace with no record for the
-        harness is `outcome: "error"` and raises TenonEnvironment: those two
-        refusals have different remedies, so they are different exceptions."""
+        Returns the removed paths. `blocked` raises Blocked, which is a
+        finding about the workspace; whether `force=True` is a remedy depends
+        on WHY tenon refused, so the message branches on the reasons the
+        stream named and `Blocked.removed` carries the paths that were
+        removed before it stopped — a blocked clean is a partial clean. A
+        workspace with no record for the harness is `outcome: "error"` and
+        raises TenonEnvironment: those two refusals have different remedies,
+        so they are different exceptions."""
         argv = [self.binary, "clean", "--workspace", str(workspace), *self._harness_args(harness)]
         if force:
             argv += ["--force"]
@@ -657,10 +684,9 @@ class Tenon:
             return tuple(r.get("removed", "") for r in records if r.get("removed"))
         if terminator["outcome"] == "blocked":
             blocked = tuple(r for r in records if r.get("blocked"))
-            names = ", ".join(r.get("blocked", "") for r in blocked[:4]) or "unknown"
+            removed = tuple(r.get("removed", "") for r in records if r.get("removed"))
             raise Blocked(
-                f"clean refused {workspace}: {names} changed since apply; pass force=True to overwrite",
-                paths=blocked,
+                _blocked_message(workspace, blocked, removed), paths=blocked, removed=removed
             )
         raise TenonEnvironment(
             f"unknown outcome {terminator['outcome']!r}", command=f"clean {workspace}"
@@ -710,8 +736,11 @@ class Tenon:
             argv += ["--conversation", conversation]
         # tenon's deadline is the backstop for a supervisor that died, not the
         # verdict; give it headroom so the adapter's clock is the one that
-        # fires, and stay inside tenon's own 30-minute cap.
-        backstop = min(int(timeout_s) + 30, 30 * 60)
+        # fires, and stay inside tenon's own cap. A budget above
+        # MAX_DISPATCH_TIMEOUT_S cannot be given that headroom — callers that
+        # bound a budget bound it there, so this clamp is the floor of last
+        # resort rather than the policy.
+        backstop = min(int(timeout_s) + TIMEOUT_BACKSTOP_HEADROOM_S, TENON_RUN_TIMEOUT_CAP_S)
         argv += ["--timeout", f"{backstop}s"]
         if turn_timeout_s:
             argv += ["--turn-timeout", f"{int(turn_timeout_s)}s"]
@@ -737,16 +766,16 @@ class Tenon:
                 # burning budget after the run this adapter reported is over.
                 new_session=True,
             )
-            try:
-                proc.stdin.write(payload)
-                proc.stdin.close()
-            except (BrokenPipeError, OSError):
-                pass
-            # communicate() would flush a stdin already closed above; the
-            # payload is fully written, so drop the handle rather than let it
-            # raise on a stream nothing more will be sent to.
-            proc.stdin = None
-            timed_out, captured_out, captured_err = self._wait_with_clock(proc, timeout_s)
+            # The payload goes in through communicate(), never through a bare
+            # write before the clock is armed: a child that floods stderr
+            # while this process is blocked writing stdin deadlocks both
+            # sides, and the deadline never fires because it has not started.
+            # communicate() writes stdin and drains every pipe under one
+            # timeout, so no pipe is ever a PIPE nobody reads and the clock
+            # covers the whole child lifetime.
+            timed_out, captured_out, captured_err = self._wait_with_clock(
+                proc, timeout_s, payload
+            )
         finally:
             for handle in (out_handle, err_handle):
                 if hasattr(handle, "close"):
@@ -794,25 +823,44 @@ class Tenon:
             exit_code=proc.returncode,
         )
 
-    def _wait_with_clock(self, proc, timeout_s: int) -> tuple:
-        """Wait for a dispatch, terminating it when the wall clock expires.
+    def _wait_with_clock(self, proc, timeout_s: int, payload: bytes = b"") -> tuple:
+        """Write the dispatch's input, drain its pipes, and wait — all under
+        one clock, terminating the process when that clock expires.
 
-        SIGTERM first so tenon can close its harness child and flush, then
-        SIGKILL after a grace so a wedged process cannot outlive the run."""
-        captured_out, captured_err = "", ""
-        if timeout_s and timeout_s > 0:
+        One `communicate` covers the whole child lifetime: the stdin write is
+        inside the deadline rather than before it, and any stream left as a
+        PIPE is drained rather than left to fill. On expiry the tree is
+        terminated (SIGTERM, then SIGKILL after a grace) and communicate is
+        called AGAIN, which is what actually reaps the child and drains
+        whatever it wrote before it died."""
+        if not timeout_s or timeout_s <= 0:
+            out, err = proc.communicate(input=payload)
+            return False, _text(out), _text(err)
+        try:
+            out, err = proc.communicate(input=payload, timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            self._terminate(proc)
+            out, err = self._drain(proc)
+            return True, _text(out), _text(err)
+        return False, _text(out), _text(err)
+
+    @staticmethod
+    def _drain(proc) -> tuple:
+        """Reap a terminated child and take whatever its pipes still hold.
+
+        `_terminate` already sent SIGKILL; a second communicate is what
+        collects the exit status and empties the pipes. If even that does not
+        return, the pipes are held by something the kill did not reach, and
+        the streams are given up rather than blocking the run forever."""
+        for _ in range(2):
             try:
-                captured_out, captured_err = proc.communicate(timeout=timeout_s)
+                return proc.communicate(timeout=TERMINATE_GRACE_S)
             except subprocess.TimeoutExpired:
-                self._terminate(proc)
                 try:
-                    captured_out, captured_err = proc.communicate(timeout=TERMINATE_GRACE_S)
-                except subprocess.TimeoutExpired:
-                    captured_out, captured_err = "", ""
-                return True, _text(captured_out), _text(captured_err)
-        else:
-            captured_out, captured_err = proc.communicate()
-        return False, _text(captured_out), _text(captured_err)
+                    proc.kill()
+                except OSError:
+                    break
+        return b"", b""
 
     @staticmethod
     def _terminate(proc) -> None:
@@ -847,9 +895,13 @@ class Tenon:
         full projection regeneration spent to re-derive a list the previous
         line already returned. Turn it on for a paranoid mode where something
         else may touch the workspace between apply and run. The POST-run
-        drift always runs: it is the only check that the agent did not
-        rewrite its own configuration mid-run, and it is the one that earns
-        its process.
+        drift runs after a dispatch that COMPLETED and after one that TIMED
+        OUT — it is the only check that the agent did not rewrite its own
+        configuration mid-run, and a half-finished agent is exactly the one
+        that may have. It is skipped when the dispatch failed at the gate,
+        because no run happened. A timed-out pass still reports
+        `phase_failed="run"` with `outcome="timed_out"`; its `post_drift` is
+        populated either way.
 
         Passing `pins` through every phase keeps all of them resolving the
         same closure — including both drifts, so neither re-resolves it.
@@ -912,7 +964,10 @@ class Tenon:
         ran = self.dispatch(
             agent, workspace, inputs, pins=pins, harness=harness, cwd=cwd, **dispatch_kw
         )
-        if ran.outcome != "ok":
+        if ran.outcome not in ("ok", "timed_out"):
+            # `gate_failed` means the dispatcher never ran a turn, so there is
+            # nothing for a post-run drift to have observed and no workspace
+            # state a run could have changed.
             return Iteration(
                 ok=False,
                 phase_failed="run",
@@ -926,6 +981,23 @@ class Tenon:
             )
 
         post = self.drifted(agent, workspace, pins=pins, harness=harness, cwd=cwd)
+        if ran.outcome == "timed_out":
+            # The run is still what failed — `timed_out` is the scored finding
+            # and `phase_failed` names its phase — but the drift ran and is
+            # reported, because a half-finished agent is exactly the one that
+            # may have rewritten its own configuration.
+            return Iteration(
+                ok=False,
+                phase_failed="run",
+                outcome=ran.outcome,
+                fingerprint=verdict.fingerprint,
+                source_digest=ran.source_digest,
+                verdict=verdict,
+                applied=applied,
+                pre_drift=pre,
+                dispatch=ran,
+                post_drift=post,
+            )
         if not post.matched:
             return Iteration(
                 ok=False,
@@ -963,6 +1035,22 @@ class GateContradiction(Exception):
         super().__init__(message)
 
 
+def _own_process_group(proc):
+    """The child's process group id when the child owns that group, else None.
+
+    A child spawned with `new_session=True` leads its own group, and
+    signalling the group is the only way to reach the harness it started.
+    A child spawned WITHOUT one inherits ours, and signalling that group
+    signals us: the supervisor, its whole thread pool, and in the foreground
+    case the user's shell job. So the group is used only when it is provably
+    not our own, and an unreadable pgid is treated as shared."""
+    try:
+        pgid = os.getpgid(proc.pid)
+        return None if pgid == os.getpgid(0) else pgid
+    except (OSError, AttributeError):
+        return None
+
+
 def terminate_tree(proc, grace_s: float = TERMINATE_GRACE_S) -> None:
     """End a process and everything it started: SIGTERM to its group so it can
     close its harness child and flush, then SIGKILL after a grace so a wedged
@@ -971,18 +1059,15 @@ def terminate_tree(proc, grace_s: float = TERMINATE_GRACE_S) -> None:
     The group is what matters. A dispatcher signalled on its own leaves the
     model process it spawned — and any tool server under that — running,
     which is the difference between a timeout that ends and one that only
-    stops being watched. When the process was not started in its own session
-    (a caller supplied its own spawn), this falls back to the process."""
+    stops being watched. But the group is only ever ITS group: a child that
+    was not started in its own session shares this process's group, and
+    `killpg` on that is suicide — the caller kills the supervisor that is
+    doing the killing. That case falls back to the process itself."""
+    pgid = _own_process_group(proc)
     for signum in (signal.SIGTERM, signal.SIGKILL):
         if proc.poll() is not None:
             return
-        try:
-            os.killpg(os.getpgid(proc.pid), signum)
-        except (OSError, AttributeError):
-            try:
-                proc.terminate() if signum == signal.SIGTERM else proc.kill()
-            except OSError:
-                return
+        _signal_one(proc, pgid, signum)
         if signum == signal.SIGKILL:
             return
         deadline = time.time() + grace_s
@@ -990,6 +1075,50 @@ def terminate_tree(proc, grace_s: float = TERMINATE_GRACE_S) -> None:
             if proc.poll() is not None:
                 return
             time.sleep(0.1)
+
+
+def _signal_one(proc, pgid, signum) -> None:
+    if pgid is not None:
+        try:
+            os.killpg(pgid, signum)
+            return
+        except (OSError, AttributeError):
+            pass
+    try:
+        proc.terminate() if signum == signal.SIGTERM else proc.kill()
+    except OSError:
+        pass
+
+
+# The reasons tenon refuses to override even with --force. Containment —
+# a recorded path that leaves the workspace, is reached through a symlinked
+# parent, or whose parent chain could not be read — because forcing widens
+# what tenon removes inside a workspace, never where it removes; and
+# `non-regular`, because a path that is not a readable regular file is never
+# a hash the apply record can vouch for. Telling a caller to force one of
+# these would be advice that cannot work.
+UNFORCEABLE_REASONS = (
+    "escapes-workspace",
+    "symlink-parent",
+    "unreadable-parent",
+    "non-regular",
+)
+
+
+def _blocked_message(workspace, blocked: tuple, removed: tuple) -> str:
+    """One line naming what was refused, why, and whether force is a remedy."""
+    names = ", ".join(r.get("blocked", "") for r in blocked[:4]) or "unknown"
+    reasons = {r.get("reason", "") for r in blocked}
+    unforceable = sorted(reasons & set(UNFORCEABLE_REASONS))
+    if unforceable:
+        remedy = (
+            f"{', '.join(unforceable)}; force=True does not override that — it widens "
+            "what tenon removes inside a workspace, never where it removes"
+        )
+    else:
+        remedy = "changed since apply; pass force=True to overwrite"
+    partial = f"; {len(removed)} file(s) were removed before it stopped" if removed else ""
+    return f"clean refused {workspace}: {names}: {remedy}{partial}"
 
 
 def _with_detail(message: str, stderr: str) -> str:

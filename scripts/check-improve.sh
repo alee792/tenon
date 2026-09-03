@@ -22,4 +22,6 @@ python3 -m compileall -q improve
 # The adapter's fixture tests, and the confinement grep that keeps every other
 # module out of tenon's CLI vocabulary.
 python3 improve/test_tenon.py
+# The spec validation that decides what a search recombines.
+python3 improve/test_evolve.py
 python3 improve/judge/test_scoring.py

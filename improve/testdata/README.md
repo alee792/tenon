@@ -21,11 +21,27 @@ is not what runs.
 | `drift-drift.jsonl` | the same workspace after one hand edit to `CLAUDE.md` |
 | `drift-gate-failed.jsonl` | drift over a source that fails the gate |
 | `clean-ok.jsonl` | a forced clean, with the removed paths |
-| `clean-blocked.jsonl` | clean refusing a modified recorded file |
+| `clean-blocked.jsonl` | clean refusing a modified recorded file — a refusal `force=True` does override |
+| `clean-blocked-containment.jsonl` | clean refusing a recorded path that leaves the workspace — a refusal `--force` does NOT override |
+| `clean-blocked-partial.jsonl` | a clean that removed four files and then found the fifth modified underneath it: the workspace is partially cleaned — see below |
 | `clean-error.jsonl` | clean against a workspace with no record for the harness |
 | `run-recovered-uncertain.jsonl` | a dispatch that leads with a startup-recovered `turn.uncertain` from a run killed mid-turn, then accepts and completes its own input |
 | `run-gate-failed.jsonl` | a dispatch rejected at the gate: a digest and an empty fingerprint |
 | `run-error-deadline.jsonl` | tenon's own `--timeout` expiring, which ends `outcome: "error"` like any other environment failure — the reason the adapter enforces the wall clock itself |
+
+**Every fixture is path-scrubbed.** The absolute paths a recording carried
+are rewritten to a neutral `/work/...` prefix and the recorded `session_id`s
+to one fixed placeholder, so a fixture names no machine and no session. Only
+those two substitutions are made; every other byte is what tenon wrote. Keep
+new recordings scrubbed the same way.
+
+`clean-blocked-partial.jsonl` is recorded, not written: the partial state is
+reachable only through the race tenon's own comment describes — a path that
+changes between the plan pass and its own removal — so it was produced by
+padding the record with 20,000 filler files to widen the removal window and
+editing `CLAUDE.md` inside it. The filler `removed` lines are elided from the
+fixture; the four real ones, the `blocked` line and the terminator are the
+literal bytes.
 
 `check-ok-warning.jsonl` is the one exception, and it is a splice rather than
 an invention: a recorded diagnostic with its severity set to `warning`,

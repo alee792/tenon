@@ -61,9 +61,13 @@ from tenon import GateContradiction, TenonEnvironment  # noqa: E402
 
 SCHEMA_VERSION = 1
 
-# tenon bounds `run --timeout` at 30 minutes; refuse a larger request here so
-# the failure names the real cap instead of surfacing as a tenon usage error.
-MAX_RUN_TIMEOUT = 30 * 60
+# The largest per-variant budget the adapter can enforce. NOT tenon's own
+# 30-minute cap: the adapter owns the verdict and hands tenon a backstop of
+# the budget plus headroom, so a budget at tenon's cap makes both clocks fire
+# at once and a timed-out variant is reported as an environment error rather
+# than the finding it is. The relationship lives in the adapter; this is the
+# same number, imported rather than restated.
+MAX_RUN_TIMEOUT = tenon_api.MAX_DISPATCH_TIMEOUT_S
 
 # Lifecycle states a variant passes through. Only the terminal ones are
 # reported by collect.
@@ -305,7 +309,11 @@ def build_spec(args, spec_file: dict) -> Spec:
 
     timeout = parse_duration(pick(args.timeout, "timeout", "600s"), "timeout")
     if timeout > MAX_RUN_TIMEOUT:
-        raise FanoutError(f"timeout must be at most {MAX_RUN_TIMEOUT}s (tenon run's cap)")
+        raise FanoutError(
+            f"timeout must be at most {MAX_RUN_TIMEOUT}s: tenon run's cap is "
+            f"{tenon_api.TENON_RUN_TIMEOUT_CAP_S}s and the adapter's clock needs "
+            f"{tenon_api.TIMEOUT_BACKSTOP_HEADROOM_S}s of headroom under it"
+        )
     turn_timeout_raw = pick(args.turn_timeout, "turn_timeout", 0)
     turn_timeout = 0 if not turn_timeout_raw else parse_duration(turn_timeout_raw, "turn-timeout")
 
@@ -542,25 +550,26 @@ class Supervisor:
         self.set(name, agent=str(agent))
         return agent
 
-    def _child_env(self, variant: dict, vdir: Path, agent: Path, workspace: Path) -> dict:
-        env = dict(os.environ)
-        # fanout always names the harness explicitly (a harness sweep is one
-        # of its use cases), so an inherited TENON_HARNESS can only change
-        # what a mutate hook's own tenon calls target. Drop it rather than let
-        # it silently retarget a child.
-        env.pop("TENON_HARNESS", None)
-        env.update(
-            {
-                "FANOUT_RUN": self.spec["run"],
-                "FANOUT_VARIANT": variant["name"],
-                "FANOUT_INDEX": str(variant["index"]),
-                "FANOUT_AGENT_DIR": str(agent),
-                "FANOUT_WORKSPACE": str(workspace),
-                "FANOUT_VARIANT_DIR": str(vdir),
-                "FANOUT_HARNESS": self.spec["harness"],
-                "FANOUT_TENON": self.spec["tenon"],
-            }
+    def child_env(self, variant: dict, vdir: Path, agent: Path, workspace: Path) -> dict:
+        """The environment every child of this variant runs in.
+
+        The TENON_HARNESS drop is the adapter's `child_env`: fanout always
+        names the harness explicitly (a harness sweep is one of its use
+        cases), so an inherited one can only change what a mutate hook's own
+        tenon calls target. The FANOUT_* additions are fanout's own contract
+        with those hooks, and the variant's `env` wins over both."""
+        env = tenon_api.child_env(
+            FANOUT_RUN=self.spec["run"],
+            FANOUT_VARIANT=variant["name"],
+            FANOUT_INDEX=str(variant["index"]),
+            FANOUT_AGENT_DIR=str(agent),
+            FANOUT_WORKSPACE=str(workspace),
+            FANOUT_VARIANT_DIR=str(vdir),
+            FANOUT_HARNESS=self.spec["harness"],
+            FANOUT_TENON=self.spec["tenon"],
         )
+        # Last, so a variant's own env wins over both — including over a
+        # FANOUT_* name it deliberately overrides.
         env.update(variant.get("env") or {})
         return env
 
@@ -577,7 +586,7 @@ class Supervisor:
                 cwd=agent,
                 stdout=out,
                 stderr=subprocess.STDOUT,
-                env=self._child_env(variant, vdir, agent, workspace),
+                env=self.child_env(variant, vdir, agent, workspace),
             )
             code = proc.wait()
         self._reap(name)
@@ -591,7 +600,7 @@ class Supervisor:
         return tenon_api.Tenon(
             self.spec["tenon"],
             self.spec["harness"],
-            env=self._child_env(variant, vdir, agent, workspace),
+            env=self.child_env(variant, vdir, agent, workspace),
             spawn=lambda argv, **kw: self._spawn(name, argv, **kw),
         )
 
@@ -1022,7 +1031,7 @@ def cmd_clean(args) -> int:
     for record in state.get("variants", {}).values():
         workspace = record.get("workspace")
         if workspace and Path(workspace).exists():
-            run_git(repo, "worktree", "remove", "--force", workspace, check=False)
+            run_git(repo, "worktree", "remove", "--force", workspace, check=False)  # not tenon argv: --force
         if record.get("branch") and not args.keep_branches:
             run_git(repo, "branch", "-D", record["branch"], check=False)
     run_git(repo, "worktree", "prune", check=False)
@@ -1063,7 +1072,7 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--mutate", help="shell command run in each variant's agent dir before the gate")
     start.add_argument("--pins", help="pin set the gate, compile, and dispatch all resolve against")
     start.add_argument("--concurrency", type=int, help="variants in flight at once (default: min(k, 4))")
-    start.add_argument("--timeout", help="whole-process deadline per variant (default: 600s, tenon's cap is 30m)")
+    start.add_argument("--timeout", help=f"whole-process deadline per variant (default: 600s, max {MAX_RUN_TIMEOUT}s)")
     start.add_argument("--turn-timeout", help="per-turn deadline (default: none)")
     start.add_argument("--branch-prefix", help="branch namespace (default: fanout)")
     start.add_argument("--tenon", help="tenon binary (default: $FANOUT_TENON or PATH)")

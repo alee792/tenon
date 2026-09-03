@@ -1024,7 +1024,7 @@ and the last-resort signal.
 ### G34. What the leaderboard still scores that it should not
 
 PR 1 of the improve import (#64) made `outcome: error` unscorable:
-fanout lands the variant in `errored`, evolve's `score_generation` skips
+fanout lands the variant in `errored`, evolve's `score_round` skips
 it, and a genome with no measurement carries `score: null` rather than
 `0.0`. Two neighbours of that rule were left as they were, deliberately,
 because each is a behaviour decision rather than a bug:
@@ -1046,7 +1046,7 @@ decoder.**
 
 *Missing and cancelled* joined `errored` as unscored: all three mean the loop
 learned nothing about the genome, and every shipped scorer would have turned
-each into a `0.0` that reads as evidence. `score_generation` drops the sample
+each into a `0.0` that reads as evidence. `score_round` drops the sample
 and warns; a genome with no sample left stays `score: null` and is evaluated
 again.
 

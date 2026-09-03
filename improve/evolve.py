@@ -73,7 +73,7 @@ SCHEMA_VERSION = 1
 # everything tenon loads: `harnesses/` is authored surface too, and whether
 # per-harness overrides should recombine independently is a search's decision
 # rather than a default. Put it in `spec.genes.dirs` to include it.
-DEFAULT_GENE_DIRS = ("skills", "tools", "subagents", "plugins", "mcp", "schedules")  # not tenon argv
+DEFAULT_GENE_DIRS = ("skills", "tools", "subagents", "plugins", "mcp", "schedules")  # not tenon argv: tools, mcp
 DEFAULT_GENE_FILES = ("instructions.md",)
 
 
@@ -90,9 +90,27 @@ class GeneLayout:
         if not isinstance(raw, dict):
             raise EvolveError("spec: genes must be an object with dirs and files")
         return GeneLayout(
-            dirs=tuple(raw.get("dirs", DEFAULT_GENE_DIRS)),
-            files=tuple(raw.get("files", DEFAULT_GENE_FILES)),
+            dirs=_gene_names(raw, "dirs", DEFAULT_GENE_DIRS),
+            files=_gene_names(raw, "files", DEFAULT_GENE_FILES),
         )
+
+
+def _gene_names(raw: dict, key: str, default: tuple) -> tuple:
+    """The loci named under `genes.<key>`, validated.
+
+    A bare string here is the dangerous shape: `"skills"` iterates into
+    `("s", "k", ...)` and the search silently recombines seven loci that do
+    not exist instead of the one that does. So the type is checked rather
+    than coerced, and the message names the key that is wrong."""
+    if key not in raw:
+        return tuple(default)
+    value = raw[key]
+    if not isinstance(value, (list, tuple)):
+        raise EvolveError(f"spec: genes.{key} must be a list of names, not {type(value).__name__}")
+    for name in value:
+        if not isinstance(name, str) or not name.strip():
+            raise EvolveError(f"spec: genes.{key} must be a list of non-empty names")
+    return tuple(value)
 
 
 class EvolveError(Exception):
@@ -952,9 +970,9 @@ class Search:
             [
                 sys.executable,
                 self.cfg.fanout,
-                "clean",  # not tenon argv — fanout's own subcommand
+                "clean",  # not tenon argv: clean — fanout's own subcommand
                 f"round-{round_no}",
-                "--force",
+                "--force",  # not tenon argv: --force — fanout's own flag
                 "--keep-state",
                 "--state-dir",
                 str(self.root / "rounds"),

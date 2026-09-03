@@ -78,10 +78,12 @@ the first `tenon` on `PATH`. Build one with `go build -o ./tenon ./cmd/tenon`.
 ```
 
 That compiles every module in `improve/` — the cheap syntax gate over the
-files with no tests — and runs the judge's scoring tests, which are a stdlib
-self-runner needing no network and no tenon binary:
+files with no tests — and runs the three suites that do have them. All are
+stdlib self-runners, needing no network and no tenon binary:
 
 ```bash
+python3 improve/test_tenon.py       # the adapter, its fixtures, its confinement
+python3 improve/test_evolve.py      # the spec validation the search depends on
 python3 improve/judge/test_scoring.py
 ```
 
@@ -216,8 +218,14 @@ and branches, which `clean` removes.
 
 ## Bounds
 
-- `--timeout` is the whole-process deadline per variant, capped at 30 minutes
-  because that is tenon's own cap. `--turn-timeout` is optional and per turn.
+- `--timeout` is the whole-process deadline per variant, capped at **29m30s**
+  — tenon's own cap is 30 minutes, and the adapter's clock needs the last 30
+  seconds of it. The adapter owns the verdict, so it hands tenon a backstop of
+  the budget plus that headroom; a budget at tenon's cap would make both
+  clocks fire at once and a slow variant would be reported as an environment
+  error instead of the finding it is. The relationship is stated once, in the
+  adapter (`MAX_DISPATCH_TIMEOUT_S`), and fanout imports it.
+  `--turn-timeout` is optional and per turn.
 
   **A variant that outruns its budget is a finding about the variant, not an
   infrastructure failure.** The adapter enforces the wall clock itself rather

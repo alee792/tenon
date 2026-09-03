@@ -186,7 +186,17 @@ fanout marks `failed`: it is a finding about the variant — the agent really
 was slower than the budget — and it is scored like any other failed variant.
 Dropping it instead would let a search drift toward whatever fits the budget
 without ever paying for being slow. Set `timeout` to the budget you actually
-mean.
+mean; it is capped at 29m30s rather than at tenon's own 30 minutes, because
+the adapter's clock must fire before tenon's backstop or the timeout arrives
+as an environment error and is dropped after all.
+
+The adapter's `iterate` — gate, compile, [drift], dispatch, drift — treats
+the post-run drift the same way. It runs after a dispatch that completed AND
+after one that timed out, because a half-finished agent is exactly the one
+that may have rewritten its own configuration mid-run, and it is skipped only
+when the dispatch failed at the gate, where no run happened. A timed-out pass
+still reports `phase_failed="run"` with `outcome="timed_out"`: the drift is
+evidence carried alongside the finding, never a replacement for it.
 
 The three search policies work the same way — a named built-in, or a command
 taking one JSON object on stdin and printing one on stdout. Evolve keeps the
