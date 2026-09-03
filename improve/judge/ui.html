@@ -1,0 +1,561 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>evolve — pairwise judge</title>
+<style>
+  /* Graphite + amber. The accent is deliberately scarce: it marks the leader,
+     the active view, and links. Everything else is neutral, so the thing being
+     judged is the only thing competing for attention. */
+  :root {
+    --bg:#fcfbf9; --surface:#fff; --surface-2:#f6f4f1;
+    --line:#e8e4de; --line-strong:#d5d0c7;
+    --ink:#1a1a19; --muted:#6b6862; --faint:#9a958d;
+    --accent:#b87503; --accent-soft:#fdf4e3; --accent-line:#e8c98d;
+    --radius:9px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg:#0a0a0b; --surface:#131315; --surface-2:#1a1a1d;
+      --line:#232326; --line-strong:#33333a;
+      --ink:#ededef; --muted:#8a8a92; --faint:#5f5f67;
+      --accent:#e0a340; --accent-soft:#1e1913; --accent-line:#4a3a1c;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg:#0a0a0b; --surface:#131315; --surface-2:#1a1a1d;
+    --line:#232326; --line-strong:#33333a;
+    --ink:#ededef; --muted:#8a8a92; --faint:#5f5f67;
+    --accent:#e0a340; --accent-soft:#1e1913; --accent-line:#4a3a1c;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.62
+         ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+         -webkit-font-smoothing:antialiased; }
+
+  header { display:flex; align-items:center; gap:13px; flex-wrap:wrap;
+           padding:11px 20px; border-bottom:1px solid var(--line);
+           position:sticky; top:0; background:var(--bg); z-index:5; }
+  h1 { font-size:13px; font-weight:500; letter-spacing:.01em; margin:0; }
+  .muted { color:var(--muted); font-size:12.5px; }
+  .faint { color:var(--faint); font-size:12px; }
+  .bar { height:2px; background:var(--line); border-radius:2px; overflow:hidden;
+         flex:1 1 110px; min-width:80px; }
+  .bar > i { display:block; height:100%; background:var(--accent); transition:width .25s ease; }
+  main { padding:18px 20px 44px; max-width:1160px; margin:0 auto; }
+
+  button { font:inherit; font-size:13px; padding:6px 15px; border-radius:var(--radius);
+           border:1px solid var(--line); background:var(--surface); color:var(--ink);
+           cursor:pointer; transition:border-color .12s, background .12s; }
+  button:hover { border-color:var(--line-strong); }
+  button.primary { border-color:var(--accent-line); background:var(--accent-soft); }
+  button.tie { color:var(--muted); }
+  button.ghost { border-color:transparent; background:transparent; color:var(--muted); }
+  button.ghost:hover { color:var(--ink); border-color:var(--line); }
+  button.tab { padding:4px 12px; border-radius:999px; font-size:12.5px; }
+  button.tab[aria-current="true"], button.tab.primary {
+    background:var(--accent-soft); border-color:var(--accent-line); color:var(--ink); }
+  kbd { font:11px ui-monospace,monospace; border:1px solid var(--line);
+        border-radius:4px; padding:1px 5px; color:var(--muted); background:var(--surface); }
+
+  .card { background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); }
+  .task { padding:10px 14px; margin-bottom:14px; }
+  .pair { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  @media (max-width:620px) { .pair { grid-template-columns:1fr; } }
+  .side { display:flex; flex-direction:column; overflow:hidden; }
+  .side h2 { font-size:11px; font-weight:500; letter-spacing:.05em; color:var(--muted);
+             margin:0; padding:8px 14px; border-bottom:1px solid var(--line);
+             background:var(--surface-2); }
+  pre { margin:0; padding:13px 14px; white-space:pre-wrap; word-wrap:break-word;
+        font:12px/1.62 ui-monospace,SFMono-Regular,Menlo,monospace; overflow:auto; }
+  .side pre { max-height:56vh; }
+  .actions { display:flex; gap:9px; justify-content:center; margin-top:18px; flex-wrap:wrap; }
+
+  .banner { display:flex; gap:12px; align-items:center; flex-wrap:wrap; padding:10px 14px;
+            margin-bottom:16px; border:1px solid var(--accent-line); border-left-width:2px;
+            border-radius:var(--radius); background:var(--accent-soft); font-size:13px; }
+
+  table { width:100%; border-collapse:collapse; }
+  th,td { text-align:left; padding:6px 14px; font-size:12.5px;
+          border-bottom:1px solid var(--line); }
+  th { color:var(--faint); font-weight:500; font-size:11px; letter-spacing:.04em; }
+  tr:last-child td { border-bottom:none; }
+  td.num { font-variant-numeric:tabular-nums; white-space:nowrap; color:var(--muted); }
+  .lead td { color:var(--ink); }
+  .lead td.num { color:var(--ink); }
+  .meter { display:inline-block; vertical-align:middle; width:84px; height:4px;
+           border-radius:2px; background:var(--line); overflow:hidden; margin-right:10px; }
+  .meter > i { display:block; height:100%; background:var(--line-strong); }
+  .lead .meter > i { background:var(--accent); }
+  .gene { font:11.5px ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing:-.01em; }
+  .row-pick { cursor:pointer; }
+  .row-pick:hover td { background:var(--surface-2); }
+
+  h3 { font-size:11px; font-weight:500; letter-spacing:.05em; color:var(--faint);
+       margin:24px 0 7px; text-transform:uppercase;
+       display:flex; align-items:center; gap:10px; }
+  button.mini { font-size:10.5px; padding:2px 9px; letter-spacing:0; text-transform:none; }
+  .tabs { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:13px; }
+  .split { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  @media (max-width:820px) { .split { grid-template-columns:1fr; } }
+  .empty { text-align:center; padding:58px 20px; color:var(--faint); font-size:13px; }
+  .mono-s { font:11px ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .pill { display:inline-block; padding:0 7px; border-radius:999px; background:var(--surface-2);
+          border:1px solid var(--line); font-size:10.5px; color:var(--muted); margin-left:6px;
+          vertical-align:1px; }
+
+  /* about */
+  .prose { max-width:720px; }
+  .prose h4 { font-size:14px; font-weight:500; margin:28px 0 7px; letter-spacing:-.005em; }
+  .prose p { margin:0 0 11px; color:var(--ink); }
+  .prose ul { margin:0 0 11px; padding-left:19px; }
+  .prose li { margin-bottom:4px; }
+  .prose code { font:11.5px ui-monospace,SFMono-Regular,Menlo,monospace;
+                background:var(--surface-2); border:1px solid var(--line);
+                padding:0 5px; border-radius:4px; }
+  .prose img { width:100%; display:block; border:1px solid var(--line);
+               border-radius:var(--radius); margin:13px 0 6px; }
+  .prose table { margin:5px 0 13px; border:1px solid var(--line);
+                 border-radius:var(--radius); overflow:hidden; background:var(--surface); }
+  .prose .lede { font-size:15px; line-height:1.6; color:var(--muted); margin-bottom:4px; }
+  .prose .cap { color:var(--faint); font-size:12px; margin:0 0 4px; }
+  .prose .flow { background:var(--surface); border:1px solid var(--line);
+                 border-radius:var(--radius); padding:15px; font-size:12px;
+                 line-height:1.5; overflow-x:auto; color:var(--muted); }
+  .prose a { color:var(--accent); text-decoration:none; border-bottom:1px solid var(--accent-line); }
+  .prose a:hover { border-bottom-color:var(--accent); }
+  .prose .note { border:1px solid var(--line); border-left:2px solid var(--accent-line);
+                 background:var(--surface); border-radius:var(--radius); padding:11px 14px;
+                 margin:14px 0; font-size:13px; color:var(--muted); }
+  .prose .note b { color:var(--ink); }
+  .prose details { border:1px solid var(--line); border-radius:var(--radius);
+                   background:var(--surface); padding:0 13px; margin:12px 0; }
+  .prose details[open] { padding-bottom:10px; }
+  .prose summary { cursor:pointer; padding:9px 0; font-size:13px; color:var(--accent);
+                   list-style:none; }
+  .prose summary::-webkit-details-marker { display:none; }
+  .prose summary::before { content:"›"; display:inline-block; width:14px; color:var(--faint);
+                           transition:transform .15s; }
+  .prose details[open] summary::before { transform:rotate(90deg); }
+  .prose details > *:not(summary) { font-size:13px; }
+  .prose .io { background:var(--bg); border:1px solid var(--line); border-radius:6px;
+               padding:11px 12px; font-size:11px; line-height:1.55; color:var(--muted);
+               overflow-x:auto; }
+  .prose picture { display:block; }
+  .prose kbd { font-size:11px; }
+
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:8px;
+           margin:14px 0; }
+  .apicard { border:1px solid var(--line); border-radius:var(--radius); background:var(--surface);
+             padding:10px 12px; display:flex; flex-direction:column; gap:3px; }
+  .apicard code { align-self:flex-start; background:var(--accent-soft);
+                  border-color:var(--accent-line); color:var(--ink); }
+  .apicard .role { font-size:12px; color:var(--muted); }
+  .apicard .built { font-size:10.5px; color:var(--faint); font-family:ui-monospace,monospace; }
+  .apicard .built.none { color:var(--accent); }
+
+  .tree { border:1px solid var(--line); border-radius:var(--radius); background:var(--surface);
+          padding:11px 14px; margin:14px 0;
+          font:11.5px/1.85 ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .t-row { display:flex; justify-content:space-between; color:var(--muted); }
+  .t-row.gene { color:var(--ink); }
+  .t-row.gene .t-tag { color:var(--accent); }
+  .t-row.t-fp { border-top:1px solid var(--line); margin-top:6px; padding-top:6px; }
+  .t-tag { color:var(--faint); font-size:10.5px; }
+
+  .viz { width:100%; height:auto; display:block; margin:14px 0 6px; }
+  .viz .stage rect { fill:var(--surface); stroke:var(--accent-line); stroke-width:1; }
+  .viz .stage.fixed rect { stroke:var(--line-strong); }
+  .viz .lbl { fill:var(--ink); font:12px ui-sans-serif,system-ui,sans-serif; text-anchor:middle; }
+  .viz .sub { fill:var(--faint); font:10.5px ui-sans-serif,system-ui,sans-serif; text-anchor:middle; }
+  .viz .sub.start { text-anchor:start; }
+  .viz .swatch { fill:var(--surface); stroke:var(--line-strong); }
+  .viz .swatch.you { fill:var(--accent-soft); stroke:var(--accent-line); }
+  .viz .sub.lead-t { fill:var(--accent); }
+  .viz .cap-t { fill:var(--faint); font:10px ui-sans-serif,system-ui,sans-serif;
+                letter-spacing:.05em; text-transform:uppercase; }
+  .viz .mono { fill:var(--ink); font:11px ui-monospace,SFMono-Regular,Menlo,monospace;
+               text-anchor:middle; }
+  .viz .edge { stroke:var(--line-strong); fill:none; stroke-width:1; }
+  .viz .edge.accent { stroke:var(--accent); }
+  .viz .edge.dash { stroke-dasharray:3 3; }
+  .viz .head { fill:none; stroke:context-stroke; stroke-width:1.4;
+               stroke-linecap:round; stroke-linejoin:round; }
+  .viz .dot { fill:var(--surface); stroke:var(--line-strong); }
+  .viz .dot.lead { fill:var(--accent); stroke:var(--accent); }
+  .viz .dot.faded { fill:var(--bg); stroke:var(--line); }
+  .viz .pen { fill:none; stroke:var(--line); stroke-dasharray:3 3; }
+  .viz .pen.dim { stroke:var(--line); }
+  .viz .node rect { fill:var(--surface); stroke:var(--line-strong); }
+  .viz .node.lead rect { fill:var(--accent-soft); stroke:var(--accent-line); }
+  .viz .lane { stroke:var(--line); stroke-dasharray:2 4; }
+  .viz .blocked { fill:var(--accent-soft); stroke:var(--accent-line); }
+  .viz .key { fill:var(--accent); }
+</style>
+
+<header>
+  <h1>evolve</h1>
+  <span class="muted" id="meta">connecting…</span>
+  <span class="bar"><i id="bar" style="width:0"></i></span>
+  <span id="nav" style="display:flex; gap:6px"></span>
+  <button class="tab" id="theme" onclick="cycleTheme()" title="light / dark / system"></button>
+</header>
+<main id="root"><div class="empty">Waiting for a generation to finish running…</div></main>
+
+<script>
+// A pinned theme (?theme=dark) overrides the system preference. Mostly here so
+// the documentation screenshots can be captured in both.
+// Theme: an explicit choice wins, otherwise follow the system. Kept in the URL
+// so a view can be linked in a given theme, and remembered between visits.
+const THEMES = ['system', 'light', 'dark'];
+let theme = new URLSearchParams(location.search).get('theme')
+         || localStorage.getItem('evolve-theme') || 'system';
+function applyTheme(){
+  if (theme === 'system') delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = theme;
+  try { localStorage.setItem('evolve-theme', theme); } catch (e) {}
+  const el = document.getElementById('theme');
+  if (el) el.textContent = theme === 'system' ? 'auto' : theme;
+}
+function cycleTheme(){
+  theme = THEMES[(THEMES.indexOf(theme) + 1) % THEMES.length];
+  applyTheme();
+}
+applyTheme();
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const fx = (n, d = 3) => Number(n).toFixed(d);
+
+let view = 'auto';       // 'auto' follows the search; 'judge'/'review' are the reader's choice
+let pairId = null, busy = false, notified = 0, openGenome = null, tab = null, summary = null;
+let drawn = null;        // what the review screen currently shows, so polling never redraws it
+let navHtml = null;      // last nav markup, so the header is not rebuilt on every poll
+let genes = false;       // reveal the instructions behind each answer while judging
+
+async function tick(){
+  let state, sum;
+  try {
+    [state, sum] = await Promise.all([
+      fetch('/api/state').then(r => r.json()),
+      fetch('/api/summary').then(r => r.json()),
+    ]);
+  } catch (e) { $('meta').textContent = 'judge server unreachable'; return; }
+  summary = sum;
+
+  const pending = sum.pending;
+  if (pending && pending.generation !== notified) {
+    notified = pending.generation;
+    ping(`Generation ${pending.generation} is ready — ${pending.total} comparisons`);
+  }
+
+  const showJudge = view === 'judge' || (view === 'auto' && pending && !state.waiting && state.pair);
+  $('meta').textContent = pending
+    ? `generation ${pending.generation} · ${pending.done} of ${pending.total} judged`
+    : sum.finished ? `${sum.run} · search complete` : `${sum.run} · waiting for the next generation`;
+  const frac = pending && pending.total ? pending.done / pending.total : (sum.finished ? 1 : 0);
+  $('bar').style.width = (frac * 100) + '%';
+
+  const showAbout = view === 'about';
+  const nav = [
+    pending ? `<button class="tab ${showJudge && !showAbout ? 'primary' : ''}" onclick="go('judge')">Judge</button>` : '',
+    sum.generations.length ? `<button class="tab ${!showJudge && !showAbout ? 'primary' : ''}" onclick="go('review')">Review</button>` : '',
+    `<button class="tab ${showAbout ? 'primary' : ''}" onclick="go('about')">About</button>`,
+  ].join('');
+  // Rewriting this every tick churns the DOM for no reason and drops anything
+  // holding a reference to a button mid-click.
+  if (nav !== navHtml) { navHtml = nav; $('nav').innerHTML = nav; }
+
+  if (showAbout) renderAbout();
+  else if (showJudge) renderJudge(state);
+  else renderReview();
+}
+
+function go(v){ view = v; pairId = null; drawn = null; writeHash(); tick(); }
+
+function ping(text){
+  if (!('Notification' in window)) return;
+  if (Notification.permission === 'granted') new Notification('evolve', {body: text});
+  else if (Notification.permission !== 'denied') Notification.requestPermission();
+}
+
+// ---- judging ------------------------------------------------------------
+
+function renderJudge(s){
+  if (s.waiting || !s.pair) {
+    $('root').innerHTML = '<div class="empty">Waiting for a generation to finish running…</div>';
+    return;
+  }
+  if (pairId === s.pair.id) return;   // never redraw under the reader's cursor
+  pairId = s.pair.id;
+  $('root').innerHTML = `
+    <div class="card task"><span class="faint">task</span><br>${esc(s.task)}</div>
+    <div class="pair">
+      <section class="card side"><h2 style="text-transform:uppercase">A</h2><pre>${esc(s.pair.a)}</pre></section>
+      <section class="card side"><h2 style="text-transform:uppercase">B</h2><pre>${esc(s.pair.b)}</pre></section>
+    </div>
+    <div id="genes">${genePanes(s.pair)}</div>
+    <div class="actions">
+      <button onclick="vote('a')">A is better</button>
+      <button class="tie" onclick="vote('tie')">Tie</button>
+      <button onclick="vote('b')">B is better</button>
+      <button class="ghost" onclick="undo()">Undo last</button>
+    </div>
+    <p class="faint" style="text-align:center; margin-top:14px">
+      <kbd>←</kbd> A &nbsp; <kbd>→</kbd> B &nbsp; <kbd>space</kbd> tie
+      &nbsp;·&nbsp; <kbd>g</kbd> ${genes ? 'hides' : 'reveals'} the genes
+    </p>`;
+}
+
+function genePanes(pair){
+  if (!genes) return '';
+  return `
+    <p class="faint" style="margin:16px 0 8px">The gene behind each answer. Reading it before you
+      decide can bias the comparison toward the instructions rather than the output.</p>
+    <div class="pair">
+      <section class="card side"><h2 style="text-transform:uppercase">A · its instructions</h2>
+        <pre style="max-height:34vh">${esc(pair.a_gene || '(unavailable)')}</pre></section>
+      <section class="card side"><h2 style="text-transform:uppercase">B · its instructions</h2>
+        <pre style="max-height:34vh">${esc(pair.b_gene || '(unavailable)')}</pre></section>
+    </div>`;
+}
+
+function toggleGenes(){
+  genes = !genes;
+  pairId = null;   // force one redraw so the panes appear
+  writeHash();
+  tick();
+}
+
+async function vote(winner){
+  if (!pairId || busy) return;
+  busy = true;
+  await fetch('/api/verdict', {method:'POST', headers:{'Content-Type':'application/json'},
+                               body: JSON.stringify({id: pairId, winner})});
+  pairId = null; busy = false; tick();
+}
+async function undo(){
+  busy = true;
+  await fetch('/api/undo', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+  pairId = null; busy = false; tick();
+}
+addEventListener('keydown', e => {
+  if (view === 'review') return;
+  if (e.key === 'g' || e.key === 'G') { toggleGenes(); return; }
+  if (e.key === 'ArrowLeft') vote('a');
+  else if (e.key === 'ArrowRight') vote('b');
+  else if (e.key === ' ') { e.preventDefault(); vote('tie'); }
+});
+
+// ---- reviewing ----------------------------------------------------------
+
+function bars(rows){
+  const top = Math.max(...rows.map(r => r.score), 1e-9);
+  return rows.map((r, i) => `
+    <tr class="row-pick ${i === 0 ? 'lead' : ''}" onclick="pick('${r.genome}')">
+      <td><span class="meter"><i style="width:${(r.score / top) * 100}%"></i></span>
+          <span class="gene">${r.genome}</span>${
+            r.generations ? `<span class="pill">gen ${r.generations.join(', ')}</span>` : ''}</td>
+      <td class="num">${fx(r.score)}</td>
+      <td class="num">${fx(r.strength)}</td>
+      <td class="num">${r.wins === undefined ? '' : `${r.wins} / ${r.played}`}</td>
+    </tr>`).join('');
+}
+
+function renderReview(force){
+  const s = summary;
+  if (!s || !s.generations.length) {
+    $('root').innerHTML = '<div class="empty">Nothing judged yet.</div>';
+    return;
+  }
+  if (tab === null) tab = s.generations[s.generations.length - 1].generation;
+  // Redraw only when something actually changed. Repainting on every poll
+  // steals the scroll position and invalidates whatever the reader is
+  // mid-click on.
+  const key = JSON.stringify([tab, openGenome, s.finished, s.pending, s.can_advance,
+                              s.child && [s.child.running, s.child.tail],
+                              s.generations.map(g => [g.generation, g.judged])]);
+  if (!force && key === drawn) return;
+  drawn = key;
+  const gen = s.generations.find(g => g.generation === tab) || s.generations[0];
+  const judged = s.generations.reduce((n, g) => n + g.judged, 0);
+
+  const running = s.child && s.child.running;
+  const nextGen = (s.generations[s.generations.length - 1]?.generation ?? 0) + 1;
+  const banner = s.pending && s.pending.done < s.pending.total ? `
+    <div class="card banner">
+      <span><b>Generation ${s.pending.generation}</b> is ready —
+        ${s.pending.total - s.pending.done} comparisons left.</span>
+      <button class="primary" onclick="go('judge')">Start judging</button>
+      <span class="faint">or stay here; the search waits on you either way.</span>
+    </div>` : running ? `
+    <div class="card banner">
+      <span><b>Generation ${nextGen}</b> is running — proposing candidates and running each in its
+        own checkout. It will appear here to judge when it lands.</span>
+      ${s.child.tail ? `<span class="faint mono-s">${esc(s.child.tail.split('\n').pop())}</span>` : ''}
+    </div>` : `
+    <div class="card banner">
+      <span>Everything judged so far.${s.finished ? ' Nothing was promoted — review the winner and copy it across yourself if it holds up.' : ''}</span>
+      ${s.can_advance
+        ? `<button class="primary" onclick="advance()">Run generation ${nextGen}</button>`
+        : `<span class="faint">Start the judge with <code>--spec</code> to run further generations from here.</span>`}
+    </div>`;
+
+  const entry = gen.entries.find(e => e.genome === openGenome);
+  const detail = !entry ? `<div class="card empty" style="padding:38px 24px">
+      Pick a genome above to read its answer and the instructions that produced it.</div>` : `
+    <div class="card side">
+      <h2><span class="gene">${entry.genome}</span> · what it answered</h2>
+      <pre style="max-height:44vh">${esc(entry.text)}</pre>
+    </div>
+    <div class="card side">
+      <h2><span class="gene">${entry.genome}</span> · its instructions
+        ${entry.operator ? `<span class="pill">${esc(entry.operator)}</span>` : ''}
+        ${entry.parents.length ? `<span class="pill">from ${entry.parents.join(', ')}</span>` : ''}</h2>
+      <pre style="max-height:44vh">${esc(entry.instructions)}</pre>
+    </div>`;
+
+  $('root').innerHTML = `
+    ${banner}
+    <div class="tabs">
+      ${s.generations.map(g => `<button class="tab" aria-current="${g.generation === tab}"
+          onclick="setTab(${g.generation})">Generation ${g.generation}${
+          g.done ? '' : ' <span class="pill">partial</span>'}</button>`).join('')}
+      <button class="tab" aria-current="${tab === 'all'}" onclick="setTab('all')">All generations</button>
+    </div>
+    ${tab === 'all' ? `
+      <h3>every genome on one scale — one fit over all ${judged} comparisons</h3>
+      <div class="card"><table>
+        <tr><th>genome</th><th>score</th><th>strength</th><th></th></tr>
+        ${bars(s.overall)}
+      </table></div>
+      <p class="faint" style="margin-top:10px">A generation's own scores are normalised inside its
+        own field, so they do not compare across generations. The incumbent appears in consecutive
+        rounds, and that shared entry is what makes this single fit possible.</p>
+      ` : `
+      <div class="card task"><span class="faint">task</span><br>${esc(gen.task)}</div>
+      <h3>generation ${gen.generation} — ${gen.judged} of ${gen.comparisons} comparisons
+        ${gen.judged ? `<button class="ghost mini" onclick="resetGen(${gen.generation})">reset and judge again</button>` : ''}</h3>
+      <div class="card"><table>
+        <tr><th>genome</th><th>score</th><th>strength</th><th>record</th></tr>
+        ${bars(gen.board)}
+      </table></div>
+      <h3>outputs</h3>
+      <div class="${entry ? 'split' : ''}">${detail}</div>
+      <h3>lineage</h3>
+      <div class="card"><table>
+        <tr><th>genome</th><th>came from</th><th>operator</th></tr>
+        ${gen.entries.map(e => `<tr class="row-pick" onclick="pick('${e.genome}')">
+            <td class="gene">${e.genome}</td>
+            <td class="gene">${e.parents.length ? e.parents.join(', ') : '—'}</td>
+            <td>${esc(e.operator || 'seed')}</td></tr>`).join('')}
+      </table></div>`}`;
+}
+
+async function resetGen(generation){
+  if (!confirm(`Discard generation ${generation}'s verdicts and judge it again from scratch?`)) return;
+  const out = await (await fetch('/api/reset', {method:'POST',
+    headers:{'Content-Type':'application/json'}, body: JSON.stringify({generation})})).json();
+  if (out.error) { alert(out.error); return; }
+  drawn = null; pairId = null;
+  go('judge');
+}
+
+async function advance(){
+  const out = await (await fetch('/api/advance', {method:'POST',
+    headers:{'Content-Type':'application/json'}, body:'{}'})).json();
+  if (out.error) { alert(out.error); return; }
+  drawn = null;
+  tick();
+}
+
+function setTab(t){ tab = t; openGenome = null; writeHash(); renderReview(true); }
+function pick(genome){
+  if (tab === 'all') {
+    const owner = summary.generations.find(g => g.entries.some(e => e.genome === genome));
+    if (owner) tab = owner.generation;
+  }
+  openGenome = openGenome === genome ? null : genome;
+  writeHash();
+  renderReview(true);
+}
+
+// ---- about --------------------------------------------------------------
+
+const ABOUT_SECTIONS = [
+  ['loop',        'How it works'],
+  ['api',         'The API'],
+  ['algorithms',  'Algorithms'],
+  ['gene',        'Isolation & the gene'],
+  ['scoring',     'Scoring'],
+  ['walkthrough', 'Walkthrough'],
+];
+let aboutHtml = null, aboutSection = 'loop';
+
+async function renderAbout(){
+  if (aboutHtml === null) {
+    $('root').innerHTML = '<div class="empty">Loading…</div>';
+    aboutHtml = await (await fetch('/api/about')).text();
+  }
+  const key = 'about:' + aboutSection;
+  if (key === drawn) return;
+  drawn = key;
+  $('root').innerHTML = `
+    <div class="tabs">${ABOUT_SECTIONS.map(([id, label]) =>
+      `<button class="tab" aria-current="${id === aboutSection}"
+        onclick="setAbout('${id}')">${label}</button>`).join('')}</div>
+    <div class="prose" id="prose">${aboutHtml}</div>`;
+  showSection();
+}
+
+function showSection(){
+  document.querySelectorAll('#prose section[data-about]').forEach(el => {
+    el.hidden = el.dataset.about !== aboutSection;
+  });
+}
+
+function setAbout(id){
+  aboutSection = id;
+  writeHash();
+  drawn = null;
+  renderAbout();
+  scrollTo({top: 0, behavior: 'instant'});
+}
+
+// ---- addressable state --------------------------------------------------
+// #judge · #judge/genes · #review/2 · #review/2/b9b99537 · #review/all
+// Deep links make a view shareable, and let a screenshot be taken of any
+// state without driving the page by hand.
+
+function readHash(){
+  const parts = (location.hash || '').replace(/^#/, '').split('/').filter(Boolean);
+  if (!parts.length) return;
+  if (parts[0] === 'about') {
+    view = 'about';
+    if (parts[1]) aboutSection = parts[1];
+  } else if (parts[0] === 'judge') {
+    view = 'judge';
+    genes = parts[1] === 'genes';
+  } else if (parts[0] === 'review') {
+    view = 'review';
+    if (parts[1]) tab = parts[1] === 'all' ? 'all' : Number(parts[1]);
+    openGenome = parts[2] || null;
+  }
+}
+
+function writeHash(){
+  const next = view === 'about'
+    ? '#about/' + aboutSection
+    : view === 'judge'
+    ? '#judge' + (genes ? '/genes' : '')
+    : view === 'review'
+      ? '#review/' + (tab ?? '') + (openGenome ? '/' + openGenome : '')
+      : '';
+  if (next && next !== location.hash) history.replaceState(null, '', next);
+}
+
+addEventListener('hashchange', () => { readHash(); drawn = null; pairId = null; tick(); });
+addEventListener('keydown', e => { if (view === 'about' && e.key === 'Escape') go('review'); });
+
+readHash();
+applyTheme();
+tick(); setInterval(tick, 1200);
+</script>
