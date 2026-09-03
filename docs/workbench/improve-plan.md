@@ -143,6 +143,9 @@ and interleaving it with the outcome and digest work above would make a diff
 nobody can review. The parity tests are the guard
 until then — they are the reason the divergence would be caught, and they
 are also the reason the extraction is safe to do later rather than never.
+It has since landed: `cmd/tenon/gate.go`'s `runGate` is the one sequence all
+three commands call, so the parity is structural and those tests now guard
+it rather than constitute it.
 
 ## Corrections to the notes
 

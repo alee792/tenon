@@ -9,20 +9,16 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/alee792/tenon/internal/agentproject"
 	"github.com/alee792/tenon/internal/apply"
-	"github.com/alee792/tenon/internal/claude"
-	"github.com/alee792/tenon/internal/codex"
 	"github.com/alee792/tenon/internal/diagnostics"
-	"github.com/alee792/tenon/internal/version"
 )
 
 // driftResult is the jsonl-mode result summary for a clean drift check,
 // shaped like checkResult/applyResult: agent, harness, workspace, and the
 // source fingerprint, plus the unchanged file list. Outcome is always "ok"
 // here — a drift result object is only ever emitted for a clean run; a
-// failing one ends with writeDriftOutcome's gate_failed or drift object
-// instead.
+// failing one ends with the shared gate's own gate_failed object, or with
+// writeDriftOutcome's drift object, instead.
 type driftResult struct {
 	Outcome     string   `json:"outcome"`
 	Agent       string   `json:"agent"`
@@ -32,27 +28,26 @@ type driftResult struct {
 	Unchanged   []string `json:"unchanged"`
 }
 
-// driftOutcomeResult is the final jsonl-mode line for a failing drift run,
-// distinguishing why: gate_failed when the source itself is invalid (the
-// same gate check and apply run), drift when the source is fine but the
-// workspace no longer matches what a fresh apply would produce (a modified,
-// missing, or stale file).
+// driftOutcomeResult is the final jsonl-mode line for a drift run whose
+// source passed the gate but whose workspace no longer matches what a fresh
+// apply would produce (a modified, missing, or stale file). A source that
+// fails the gate ends instead with the gate's own gate_failed object — the
+// same one check and apply emit, because it is the same gate.
 type driftOutcomeResult struct {
 	Outcome string `json:"outcome"`
-	// SourceDigest names the authored bytes that failed the gate, exactly as
-	// check's gate_failed object carries it, and is empty (and omitted) for
-	// a drift outcome: a drift run's source passed, so it has a fingerprint
-	// and needs no digest.
+	// SourceDigest is always empty (and omitted) here, and stays declared so
+	// this object and check's gate_failed object share one shape: a drift
+	// run's source passed, so it has a fingerprint and needs no digest.
 	SourceDigest string `json:"source_digest,omitempty"`
 }
 
-// writeDriftOutcome terminates the jsonl stream with the final gate_failed
-// or drift object for a failing drift run. A no-op in prose mode.
-func writeDriftOutcome(jsonl bool, stdout, stderr io.Writer, outcome, digest string) {
+// writeDriftOutcome terminates the jsonl stream with the final drift object
+// for a run whose workspace no longer matches. A no-op in prose mode.
+func writeDriftOutcome(jsonl bool, stdout, stderr io.Writer) {
 	if !jsonl {
 		return
 	}
-	if err := writeResult(stdout, driftOutcomeResult{Outcome: outcome, SourceDigest: digest}); err != nil {
+	if err := writeResult(stdout, driftOutcomeResult{Outcome: "drift"}); err != nil {
 		fmt.Fprintln(stderr, "tenon drift:", err)
 	}
 }
@@ -88,126 +83,81 @@ func runDrift(args []string, stdout, stderr io.Writer) int {
 	}
 	agent := positional[0]
 
-	harnessValue, harnessFromEnv := resolveHarness(*harnessName)
-	var driver apply.Driver
-	switch harnessValue {
-	case "claude":
-		driver = claude.Driver{}
-	case "codex":
-		driver = codex.Driver{}
-	default:
-		fmt.Fprint(stderr, harnessFlagError("drift", harnessValue, harnessFromEnv))
+	driver, _, ok := resolveDriver("drift", *harnessName, false, stderr)
+	if !ok {
 		return 2
 	}
 	if *workspace == "" {
 		fmt.Fprintln(stderr, "tenon drift: --workspace is required")
 		return 2
 	}
-	var jsonl bool
-	switch *mode {
-	case "prose":
-	case "jsonl":
-		jsonl = true
-	default:
-		fmt.Fprintln(stderr, "tenon drift: --format must be prose or jsonl")
+	jsonl, ok := parseFormat("drift", *mode, stderr)
+	if !ok {
 		return 2
 	}
 
-	supplied, err := readSuppliedManifest(*manifestPath)
-	if err != nil {
-		return failEnv(jsonl, stdout, stderr, "drift", err)
-	}
-	p, diags, err := agentproject.LoadWithManifest(agent, expectedFingerprint(supplied))
-	if err != nil {
-		return failEnv(jsonl, stdout, stderr, "drift", err)
-	}
-	// A supplied manifest is verified against the current closure exactly as
-	// check does, before generation: drift reports the identical drift
-	// check and apply would, rather than silently regenerating against a
-	// pin the closure no longer matches.
-	if p != nil && !diags.HasErrors() && supplied != nil {
-		if _, err := verifyManifestDiag(p, driver.Harness(), resolveIntegrationStoreBase(), supplied, diags); err != nil {
-			return failEnv(jsonl, stdout, stderr, "drift", err)
-		}
-	}
-	// Everything through generation below mirrors check's own gate exactly
-	// (load, verify, prepare tools, generation dry-run): a diagnostic error
-	// anywhere in it is a gate_failed outcome, the source itself is invalid,
-	// not a difference against the workspace.
-	if p == nil || diags.HasErrors() {
-		render(diags, jsonl, stdout, stderr)
-		writeDriftOutcome(jsonl, stdout, stderr, "gate_failed", sourceDigest(agent, p))
-		return 1
-	}
-
-	executable, err := resolveExecutable()
-	if err != nil {
-		return failEnv(jsonl, stdout, stderr, "drift", err)
-	}
 	ws, err := filepath.Abs(*workspace)
 	if err != nil {
 		return failEnv(jsonl, stdout, stderr, "drift", err)
 	}
-	// A workspace that does not exist is not a gate failure: the source is
-	// fine, the environment is what is missing, and gate_failed says the
-	// opposite of the truth about the source. A nonexistent workspace holds
-	// no apply record and no owned file, so it classifies exactly as what it
-	// is — every generated path missing — and the run ends "drift", the same
-	// outcome as any other workspace that no longer matches. Nothing below
-	// writes to the workspace, so there is nothing to create either.
-	//
-	// A workspace that exists but is a regular file is a different thing
-	// entirely: not drift, not a gate failure, but a usage mistake, and it
-	// is reported as one — exit 2, no outcome object, like every other
-	// usage error.
-	if info, err := os.Stat(ws); err == nil && !info.IsDir() {
-		fmt.Fprintf(stderr, "tenon drift: --workspace must be a directory (found a file): %s\n", ws)
-		return 2
-	}
-
-	// Tool preparation runs against a throwaway cache exactly as check
-	// does: drift writes nothing to the workspace or a persistent cache.
-	// It also prepares against the SOURCE, not against --workspace, exactly
-	// as check does: drift's gate is about the source, and a tool host
-	// launched in a workspace that does not exist yet cannot start at all —
-	// which would report a tool failure and gate_failed for a workspace
-	// whose only problem is that it is missing. The real --workspace is
-	// still what generation targets and what classification reads below.
-	prepWorkspace, err := filepath.Abs(agent)
+	supplied, err := readSuppliedManifest(*manifestPath)
 	if err != nil {
 		return failEnv(jsonl, stdout, stderr, "drift", err)
 	}
-	cache := ""
-	if len(p.Tools) > 0 {
-		cache, err = os.MkdirTemp("", "tenon-tools-")
-		if err != nil {
-			return failEnv(jsonl, stdout, stderr, "drift", err)
-		}
-		defer os.RemoveAll(cache)
+	// Everything up to classification is the gate check and apply run, in
+	// the same function: load, verify a supplied pin set before any
+	// generation, prepare tools, and generate against the Target apply
+	// builds — a supplied pin set's pinned Model included, so a model-pinned
+	// project regenerates identically to how it was applied and reports no
+	// false drift from the pin alone. A diagnostic error anywhere in it is a
+	// gate_failed outcome: the source itself is invalid, not a difference
+	// against the workspace.
+	//
+	// Tools are prepared against the SOURCE with a throwaway cache, exactly
+	// as check prepares them: drift writes nothing to the workspace or a
+	// persistent cache, and a tool host launched in a workspace that does
+	// not exist yet cannot start at all — which would report a tool failure
+	// and gate_failed for a workspace whose only problem is that it is
+	// missing. The real --workspace is what generation targets and what
+	// classification reads below.
+	gate, code := runGate(gateInput{
+		command:       "drift",
+		agent:         agent,
+		driver:        driver,
+		supplied:      supplied,
+		jsonl:         jsonl,
+		stdout:        stdout,
+		stderr:        stderr,
+		prepCacheTemp: true,
+		generate:      true,
+		genWorkspace:  ws,
+		beforeTools: func() int {
+			// A workspace that does not exist is not a gate failure: the
+			// source is fine, the environment is what is missing, and
+			// gate_failed says the opposite of the truth about the source. A
+			// nonexistent workspace holds no apply record and no owned file,
+			// so it classifies exactly as what it is — every generated path
+			// missing — and the run ends "drift", the same outcome as any
+			// other workspace that no longer matches. Nothing below writes to
+			// the workspace, so there is nothing to create either.
+			//
+			// A workspace that exists but is a regular file is a different
+			// thing entirely: not drift, not a gate failure, but a usage
+			// mistake, and it is reported as one — exit 2, no outcome object,
+			// like every other usage error. It is settled here, before the
+			// gate prepares a single tool.
+			if info, err := os.Stat(ws); err == nil && !info.IsDir() {
+				fmt.Fprintf(stderr, "tenon drift: --workspace must be a directory (found a file): %s\n", ws)
+				return 2
+			}
+			return 0
+		},
+	})
+	defer gate.cleanup()
+	if code != 0 {
+		return code
 	}
-	if !prepareTools(p, prepWorkspace, cache, diags) {
-		render(diags, jsonl, stdout, stderr)
-		writeDriftOutcome(jsonl, stdout, stderr, "gate_failed", sourceDigest(agent, p))
-		return 1
-	}
-
-	// Regeneration reuses apply's exact generation path: the same driver,
-	// threaded through the identical Target shape runApply builds (the
-	// supplied manifest's pinned Model included), so a model-pinned project
-	// regenerates identically to how it was applied and reports no false
-	// drift from the pin alone.
-	files := driver.Generate(p, apply.Target{
-		Workspace:        ws,
-		Executable:       executable,
-		IntegrationStore: resolveIntegrationStoreBase(),
-		TenonVersion:     version.Version,
-		Model:            manifestModel(supplied, driver.Harness()),
-	}, diags)
-	if diags.HasErrors() {
-		render(diags, jsonl, stdout, stderr)
-		writeDriftOutcome(jsonl, stdout, stderr, "gate_failed", sourceDigest(agent, p))
-		return 1
-	}
+	p, diags, files := gate.project, gate.diags, gate.files
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
 
 	// From here on, the source has already passed the gate above: any
@@ -220,7 +170,7 @@ func runDrift(args []string, stdout, stderr io.Writer) int {
 			"the existing apply record could not be read and drift fails closed rather than guess ownership: %s",
 			diagnostics.Bound(err.Error(), 256))
 		render(diags, jsonl, stdout, stderr)
-		writeDriftOutcome(jsonl, stdout, stderr, "drift", "")
+		writeDriftOutcome(jsonl, stdout, stderr)
 		return 1
 	}
 
@@ -256,7 +206,7 @@ func runDrift(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	if diags.HasErrors() {
-		writeDriftOutcome(jsonl, stdout, stderr, "drift", "")
+		writeDriftOutcome(jsonl, stdout, stderr)
 		return 1
 	}
 	sort.Strings(unchanged)

@@ -6,9 +6,6 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/alee792/tenon/internal/apply"
-	"github.com/alee792/tenon/internal/claude"
-	"github.com/alee792/tenon/internal/codex"
 	"github.com/alee792/tenon/internal/stage"
 )
 
@@ -38,24 +35,12 @@ func runStagePrepare(args []string, stdout, stderr io.Writer) int {
 	}
 	agent := positional[0]
 
-	harnessValue, harnessFromEnv := resolveHarness(*harness)
-	var driver apply.Driver
-	switch harnessValue {
-	case "claude":
-		driver = claude.Driver{}
-	case "codex":
-		driver = codex.Driver{}
-	default:
-		fmt.Fprint(stderr, harnessFlagError("stage", harnessValue, harnessFromEnv))
+	driver, harnessValue, ok := resolveDriver("stage", *harness, false, stderr)
+	if !ok {
 		return 2
 	}
-	jsonl := false
-	switch *mode {
-	case "prose":
-	case "jsonl":
-		jsonl = true
-	default:
-		fmt.Fprintf(stderr, "tenon stage: --format must be prose or jsonl\n")
+	jsonl, ok := parseFormat("stage", *mode, stderr)
+	if !ok {
 		return 2
 	}
 	if *output == "" {
@@ -138,13 +123,8 @@ func runStageVerify(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "tenon stage verify: usage: tenon stage verify --artifact PATH [--prefix DIR] [--format <prose|jsonl>]\n")
 		return 2
 	}
-	jsonl := false
-	switch *mode {
-	case "prose":
-	case "jsonl":
-		jsonl = true
-	default:
-		fmt.Fprintf(stderr, "tenon stage verify: --format must be prose or jsonl\n")
+	jsonl, ok := parseFormat("stage verify", *mode, stderr)
+	if !ok {
 		return 2
 	}
 	if *artifact == "" {

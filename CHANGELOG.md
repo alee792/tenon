@@ -7,6 +7,13 @@ All notable changes to this project are documented in this file.
 The first release, v0.1.0, ships the core described in
 [the product specification](docs/product-spec.md).
 
+Entries below are written as of the change they record. Where an older
+entry names `tenon validate`, `tenon fingerprint show`, `--diagnostics`,
+or `tenon manifest`, read `tenon check`, `tenon check --emit files`,
+`--format`, and `tenon pins`: the read surface was consolidated in
+[ADR 0027](docs/adr/0027-consolidate-the-read-surface.md) before the cut,
+and the first entries under *Added* describe the shipped commands.
+
 ### Added
 
 - `tenon check` is now the single gate over an agent project, absorbing
@@ -21,7 +28,9 @@ The first release, v0.1.0, ships the core described in
   `fingerprint show` emitted, and `--emit catalog` is the resolved
   capability inventory (skills including plugin-merged ones with their
   descriptions, tools with their language, MCP servers, subagents,
-  schedules). A catalog is derived only, never accepted as input.
+  schedules). A catalog is derived only, never accepted as input. That
+  parity is structural: `check`, `drift`, and `apply` run one internal
+  `runGate`, so no second copy of the sequence is left to diverge.
 
 - The supplied agent manifest is renamed to the **pin set**, and the gate
   writes it. `--manifest PATH` becomes `--pins FILE` on `apply`, `drift`,
@@ -497,7 +506,7 @@ See [the specification's known limitations](docs/product-spec.md#known-limitatio
 for the full list. Notably:
 
 - Locked Python dependencies (`uv export`/`uv pip install`) and TypeScript
-  type-checking (`deno check`) still run on every `validate`/`apply`, since
+  type-checking (`deno check`) still run on every `check`/`apply`, since
   they are specific to each project's own source; only the pinned CPython
   interpreter and `deno` executable themselves are shared machine-wide
   (issue #38), not a project's locked dependencies.

@@ -145,9 +145,16 @@ and `stage`).
 
 - The README's first-five-minutes journey matches the rc rehearsal's
   actual output byte for byte.
-- The README's Status section and this repository's `CHANGELOG.md` both
-  name exactly which languages stage end to end at cut time (per
-  issues #14–#17's state).
+- This repository's `CHANGELOG.md` (its `stage` entries and Known
+  limitations) and `docs/product-spec.md`'s staged-agent section name
+  exactly which languages stage end to end at cut time (per issues
+  #14–#17's state). The README has no status section; its staging bullet
+  must not claim more than those two do.
+- The README's command names and flags (`check`, `drift`, `clean`,
+  `pins`, `--format`, `TENON_HARNESS`) match `tenon --help` on the rc
+  binary; the pre-ADR-0027 names (`validate`, `fingerprint show`,
+  `manifest`, `--diagnostics`) appear nowhere outside historical
+  `CHANGELOG.md` entries and the ADR log.
 - `CHANGELOG.md`'s `## [0.1.0]` heading's `UNRELEASED` marker is replaced
   with the tag date, and its content is swept against `git log` one more
   time for anything landed since the rc rehearsal.

@@ -4,15 +4,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/alee792/tenon/internal/agentproject"
-	"github.com/alee792/tenon/internal/apply"
-	"github.com/alee792/tenon/internal/claude"
-	"github.com/alee792/tenon/internal/codex"
-	"github.com/alee792/tenon/internal/diagnostics"
 	"github.com/alee792/tenon/internal/manifest"
 	"github.com/alee792/tenon/internal/version"
 )
@@ -119,25 +113,12 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 	// An empty flag defers to TENON_HARNESS; the flag always wins when set.
 	// check's harness stays optional either way — empty flag and unset env
 	// both mean the portable gate.
-	harnessValue, harnessFromEnv := resolveHarness(*harnessName)
-	var driver apply.Driver
-	switch harnessValue {
-	case "":
-	case "claude":
-		driver = claude.Driver{}
-	case "codex":
-		driver = codex.Driver{}
-	default:
-		fmt.Fprint(stderr, harnessFlagError("check", harnessValue, harnessFromEnv))
+	driver, harnessValue, ok := resolveDriver("check", *harnessName, true, stderr)
+	if !ok {
 		return 2
 	}
-	jsonl := false
-	switch *mode {
-	case "prose":
-	case "jsonl":
-		jsonl = true
-	default:
-		fmt.Fprintln(stderr, "tenon check: --format must be prose or jsonl")
+	jsonl, ok := parseFormat("check", *mode, stderr)
+	if !ok {
 		return 2
 	}
 	// Pin verification is harness-specific: the closure a pin set pins is the
@@ -176,70 +157,31 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return failEnv(jsonl, stdout, stderr, "check", err)
 	}
+	// The gate is the one check, drift, and apply share: load, verify a
+	// supplied pin set before any generation, prepare tools exactly as apply
+	// prepares them (here against a throwaway cache, so check writes
+	// nothing), and dry-run generation against the same Target apply builds.
 	// Writing pins without a supplied pin set loads for write, which accepts
 	// an instructions-free root: the gate mints the very pin set that later
 	// proves that root. Everything downstream is identical either way.
-	var p *agentproject.Project
-	var diags *diagnostics.List
-	if *writePins != "" && supplied == nil {
-		p, diags, err = agentproject.LoadForManifestWrite(agent)
-	} else {
-		p, diags, err = agentproject.LoadWithManifest(agent, expectedFingerprint(supplied))
+	gate, code := runGate(gateInput{
+		command:       "check",
+		agent:         agent,
+		driver:        driver,
+		supplied:      supplied,
+		loadForPins:   *writePins != "" && supplied == nil,
+		jsonl:         jsonl,
+		stdout:        stdout,
+		stderr:        stderr,
+		prepCacheTemp: true,
+		generate:      true,
+	})
+	defer gate.cleanup()
+	if code != 0 {
+		return code
 	}
-	if err != nil {
-		return failEnv(jsonl, stdout, stderr, "check", err)
-	}
-	// A supplied pin set reports its closure drift before any generation, so
-	// check and apply fail identically.
-	// resolved is the closure the verification above read, kept so
-	// --write-pins writes exactly what was verified instead of resolving the
-	// environment a second time.
-	var resolved *manifest.Manifest
-	if p != nil && !diags.HasErrors() && supplied != nil {
-		resolved, err = verifyManifestDiag(p, driver.Harness(), resolveIntegrationStoreBase(), supplied, diags)
-		if err != nil {
-			return failEnv(jsonl, stdout, stderr, "check", err)
-		}
-	}
-	if p != nil && !diags.HasErrors() {
-		workspace, err := filepath.Abs(agent)
-		if err != nil {
-			return failEnv(jsonl, stdout, stderr, "check", err)
-		}
-		// Tool preparation is the same work apply does, in the same order,
-		// against a throwaway cache that is deleted afterwards: check reports
-		// apply's tool failures while writing nothing to the workspace.
-		cache := ""
-		if len(p.Tools) > 0 {
-			cache, err = os.MkdirTemp("", "tenon-tools-")
-			if err != nil {
-				return failEnv(jsonl, stdout, stderr, "check", err)
-			}
-			defer os.RemoveAll(cache)
-		}
-		prepared := prepareTools(p, workspace, cache, diags)
-		if prepared && driver != nil {
-			// Check resolves exactly what apply would — the same executable
-			// and apply's default workspace — so generation and its warnings
-			// are identical; the files themselves are discarded.
-			executable, err := resolveExecutable()
-			if err != nil {
-				return failEnv(jsonl, stdout, stderr, "check", err)
-			}
-			_ = driver.Generate(p, apply.Target{
-				Workspace:        workspace,
-				Executable:       executable,
-				IntegrationStore: resolveIntegrationStoreBase(),
-				TenonVersion:     version.Version,
-				Model:            manifestModel(supplied, driver.Harness()),
-			}, diags)
-		}
-	}
+	p, diags := gate.project, gate.diags
 	render(diags, jsonl, stdout, stderr)
-	if p == nil || diags.HasErrors() {
-		writeGateFailed(jsonl, stdout, stderr, "check", sourceDigest(agent, p))
-		return 1
-	}
 
 	// The gate has passed, so the closure this resolves is one a passing
 	// project actually produces. The bytes for an unchanged closure are
@@ -250,7 +192,7 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 		// With --pins, the closure was already resolved and verified above;
 		// reusing it is what makes the written pin set the closure that
 		// passed rather than a second, unverified read of the environment.
-		current := resolved
+		current := gate.resolved
 		if current == nil {
 			storeBase := resolveIntegrationStoreBase()
 			current, err = manifest.Resolve(p, harnessValue, version.Version, manifestResolverFor(p, harnessValue, storeBase))
