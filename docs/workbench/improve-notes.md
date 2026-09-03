@@ -1020,3 +1020,26 @@ than a line at the bottom of the help.
 
 Exit codes remain, derived mechanically from `outcome`, as the shell affordance
 and the last-resort signal.
+
+### G34. What the leaderboard still scores that it should not
+
+PR 1 of the improve import (#64) made `outcome: error` unscorable:
+fanout lands the variant in `errored`, evolve's `score_generation` skips
+it, and a genome with no measurement carries `score: null` rather than
+`0.0`. Two neighbours of that rule were left as they were, deliberately,
+because each is a behaviour decision rather than a bug:
+
+- A variant missing from `collect` entirely (`record is None`) and a
+  variant `cancelled` by a fail-fast sibling both still reach the scorers,
+  and every shipped scorer turns a non-`done` status into `0.0`. Both are
+  "we learned nothing", the same class as `errored`. Evolve's own path
+  never sets `fail_fast`, so `cancelled` is narrow in practice; `missing`
+  is not.
+- A `tenon run --timeout` overrun ends `outcome: error`, so an agent that
+  is merely slower than the budget is dropped from the leaderboard rather
+  than penalised. A search then drifts toward whatever fits the budget.
+  Whether a timeout is an environment failure or a finding about the
+  variant is a policy the spec should state, not a fall-through.
+
+Both belong with the adapter (PR 3), where the outcome vocabulary gets its
+one decoder and the scorers stop reading raw status strings.

@@ -993,10 +993,10 @@ class Search:
                     f"already admitted — a contract violation, not a finding about the "
                     f"genome: {', '.join(i for i in ids if i) or 'no diagnostics'}"
                 )
-            if written != str(path):
+            if outcome != "ok" or written != str(path):
                 raise EvolveError(
-                    f"tenon check reported ok for {genome.short} but wrote pins to "
-                    f"{written or 'nothing'} rather than {path}"
+                    f"tenon check --write-pins ended {outcome!r} for {genome.short} and "
+                    f"wrote pins to {written or 'nothing'} rather than {path}"
                 )
         return str(path)
 

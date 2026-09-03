@@ -13,7 +13,7 @@ fi
 # older interpreter otherwise fails inside compileall with a syntax error
 # that says nothing about why.
 if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)'; then
-  echo "python3 is required; the improve module needs 3.11 or newer" >&2
+  echo "the improve module needs python 3.11 or newer; found $(python3 --version 2>&1)" >&2
   exit 1
 fi
 

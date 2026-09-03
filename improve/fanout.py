@@ -1192,7 +1192,7 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--task", help="prompt dispatched as one turn")
     start.add_argument("--k", type=int, help="number of variants (mutually exclusive with a spec variants list)")
     start.add_argument("--mutate", help="shell command run in each variant's agent dir before the gate")
-    start.add_argument("--pins", help="pin set supplied to apply and run")
+    start.add_argument("--pins", help="pin set supplied to check, apply, and run")
     start.add_argument("--concurrency", type=int, help="variants in flight at once (default: min(k, 4))")
     start.add_argument("--timeout", help="whole-process deadline per variant (default: 600s, tenon's cap is 30m)")
     start.add_argument("--turn-timeout", help="per-turn deadline (default: none)")
