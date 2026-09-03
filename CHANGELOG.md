@@ -36,6 +36,23 @@ and the first entries under *Added* describe the shipped commands.
   finding about a candidate, and a rejected candidate is named by the
   `source_digest` the gate reports.
 
+  Its vocabulary was then swept once, before there was anyone to break. The
+  spec keys `operators`, `generations` and `max_evaluations` are `mutators`,
+  `rounds` and `max_variants`; the record keys `operator` and `generation` in
+  `lineage.jsonl`, `best.json` and every policy view are `mutator` and
+  `round`; the parent report a mutate hook reads carries `variants` where it
+  carried `trials`; the flag `--generations` is `--rounds`; the hook
+  environment variable `EVOLVE_OPERATOR` is `EVOLVE_MUTATOR`; the bundled
+  mutators moved from `improve/examples/operators/` to
+  `improve/examples/mutators/`; and a run's state is laid out as
+  `rounds/round-N/`, `round-N.fanout.json`, `judge/verdicts-round-N.json`,
+  `judge/round-N.json` and `round-N.log` rather than the `gen-` forms. There
+  is no compatibility shim and no dual reading of the old keys: a search
+  started before this cannot be resumed after it, and a policy or mutate hook
+  written against the old names must be updated. tenon's own *operator* is a
+  person and its own *generation* is the writing of harness files, which is
+  why neither word could keep this second meaning.
+
 - `tenon check` is now the single gate over an agent project, absorbing
   `tenon validate` and `tenon fingerprint show`
   ([ADR 0027](docs/adr/0027-consolidate-the-read-surface.md)). Without
