@@ -206,6 +206,7 @@ BANNED = [
     ("--" + "generations", "the flag is --rounds"),
     (r"\b" + _GEN + r"s?\b", "tenon generates harness files; a search step is a round"),
     ("max_" + "evaluations", "the budget key is max_variants"),
+    (r'"evalu' + r'ations"', 'checkpoint.json and best.json count "variants"'),
     (r'"tri' + r'als"', 'the parent-report key is "variants"'),
     (r"\blay" + r"_out\b", "the function is assemble()"),
     ("examples/" + "operators", "the directory is examples/mutators"),
@@ -215,7 +216,9 @@ BANNED = [
 ]
 
 # (path, substring) pairs deliberately kept: tenon's own meaning of the word,
-# quoted as tenon's.
+# quoted as tenon's. A match exempts the whole line from every rule, and it
+# is keyed to the exact sentence, so rewording that sentence fails this test
+# until the entry here is updated to match.
 ALLOWED = {
     ("improve/EVOLVE.md", "the same file generation apply would perform"),
 }
@@ -225,7 +228,8 @@ def _swept_files():
     root = pathlib.Path(__file__).resolve().parents[2]
     paths = []
     for pattern in ("improve/**/*.py", "improve/**/*.json", "improve/**/*.md",
-                    "improve/judge/*.html", ".claude/skills/*/SKILL.md"):
+                    "improve/**/*.sh", "improve/judge/*.html",
+                    ".claude/skills/*/SKILL.md"):
         paths += [p for p in root.glob(pattern)
                   if "__pycache__" not in p.parts and "assets" not in p.parts
                   and p != pathlib.Path(__file__).resolve()]
@@ -264,6 +268,7 @@ def test_the_guard_would_notice():
         'evolve run --resume --' + 'generations 4',
         'the next ' + _GEN,
         'max_' + 'evaluations: 60',
+        '{"evalu' + 'ations": 12}',
         '{"tri' + 'als": []}',
         'lay' + '_out(parents, plan, target)',
         'sh examples/' + 'operators/edit-llm.sh',

@@ -41,7 +41,10 @@ and the first entries under *Added* describe the shipped commands.
   `rounds` and `max_variants`; the record keys `operator` and `generation` in
   `lineage.jsonl`, `best.json` and every policy view are `mutator` and
   `round`; the parent report a mutate hook reads carries `variants` where it
-  carried `trials`; the flag `--generations` is `--rounds`; the hook
+  carried `trials`; the counters in `checkpoint.json` and `best.json` are
+  `variants` where they were `evaluations`; the flag `--generations` is
+  `--rounds`; the judge's `POST /score` and `POST /api/reset` take `round`
+  where they took `generation`; the hook
   environment variable `EVOLVE_OPERATOR` is `EVOLVE_MUTATOR`; the bundled
   mutators moved from `improve/examples/operators/` to
   `improve/examples/mutators/`; and a run's state is laid out as
