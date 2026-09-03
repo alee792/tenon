@@ -1392,7 +1392,7 @@ def cmd_best(args) -> int:
     print(f"run        {summary['run']} ({summary['strategy']}, {summary['variants']} variants)")
     print(f"genome     {best['genome']}")
     print(f"score      {shown(best.get('score'))}  sd {shown(best.get('stdev'))}")
-    print(f"mutator   {best['mutator']}")
+    print(f"mutator    {best['mutator']}")
     print(f"path       {best['path']}")
     print()
     print("Nothing has been promoted. Review the diff, then copy it into the")
