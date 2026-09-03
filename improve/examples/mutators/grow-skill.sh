@@ -9,7 +9,7 @@ set -eu
 report=${EVOLVE_PARENT_REPORT:-/dev/null}
 existing=${EVOLVE_GENES:-}
 
-name=$(claude -p "Read this evaluation report of an agent's runs: $(cat "$report" | head -c 12000)
+name=$(claude -p "Read this report of an agent's runs: $(cat "$report" | head -c 12000)
 
 The agent already has these components: $existing
 

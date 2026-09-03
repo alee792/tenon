@@ -625,7 +625,7 @@ class Search:
         scratch.mkdir(parents=True, exist_ok=True)
         candidates: list = []
         for i, (parents, tags) in enumerate(self.choose_pairs(round_no, population)):
-            work = scratch / f"g{round_no}-c{i}"
+            work = scratch / f"r{round_no}-c{i}"
             if work.exists():
                 shutil.rmtree(work)
             if len(parents) > 1:
