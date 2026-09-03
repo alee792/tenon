@@ -28,6 +28,15 @@ def refused(raw) -> str:
     raise AssertionError(f"genes {raw!r} should have been refused")
 
 
+def test_the_default_layout_mirrors_everything_the_loader_inventories():
+    """The gap this closes was real: harnesses/ was inventoried by tenon and
+    silently carried along by the search. The Go loader is the authority."""
+    layout = evolve.GeneLayout.of({})
+    for name in ("skills", "tools", "subagents", "plugins", "mcp", "schedules", "harnesses"):  # not tenon argv: tools, mcp
+        assert name in layout.dirs, f"{name} must be a default gene"
+    assert layout.files == ("instructions.md",)
+
+
 def test_the_default_layout_is_used_when_genes_are_omitted():
     layout = evolve.GeneLayout.of(None)
     assert layout.dirs == evolve.DEFAULT_GENE_DIRS

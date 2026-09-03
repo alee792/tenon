@@ -34,7 +34,9 @@ and the first entries under *Added* describe the shipped commands.
   which means a rejected source and a failed environment are finally
   distinguishable, so infrastructure noise can no longer be scored as a
   finding about a candidate, and a rejected candidate is named by the
-  `source_digest` the gate reports.
+  `source_digest` the gate reports. The default gene directories are
+  everything tenon's loader inventories, `harnesses/` included; a search
+  that wants harness config held fixed sets `genes.dirs` without it.
 
   Its vocabulary was then swept once, before there was anyone to break. The
   spec keys `operators`, `generations` and `max_evaluations` are `mutators`,
