@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## [0.1.0] - UNRELEASED
+## [0.1.0] - 2026-09-04
 
 The first release, v0.1.0, ships the core described in
 [the product specification](docs/product-spec.md).
@@ -571,6 +571,23 @@ and the first entries under *Added* describe the shipped commands.
   itself verified — the harness owns model selection, and tenon does not
   claim to check which model actually served a turn.
 
+### Release acceptance record
+
+The `v0.1.0-rc.2` rehearsal was cut from commit `4c9c91e` with CI green on
+that commit. The linux-amd64 clean-machine journey was run from archives
+built by `scripts/release.sh` at the tagged commit, which the reproducibility
+job proves byte-identical to what the release workflow publishes, rather
+than from the downloaded release: the checksum manifest verified, `tenon
+version` reported `0.1.0-rc.2`, the README quick start applied for both
+harnesses, the same source applied cleanly to a second workspace, `tenon
+schedule trigger` dispatched a real turn, and `tenon stage` produced trees
+for a Go-tool agent and a Python-tool agent that `tenon stage verify`
+accepted. Not run for this cut: the darwin-arm64 and linux-arm64 journeys
+(no machine available), the Docker staged-acceptance gate
+(`docs/staged-acceptance.md`; no Docker-capable machine), the TypeScript
+staging journey (no `deno` on the rehearsal machine), and the Codex driver's
+live successful-turn path, which stays a known limitation below.
+
 ### Known limitations
 
 See [the specification's known limitations](docs/product-spec.md#known-limitations)
@@ -587,9 +604,15 @@ for the full list. Notably:
   against the operator's plugin cache, so pruning the cache breaks an
   already-applied workspace until the next `tenon plugin fetch` (issue #58).
   `tenon stage` is unaffected: it materializes the content into the tree.
-- A supplied manifest is verified at `tenon run`'s session start, not
+- A supplied pin set is verified at `tenon run`'s session start, not
   re-verified per turn within that session (`schedule run` re-verifies
   each occurrence).
+- `tenon stage` fails closed when a segment of its `--output` path is an
+  ordinary word that also appears in the agent's own prose (its
+  build-path-leak check cannot tell the two apart), reporting
+  `stage.tree.build-path-leaked`; stage into a directory whose name is not
+  a word the agent uses. Staging a TypeScript-tool agent needs `deno` on
+  `PATH` and fails closed (`stage.tool.prepare.failed`) without it.
 - The Codex driver's successful-turn path has not been validated live —
   only its credential-safe 401 classification has.
 - Neither harness image (`docs/harness-images.md`) is published; the Claude
