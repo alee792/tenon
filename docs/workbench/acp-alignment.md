@@ -2,9 +2,11 @@
 
 - Status: research record answering one question — should tenon be
   reoriented to be native to the Agent Client Protocol (ACP)? — and
-  proposing where to align. Design direction, not an accepted contract;
-  the one piece that amends a spec'd boundary (how headless turns are
-  driven) is the candidate for an ADR.
+  proposing where to align. Stage 1 below is implemented as
+  `internal/harness/acp` behind `--driver acp`, with the granular
+  permission policy in place of the two-state one first proposed here;
+  [ADR 0028](../adr/0028-drive-headless-turns-over-the-agent-client-protocol.md)
+  records the decision and its falsifier.
 - Last verified: 2026-09-04. External claims are cited to their source;
   the protocol and both adapters release often, so re-verify before acting.
 
@@ -171,12 +173,15 @@ Design constraints the spike must hold, each traceable to the north star:
   commitment 2 stated as a protocol choice.
 - **Answer permissions by explicit operator policy, never by judgment.**
   `session/request_permission` is the one obligation the old drivers never
-  had. Default is deny, which ends the turn as `failed` with reason
-  `permission_denied`; `--permissions allow` answers every request with the
-  first allow option. Anything finer is the harness's native policy,
-  authored under `harnesses/<harness>/`, exactly as it is today for
-  interactive use. Tenon still enforces nothing (commitment 2); it declines
-  to be asked (tenet 5).
+  had. `--permissions deny` (the default) or `allow`, or a policy file of
+  ordered first-match rules over the call's kind, title, paths, and tool
+  name — the maintainer asked for granular allow and deny, so the two-state
+  policy this record first proposed was widened before it shipped. A
+  denied call does not end the turn; the agent decides what to do without
+  it, and the turn's status is what the agent reports. Which calls are
+  asked at all remains the harness's native mode, authored under
+  `harnesses/<harness>/`. Tenon still enforces nothing (commitment 2); it
+  declines to be asked (tenet 5).
 - **Never copy protocol text into an event or a reason.** The Codex
   driver's lesson — a turn error that echoed a live API key — applies to
   every `error.message` and every `_meta` field. `safeReason` moves up
@@ -248,10 +253,9 @@ and acpx has none of them. Revisit if acpx (or the `session/list`,
 
 ## Open questions for the maintainer
 
-1. Is the two-state permission policy acceptable as the whole of tenon's
-   headless approval story, or does the operator journey need per-tool
-   rules like acpx's `--policy`? The north star says the former; a real
-   scheduled task may say otherwise.
+1. Answered: the policy is granular (kind, title, path, tool), so it
+   matches acpx's `--policy` in reach while staying a flat first-match
+   list rather than a per-tool map.
 2. claude-agent-acp's registry entry lists its license as proprietary
    while its README accepts Apache-2.0 contributions. Pinning it as the
    headless Claude runtime is a dependency decision worth a line in

@@ -735,6 +735,40 @@ bounded prose stderr carries. Both are `run.completed` events with the full
 envelope, so a consumer decodes every line the same way and reads the last
 one's outcome rather than inferring an ending from silence.
 
+The dispatcher drives a native session through one of two drivers.
+`--driver native` (the default) speaks the harness's own headless
+protocol. `--driver acp` speaks the Agent Client Protocol
+([ADR 0028](adr/0028-drive-headless-turns-over-the-agent-client-protocol.md)):
+it launches the harness's reference adapter — `claude-agent-acp` or
+`codex-acp` on `PATH` — or the `--acp-command` the operator names, which
+may be any ACP agent, while `--harness` keeps selecting the compile target
+and stamping every event. Tenon is a minimal client: it advertises no
+file-system or terminal capability and passes no MCP servers, so the agent
+keeps its native tools and reads the applied files from the workspace as an
+interactive session would. The one thing a headless client must do that an
+interactive one leaves to a person is answer `session/request_permission`,
+and tenon answers it only from an operator-supplied policy: `--permissions
+deny` (the default) or `allow`, or a policy file —
+
+```json
+{"default": "deny",
+ "rules": [
+   {"kind": "read", "action": "allow"},
+   {"kind": "execute", "title": "git *", "action": "allow"},
+   {"kind": "edit", "path": "/abs/workspace/docs/*", "action": "allow"},
+   {"tool": "Bash", "title": "rm *", "action": "deny"}
+ ]}
+```
+
+— evaluated first-match-wins, where every field a rule names must match
+(`kind` is the protocol's closed tool-kind vocabulary; `title`, `path`, and
+`tool` are globs with `*` and `?`; `tool` is the harness-native tool name
+when the adapter reports one) and `default` decides the rest. The policy
+belongs to the operator and the invocation, never to agent source; it
+answers what the harness's own permission mode chooses to ask, and it
+enforces nothing beyond that answer. No protocol text — a title, a raw
+input, an error message — ever reaches an event, a reason, or stderr.
+
 Schedules execute two ways, both requiring current generated setup:
 
 ```sh
@@ -989,6 +1023,16 @@ above:
   own locked Python dependencies (unshared across agents, since independent
   projects rarely lock identical dependency sets — a stated future
   extension of issue #38) and `deno check` against a project's own tools.
+- **The ACP driver is opt-in and its adapters are unpinned.** `--driver acp`
+  ships behind an explicit flag: the native drivers stay the default until
+  ADR 0028's falsifier has been checked against live claude-agent-acp and
+  codex-acp sessions, and the adapter's `agentInfo.version` is not yet
+  recorded in the pin set, so a pin set proves the harness executable and
+  not the adapter that drove the turn. The driver is proven in CI against a
+  fake ACP agent over the real wire path, not against the adapters. A
+  resume needs an agent that advertises `loadSession`; one that does not is
+  refused rather than started fresh, so a multi-turn conversation over an
+  adapter without it fails closed on its second turn.
 - **Real harness drivers.** The Claude and Codex drivers are validated by
   pure-function unit tests plus manual `//go:build harness` integration
   tests against live binaries; CI does not run the latter, so CI green means
@@ -1010,7 +1054,9 @@ above:
 - A marketplace, automatic updater, dependency resolver, or lock file; the
   one acquisition path is an explicit `tenon plugin fetch` of a pointer the
   author wrote and pinned, and no project load ever acquires anything
-- Claude Agent SDK or hosted OpenAI agent runtimes
+- Embedding the Claude Agent SDK or a hosted OpenAI agent runtime; driving
+  a vendor's ACP adapter that is built on one is the relationship tenon has
+  with the `claude` binary, not an embedding
 - Background or distributed schedule clocks, workflows, independently
   configured nested subagents, or deployment orchestration
 - Building OCI manifests or layers, publishing or signing images, or hosted

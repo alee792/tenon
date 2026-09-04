@@ -28,6 +28,7 @@ import (
 	"github.com/alee792/tenon/internal/friction"
 	"github.com/alee792/tenon/internal/generated"
 	"github.com/alee792/tenon/internal/harness"
+	acpharness "github.com/alee792/tenon/internal/harness/acp"
 	claudeharness "github.com/alee792/tenon/internal/harness/claude"
 	codexharness "github.com/alee792/tenon/internal/harness/codex"
 	"github.com/alee792/tenon/internal/integration"
@@ -47,9 +48,9 @@ const usage = `usage:
   tenon drift AGENT --workspace DIR --harness <claude|codex> [--pins FILE] [--format <prose|jsonl>]
   tenon clean --workspace DIR [--harness <claude|codex>] [--force] [--format <prose|jsonl>]
   tenon mcp serve AGENT --harness <claude|codex> [--workspace DIR] [--pins FILE]
-  tenon run AGENT --workspace DIR --harness <claude|codex> [--conversation ID] [--input jsonl] [--pins FILE] [--timeout DUR] [--turn-timeout DUR]
-  tenon schedule trigger AGENT NAME --workspace DIR --harness <claude|codex> --input-id ID [--pins FILE] [--turn-timeout DUR] [--timeout DUR]
-  tenon schedule run AGENT --workspace DIR --harness <claude|codex> [--pins FILE] [--turn-timeout DUR] [--max-active-turns N]
+  tenon run AGENT --workspace DIR --harness <claude|codex> [--conversation ID] [--input jsonl] [--pins FILE] [--timeout DUR] [--turn-timeout DUR] [--driver <native|acp>] [--acp-command CMD] [--permissions <allow|deny|FILE>]
+  tenon schedule trigger AGENT NAME --workspace DIR --harness <claude|codex> --input-id ID [--pins FILE] [--turn-timeout DUR] [--timeout DUR] [--driver <native|acp>] [--acp-command CMD] [--permissions <allow|deny|FILE>]
+  tenon schedule run AGENT --workspace DIR --harness <claude|codex> [--pins FILE] [--turn-timeout DUR] [--max-active-turns N] [--driver <native|acp>] [--acp-command CMD] [--permissions <allow|deny|FILE>]
   tenon stage AGENT --harness <claude|codex> --output DIR [--format <prose|jsonl>]
   tenon stage verify --artifact PATH [--prefix DIR] [--format <prose|jsonl>]
   tenon mcp add AGENT NAME --url HTTPS_URL [--header 'K: V'] [--context TEXT] [--pins FILE]
@@ -626,19 +627,97 @@ func runMCPServe(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 // maxRunTimeout bounds the whole-process deadline a caller may request.
 const maxRunTimeout = 30 * time.Minute
 
-// newHarnessDriver resolves the headless driver for a harness: the real Claude
-// Code and Codex protocol drivers, each launching its native executable behind
-// the harness.Driver seam. Codex reports tenon's version to its app-server on
-// initialize.
-func newHarnessDriver(name string) (harness.Driver, error) {
+// driverFlags is the headless-driver selection every dispatching command
+// shares: which driver opens sessions, and — under acp — which agent
+// command it launches and how it answers permission requests.
+type driverFlags struct {
+	kind        *string
+	acpCommand  *string
+	permissions *string
+}
+
+// addDriverFlags registers the shared driver flags on fs.
+func addDriverFlags(fs *flag.FlagSet) driverFlags {
+	return driverFlags{
+		kind:        fs.String("driver", "native", "headless driver: native (the harness's own headless protocol) or acp (an Agent Client Protocol agent process)"),
+		acpCommand:  fs.String("acp-command", "", "under --driver acp: the agent launch command and arguments, split on whitespace (default: claude-agent-acp or codex-acp on PATH)"),
+		permissions: fs.String("permissions", "deny", "under --driver acp: how session/request_permission is answered — allow, deny, or the path of a policy file"),
+	}
+}
+
+// validate rejects malformed driver flags before any work, the way every
+// other flag check does: exit 2.
+func (f driverFlags) validate(command string, stderr io.Writer) bool {
+	switch *f.kind {
+	case "native", "acp":
+	default:
+		fmt.Fprintf(stderr, "tenon %s: --driver must be native or acp\n", command)
+		return false
+	}
+	if *f.kind == "native" {
+		if *f.acpCommand != "" {
+			fmt.Fprintf(stderr, "tenon %s: --acp-command requires --driver acp\n", command)
+			return false
+		}
+		if *f.permissions != "deny" {
+			fmt.Fprintf(stderr, "tenon %s: --permissions requires --driver acp\n", command)
+			return false
+		}
+	}
+	if *f.permissions == "" {
+		fmt.Fprintf(stderr, "tenon %s: --permissions must be allow, deny, or a policy file path\n", command)
+		return false
+	}
+	return true
+}
+
+// newHarnessDriver resolves the headless driver for a harness. Under the
+// native driver the real Claude Code and Codex protocol drivers each launch
+// their native executable behind the harness.Driver seam (Codex reports
+// tenon's version to its app-server on initialize). Under the acp driver one
+// Agent Client Protocol client launches the harness's adapter — or the
+// operator's --acp-command — and answers permission requests from the
+// supplied policy (ADR 0028).
+func newHarnessDriver(name string, f driverFlags) (harness.Driver, error) {
 	switch name {
-	case "claude":
-		return claudeharness.NewDriver("claude"), nil
-	case "codex":
-		return codexharness.NewDriver("codex", version.Version), nil
+	case "claude", "codex":
 	default:
 		return nil, fmt.Errorf("--harness must be exactly claude or codex")
 	}
+	if *f.kind == "acp" {
+		policy, err := resolvePermissions(*f.permissions)
+		if err != nil {
+			return nil, err
+		}
+		return acpharness.NewDriver(name, strings.Fields(*f.acpCommand), policy, version.Version)
+	}
+	switch name {
+	case "claude":
+		return claudeharness.NewDriver("claude"), nil
+	default:
+		return codexharness.NewDriver("codex", version.Version), nil
+	}
+}
+
+// resolvePermissions turns the --permissions value into a policy: the two
+// literals, or a policy file read and validated in full before any session
+// opens.
+func resolvePermissions(value string) (acpharness.Policy, error) {
+	switch value {
+	case "allow":
+		return acpharness.AllowAll(), nil
+	case "deny":
+		return acpharness.DenyAll(), nil
+	}
+	b, err := os.ReadFile(value)
+	if err != nil {
+		return acpharness.Policy{}, fmt.Errorf("reading --permissions policy: %w", err)
+	}
+	policy, err := acpharness.Parse(b)
+	if err != nil {
+		return acpharness.Policy{}, fmt.Errorf("--permissions %s: %w", value, err)
+	}
+	return policy, nil
 }
 
 // runRun dispatches headless turns for one conversation: it reads bounded JSONL
@@ -654,6 +733,7 @@ func runRun(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	timeout := fs.Duration("timeout", 2*time.Minute, "whole-process deadline")
 	turnTimeout := fs.Duration("turn-timeout", 0, "per-turn deadline (task mode; 0 disables)")
 	manifestPath := fs.String("pins", "", "supplied pin set to verify against the current runtime closure; fails closed naming the first drifted pin")
+	driverFlags := addDriverFlags(fs)
 
 	positional, ok := parsePositional(fs, args)
 	if !ok || len(positional) != 1 {
@@ -661,6 +741,9 @@ func runRun(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 2
 	}
 	agent := positional[0]
+	if !driverFlags.validate("run", stderr) {
+		return 2
+	}
 
 	harnessName, harnessFromEnv := resolveHarness(*harness)
 	switch harnessName {
@@ -703,7 +786,7 @@ func runRun(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		envelope.Conversation = "local"
 	}
 
-	driver, err := newHarnessDriver(harnessName)
+	driver, err := newHarnessDriver(harnessName, driverFlags)
 	if err != nil {
 		return failRun(stdout, stderr, envelope, err)
 	}
@@ -827,10 +910,14 @@ func runScheduleTrigger(args []string, stdout, stderr io.Writer) int {
 	turnTimeout := fs.Duration("turn-timeout", 90*time.Second, "per-turn deadline (0 disables)")
 	timeout := fs.Duration("timeout", 2*time.Minute, "whole-process deadline")
 	manifestPath := fs.String("pins", "", "supplied pin set to verify against the current runtime closure; fails closed naming the first drifted pin")
+	driverFlags := addDriverFlags(fs)
 
 	positional, ok := parsePositional(fs, args)
 	if !ok || len(positional) != 2 {
 		fmt.Fprintf(stderr, "tenon schedule trigger: usage: tenon schedule trigger AGENT NAME --workspace DIR --harness <claude|codex> --input-id ID\n")
+		return 2
+	}
+	if !driverFlags.validate("schedule trigger", stderr) {
 		return 2
 	}
 	agent, name := positional[0], positional[1]
@@ -878,7 +965,7 @@ func runScheduleTrigger(args []string, stdout, stderr io.Writer) int {
 		return failEnvf(noJSONL, stdout, stderr, "schedule trigger", "no schedule named %q in this agent", name)
 	}
 
-	driver, err := newHarnessDriver(harnessName)
+	driver, err := newHarnessDriver(harnessName, driverFlags)
 	if err != nil {
 		return failEnv(noJSONL, stdout, stderr, "schedule trigger", err)
 	}
@@ -950,10 +1037,14 @@ func runScheduleRun(args []string, stdout, stderr io.Writer) int {
 	turnTimeout := fs.Duration("turn-timeout", 90*time.Second, "per-turn deadline (0 disables)")
 	maxActive := fs.Int("max-active-turns", schedule.DefaultMaxActive, "concurrent occurrences across distinct schedules")
 	manifestPath := fs.String("pins", "", "supplied pin set to verify against the current runtime closure; fails closed naming the first drifted pin")
+	driverFlags := addDriverFlags(fs)
 
 	positional, ok := parsePositional(fs, args)
 	if !ok || len(positional) != 1 {
 		fmt.Fprintf(stderr, "tenon schedule run: exactly one AGENT directory is required\n%s", usage)
+		return 2
+	}
+	if !driverFlags.validate("schedule run", stderr) {
 		return 2
 	}
 	agent := positional[0]
@@ -989,7 +1080,7 @@ func runScheduleRun(args []string, stdout, stderr io.Writer) int {
 	if !ok {
 		return 1
 	}
-	driver, err := newHarnessDriver(harnessName)
+	driver, err := newHarnessDriver(harnessName, driverFlags)
 	if err != nil {
 		return failEnv(noJSONL, stdout, stderr, "schedule run", err)
 	}

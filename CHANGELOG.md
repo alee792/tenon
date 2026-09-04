@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- `tenon run`, `tenon schedule trigger`, and `tenon schedule run` take
+  `--driver acp` to drive the turn through an Agent Client Protocol agent
+  process — the harness's adapter (`claude-agent-acp`, `codex-acp`) or any
+  agent named with `--acp-command` — behind the same driver seam and onto
+  the same wire stream. `--permissions <allow|deny|FILE>` answers the
+  agent's permission requests from an operator policy: two literals or a
+  file of ordered first-match allow/deny rules over tool kind, title,
+  path, and tool name; the default is deny. Tenon advertises no client
+  capabilities and passes no MCP servers, so the agent reads the applied
+  workspace exactly as an interactive session does
+  ([ADR 0028](docs/adr/0028-drive-headless-turns-over-the-agent-client-protocol.md),
+  proposed; the native drivers stay the default).
+
 ## [0.1.0] - 2026-09-04
 
 The first release, v0.1.0, ships the core described in

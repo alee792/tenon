@@ -243,6 +243,29 @@ supplied pin set is verified at `tenon run`'s session start rather than
 per turn within that session; the recurring `schedule run` path re-verifies
 each occurrence.
 
+### Drive it over the Agent Client Protocol
+
+The same commands take `--driver acp` to run the turn through an Agent
+Client Protocol agent instead of the harness's own headless protocol: the
+harness's adapter by default (`claude-agent-acp`, `codex-acp`), or any ACP
+agent named with `--acp-command`. Because the agent reads the applied files
+from the workspace, an applied workspace also works under any other ACP
+client — acpx, OpenClaw, Zed, JetBrains — with no tenon involvement:
+
+```sh
+tenon apply my-agent --workspace WS --harness claude
+printf '%s\n' '{"input_id":"x-1","text":"review the open pull request"}' \
+  | tenon run my-agent --workspace WS --harness claude --driver acp \
+      --permissions ./permissions.json
+acpx claude --cwd WS "review the open pull request"   # any ACP client
+```
+
+Headless, nobody is there to approve a tool call, so `--permissions` says
+how tenon answers when the agent asks: `deny` (the default), `allow`, or a
+file of ordered allow/deny rules over the call's kind, command title, file
+paths, and tool name. See [headless operation](product-spec.md#headless-operation)
+for the policy shape.
+
 ## Stage an agent for containerized deployment
 
 **For** an operator who already has an OCI build system and wants the agent
