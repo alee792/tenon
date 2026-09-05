@@ -30,7 +30,6 @@ in frontmatter and a Markdown body. Everything else is a file you add:
 | `tools/*.ts`, `tools/*.py`, or `tools/NAME/tool.go` | one typed function |
 | a directory under `subagents/` | a subagent |
 | a Markdown file under `mcp/` | an MCP server the harness connects to |
-| a Markdown file under `schedules/` | a cron task |
 
 ```sh
 tenon apply . --harness claude   # or: --harness codex
@@ -182,7 +181,7 @@ distinct line and never has to infer failure from a missing summary. Apply
 records that fingerprint, and every dispatch lifecycle event carries it
 too. `check --emit catalog` additionally reports the resolved capability
 inventory the gate has already computed — skills, tools, MCP servers,
-subagents, schedules — but only for a source that passes, and tenon never
+subagents — but only for a source that passes, and tenon never
 accepts such an inventory as input. An instructions-free project is a
 legitimate candidate for a loop to try: a supplied pin set whose expected
 fingerprint matches the directory also proves the agent root, and the
@@ -202,46 +201,44 @@ requires only that each variant is a directory that applies
 deterministically. Automatic or unreviewed promotion of an agent-authored
 improvement is an explicit non-goal.
 
-## Run the same folder headless and on a schedule
+## Run the same folder headless
 
 **For** an operator running an agent without a person at a terminal — from
-a queue, a hook, or a clock.
+a hook, a clock, a chat gateway, or an improvement loop.
 
 The interactive setup and the unattended setup are usually two different
 configurations, and the second is the one nobody reviews.
 
-The same folder, unedited, runs headless. `tenon run` is a turn dispatcher
-over bounded JSONL:
+The same folder, unedited, runs headless, because the applied workspace is
+the whole configuration and tenon is not in the run. Launch the harness's
+own headless mode, or any Agent Client Protocol client, where an
+interactive session would start:
 
 ```sh
-printf '%s\n' '{"input_id":"x-1","text":"..."}' \
-  | tenon run AGENT --workspace WS --harness <claude|codex> --input jsonl
+tenon apply my-agent --workspace WS --harness claude
+tenon drift my-agent --workspace WS --harness claude      # fail closed before launching
+claude -p "review the open pull request"                  # or: codex exec "..."
+acpx claude --cwd WS --approve-reads "review the open pull request"
 ```
 
-Input is durably accepted and queued while a turn is active, processed one
-FIFO turn per conversation, mapped to a resumable native session, and
-emitted as ordered JSONL events; a repeated input ID deduplicates within
-its conversation.
+acpx, OpenClaw, Zed, and JetBrains all launch the harness's ACP adapter in
+the workspace and read the applied files from it, so a chat gateway or an
+editor is the same journey as a shell. Headless, nobody is there to approve
+a tool call: that is the client's policy (acpx's `--approve-all`,
+`--deny-all`, or `--policy` rules) or the harness's own permission mode,
+authored under `harnesses/<harness>/`.
 
-Schedules are Markdown files under `schedules/` whose frontmatter holds one
-five-field cron string and whose body is the task prompt.
-`tenon schedule trigger` dispatches a single occurrence under a caller-owned
-stable ID, opening a fresh native task session and returning the retained
-outcome for a duplicate. `tenon schedule run` is an explicit foreground UTC
-clock: first occurrence strictly after startup, no overlap for one
-schedule, a local lock excluding a second clock for the same workspace,
-agent, and harness, and graceful drain on signals. Both paths require
-current generated setup. See
+A task on a clock is the same recipe under cron, a systemd timer, or a
+gateway's scheduler, one fresh session per occurrence, with the prompt
+kept wherever that scheduler reads it. See
 [headless operation](product-spec.md#headless-operation).
 
-**The boundary.** The dispatcher is not another chat UI or model loop.
-There is no daemon, no downtime or clock-jump backfill, no missed-run
-replay, and no hosted delivery runtime. After a restart, active work
-without a proven terminal result is recorded uncertain and never silently
-retried, and lifecycle output is bounded and never contains model text. A
-supplied pin set is verified at `tenon run`'s session start rather than
-per turn within that session; the recurring `schedule run` path re-verifies
-each occurrence.
+**The boundary.** Tenon proves the workspace and records the fingerprint;
+it does not drive the harness, queue input, keep conversation state, run
+a clock, or hold a schedule
+([ADR 0029](adr/0029-stop-driving-the-harness.md)). A loop that
+scores runs records the fingerprint `drift` or `check` reports beside each
+run's output, and never copies a harness's raw error text into a record.
 
 ## Stage an agent for containerized deployment
 

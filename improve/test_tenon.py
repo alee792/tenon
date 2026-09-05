@@ -53,12 +53,10 @@ SUBCOMMANDS = (
     "check",
     "apply",
     "drift",
-    "run",
     "clean",
     "mcp",
     "stage",
     "pins",
-    "schedule",
     "fingerprint",
     "validate",
     "plugin",
@@ -73,15 +71,9 @@ FLAGS = (
     "--harness",
     "--workspace",
     "--emit",
-    "--turn-timeout",
     "--discard-local",
-    "--input",
-    "--conversation",
     "--model",
-    "--timeout",
     "--force",
-    "--input-id",
-    "--max-active-turns",
 )
 
 # An argv element is a quoted literal followed by whatever ends it: a comma
@@ -177,7 +169,6 @@ def test_confinement_fires_on_a_planted_violation():
         'argv = [self.binary, "check", str(agent)]',
         'argv = [tenon, "apply", str(agent)]',
         'argv += ["drift", str(agent)]',
-        'proc = spawn([binary, "run", str(agent)])',
         'argv = [binary, "clean", "--workspace", str(ws)]',
         'argv = [binary, "mcp", "serve"]',
         'argv = [binary, "stage", str(agent)]',
@@ -188,11 +179,7 @@ def test_confinement_fires_on_a_planted_violation():
         'argv += ["--harness", harness]',
         'argv += ["--workspace", str(workspace)]',
         'argv += ["--emit", "files"]',
-        'argv += ["--timeout", "600s"]',
         'argv += ["--force"]',
-        'argv += ["--input-id", ident]',
-        'argv += ["--max-active-turns", "4"]',
-        'argv = [binary, "schedule", "run", str(agent)]',
         'argv = [binary, "plugin", "status"]',
         'argv = [binary, "validate", str(agent)]',
         'argv = [binary, "fingerprint", "show"]',
@@ -531,104 +518,42 @@ def test_clean_passes_force_through_only_when_asked():
 
 
 # --------------------------------------------------------------------------
-# dispatch
+# running under a clock
 # --------------------------------------------------------------------------
 
 
-def test_run_completion_and_the_reduction_agree():
-    text = fixture("run-recovered-uncertain")
-    completion = adapter.read_run_completion(text)
-    per_input = adapter.summarize_turns(text)
-    assert completion["outcome"] == "ok"
-    reduced = adapter.reduce_counts(per_input)
-    assert {k: v for k, v in completion["turns"].items() if v} == reduced
-
-
-def test_a_startup_recovered_uncertain_is_excluded_from_the_reduction():
-    """A dispatcher terminalizes the turns a previous one abandoned before it
-    accepts an input of its own, and leaves them out of run.completed's
-    counts. The reduction must draw the same line, or a complete stream reads
-    as a truncated one."""
-    text = fixture("run-recovered-uncertain")
-    events = [json.loads(l) for l in text.splitlines() if l.strip()]
-    assert events[0]["type"] == "turn.uncertain", "fixture must lead with a recovered turn"
-    recovered = events[0]["input_id"]
-    per_input = adapter.summarize_turns(text)
-    assert recovered not in [r["input_id"] for r in per_input]
-    assert [r["status"] for r in per_input] == ["completed"]
-
-
-def test_run_gate_failed_carries_the_digest_and_no_fingerprint():
-    completion = adapter.read_run_completion(fixture("run-gate-failed"))
-    assert completion["outcome"] == "gate_failed"
-    assert completion["source_digest"].startswith("sha256:")
-    assert completion.get("fingerprint", "") == ""
-
-
-def test_a_tenon_side_deadline_is_an_environment_failure_here():
-    """tenon's own --timeout overrun ends `outcome: "error"` with prose this
-    adapter refuses to parse. That is exactly why the adapter enforces the
-    wall clock itself and reports `timed_out` — see `Tenon.dispatch`."""
-    try:
-        adapter.read_run_completion(fixture("run-error-deadline"))
-    except adapter.TenonEnvironment as err:
-        assert "deadline" in str(err), "the fixture should be tenon's own deadline path"
-    else:
-        raise AssertionError('run outcome "error" must raise TenonEnvironment')
-
-
-def test_dispatch_times_out_without_reading_any_error_prose():
-    """The wall clock is the adapter's. A process that outlives it is
-    terminated and reported as a finding about the variant."""
-    binary = sys.executable
+def test_run_with_clock_returns_the_exit_code_and_tees_output():
     with tempfile.TemporaryDirectory() as tmp:
-        events = Path(tmp) / "events.jsonl"
-        t = adapter.Tenon(binary, "claude")
-        # A stand-in for tenon that emits one event and then hangs: no
-        # terminator, no prose, nothing to match on but the clock.
-        script = (
-            "import sys,time,json;"
-            "sys.stdin.read();"
-            "print(json.dumps({'type':'input.accepted','input_id':'i1'}),flush=True);"
-            "time.sleep(60)"
+        out, err = Path(tmp) / "task.out", Path(tmp) / "task.err"
+        timed_out, code = adapter.run_with_clock(
+            [sys.executable, "-c", "import sys; print('hi'); sys.stderr.write('e'); sys.exit(3)"],
+            timeout_s=30, stdout_path=out, stderr_path=err,
         )
-        def spawn(argv, cwd=None, new_session=False, **kw):
-            return __import__("subprocess").Popen(
-                [binary, "-c", script], start_new_session=new_session, **kw
-            )
+        assert not timed_out and code == 3
+        assert out.read_text() == "hi\n" and err.read_text() == "e"
 
-        t._spawn = spawn
-        result = t.dispatch(
-            Path("agent"), Path(tmp), [{"input_id": "i1", "text": "x"}],
-            timeout_s=1, events_path=events,
+
+def test_run_with_clock_times_out_without_reading_any_prose():
+    """The wall clock is the caller's. A process that outlives it is
+    terminated and reported as timed out, whatever it printed."""
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "task.out"
+        timed_out, _ = adapter.run_with_clock(
+            [sys.executable, "-c", "import sys,time; sys.stdin.read(); print('started', flush=True); time.sleep(60)"],
+            timeout_s=1, stdout_path=out,
         )
-    assert result.outcome == "timed_out"
-    assert result.per_input == () and result.turns == {}
+    assert timed_out
 
 
-def test_dispatch_refuses_a_budget_the_backstop_cannot_cover():
-    """Above MAX_DISPATCH_TIMEOUT_S the tenon backstop is clamped to tenon's
-    cap and would fire before the adapter's clock, so a timeout would come
-    back as an environment error rather than timed_out. fanout refuses such a
-    budget; a direct caller must be told rather than silently degraded."""
-    t = adapter.Tenon(sys.executable, "claude", spawn=lambda *a, **k: None)
-    try:
-        t.dispatch(Path("."), Path("."), [], timeout_s=adapter.MAX_DISPATCH_TIMEOUT_S + 1)
-    except ValueError as err:
-        assert "MAX_DISPATCH_TIMEOUT_S" in str(err)
-    else:
-        raise AssertionError("a budget above the cap was accepted")
-
-
-def test_dispatch_times_out_when_nothing_would_drain_its_pipes():
-    """`events_path` and `stderr_path` are optional, and with neither, stdout
-    and stderr are PIPEs. A dispatch that wrote the whole payload to stdin
-    before arming the clock deadlocks against a child that fills stderr
-    first: the parent blocks in write, the child blocks in write, and the
-    deadline never fires because it never started. One `communicate` writes
-    the input and drains every pipe under one clock, so it cannot happen."""
+def test_run_with_clock_times_out_when_nothing_would_drain_its_pipes():
+    """`stdout_path` and `stderr_path` are optional, and with neither, stdout
+    and stderr are PIPEs. A run that wrote the whole stdin before arming the
+    clock deadlocks against a child that fills stderr first: the parent
+    blocks in write, the child blocks in write, and the deadline never fires
+    because it never started. One `communicate` writes the input and drains
+    every pipe under one clock, so it cannot happen."""
     binary = sys.executable
-    # Floods stderr past a pipe buffer BEFORE reading a line of stdin, then
+    # Floods stderr past a pipe buffer BEFORE reading a byte of stdin, then
     # hangs: nothing to parse, nothing to match on but the clock.
     script = (
         "import sys,time;"
@@ -646,15 +571,13 @@ def test_dispatch_times_out_when_nothing_would_drain_its_pipes():
         spawned.append(proc)
         return proc
 
-    t = adapter.Tenon(binary, "claude", spawn=spawn)
-    # A payload larger than a pipe buffer, so the stdin write cannot complete
-    # on its own either.
-    inputs = [{"input_id": f"i{i}", "text": "y" * 4000} for i in range(50)]
     box = {}
 
     def run():
         box["started"] = time.time()
-        box["result"] = t.dispatch(Path("agent"), Path("/work/ws"), inputs, timeout_s=1)
+        box["result"] = adapter.run_with_clock(
+            [binary], timeout_s=1, stdin=b"y" * 200000, spawn=spawn
+        )
         box["elapsed"] = time.time() - box["started"]
 
     worker = threading.Thread(target=run, daemon=True)
@@ -664,13 +587,13 @@ def test_dispatch_times_out_when_nothing_would_drain_its_pipes():
         for proc in spawned:
             proc.kill()
         raise AssertionError(
-            "dispatch never returned: a pipe nobody drains, or a clock armed "
+            "run_with_clock never returned: a pipe nobody drains, or a clock armed "
             "after the payload was written"
         )
-    assert box["result"].outcome == "timed_out"
+    assert box["result"][0] is True
     assert box["elapsed"] < 20, f"the clock took {box['elapsed']:.1f}s to fire"
     for proc in spawned:
-        assert proc.poll() is not None, "the dispatch left an orphan behind"
+        assert proc.poll() is not None, "the run left an orphan behind"
 
 
 # --------------------------------------------------------------------------
@@ -780,15 +703,6 @@ def test_fanout_child_env_is_the_adapters():
     assert env["FANOUT_HARNESS"] == "mine", "the variant's own env wins last"
 
 
-def test_a_truncated_event_stream_is_an_environment_failure():
-    try:
-        adapter.read_run_completion("")
-    except adapter.TenonEnvironment:
-        pass
-    else:
-        raise AssertionError("no run.completed must raise TenonEnvironment")
-
-
 # --------------------------------------------------------------------------
 # iterate
 # --------------------------------------------------------------------------
@@ -816,10 +730,6 @@ class FakeTenon(adapter.Tenon):
         self.calls.append("drifted")
         return self._answer("drifted")
 
-    def dispatch(self, agent, workspace, inputs, **kw):
-        self.calls.append("dispatch")
-        return self._answer("dispatch")
-
     def _answer(self, role):
         value = self.scripted[role]
         if isinstance(value, list):
@@ -832,25 +742,34 @@ class FakeTenon(adapter.Tenon):
 OK_VERDICT = adapter.Verdict(ok=True, fingerprint="sha256:aa")
 OK_APPLIED = adapter.Applied(fingerprint="sha256:aa", written=("CLAUDE.md",))
 OK_DRIFT = adapter.DriftReport(matched=True, fingerprint="sha256:aa")
-OK_RUN = adapter.Dispatch(outcome="ok", fingerprint="sha256:aa", turns={"completed": 1})
+OK_RUN = adapter.Run(outcome="ok", exit_code=0)
+
+
+def runner_returning(value, calls):
+    """A caller's run step for `iterate`: records the call, returns or
+    raises the scripted value."""
+    def run(workspace):
+        calls.append("run")
+        if isinstance(value, Exception):
+            raise value
+        return value
+    return run
 
 
 def test_iterate_default_skips_the_pre_run_drift():
     """apply just enumerated exactly what it wrote, so a drift immediately
     after it against an untouched workspace cannot differ."""
-    t = FakeTenon(gate=OK_VERDICT, compile=OK_APPLIED, dispatch=OK_RUN, drifted=OK_DRIFT)
-    it = t.iterate(Path("a"), Path("w"), [])
+    t = FakeTenon(gate=OK_VERDICT, compile=OK_APPLIED, drifted=OK_DRIFT)
+    it = t.iterate(Path("a"), Path("w"), runner_returning(OK_RUN, t.calls))
     assert it.ok and it.phase_failed == ""
-    assert t.calls == ["gate", "compile", "dispatch", "drifted"]
+    assert t.calls == ["gate", "compile", "run", "drifted"]
     assert it.pre_drift is None and it.post_drift is OK_DRIFT
 
 
 def test_iterate_paranoid_mode_runs_both_drifts():
-    t = FakeTenon(
-        gate=OK_VERDICT, compile=OK_APPLIED, dispatch=OK_RUN, drifted=[OK_DRIFT, OK_DRIFT]
-    )
-    it = t.iterate(Path("a"), Path("w"), [], verify_pre_drift=True)
-    assert it.ok and t.calls == ["gate", "compile", "drifted", "dispatch", "drifted"]
+    t = FakeTenon(gate=OK_VERDICT, compile=OK_APPLIED, drifted=[OK_DRIFT, OK_DRIFT])
+    it = t.iterate(Path("a"), Path("w"), runner_returning(OK_RUN, t.calls), verify_pre_drift=True)
+    assert it.ok and t.calls == ["gate", "compile", "drifted", "run", "drifted"]
 
 
 def test_iterate_stops_at_check_and_touches_no_workspace():
@@ -858,7 +777,7 @@ def test_iterate_stops_at_check_and_touches_no_workspace():
         ok=False, source_digest="sha256:bb", errors=(adapter.Diagnostic("x.y", "error"),)
     )
     t = FakeTenon(gate=rejected)
-    it = t.iterate(Path("a"), Path("w"), [])
+    it = t.iterate(Path("a"), Path("w"), runner_returning(OK_RUN, t.calls))
     assert not it.ok and it.phase_failed == "check" and it.outcome == "gate_failed"
     assert it.source_digest == "sha256:bb" and t.calls == ["gate"]
 
@@ -868,16 +787,16 @@ def test_iterate_names_an_apply_gate_failure_as_a_contract_violation():
         gate=OK_VERDICT,
         compile=adapter.GateContradiction("boom", source_digest="sha256:cc"),
     )
-    it = t.iterate(Path("a"), Path("w"), [])
+    it = t.iterate(Path("a"), Path("w"), runner_returning(OK_RUN, t.calls))
     assert it.phase_failed == "apply" and it.source_digest == "sha256:cc"
 
 
-TIMED_OUT = adapter.Dispatch(outcome="timed_out", turns={"completed": 0})
+TIMED_OUT = adapter.Run(outcome="timed_out")
 
 
 def test_iterate_records_a_timed_out_run_as_a_finding():
-    t = FakeTenon(gate=OK_VERDICT, compile=OK_APPLIED, dispatch=TIMED_OUT, drifted=OK_DRIFT)
-    it = t.iterate(Path("a"), Path("w"), [])
+    t = FakeTenon(gate=OK_VERDICT, compile=OK_APPLIED, drifted=OK_DRIFT)
+    it = t.iterate(Path("a"), Path("w"), runner_returning(TIMED_OUT, t.calls))
     assert not it.ok and it.phase_failed == "run" and it.outcome == "timed_out"
 
 
@@ -885,34 +804,20 @@ def test_a_timed_out_run_still_gets_its_post_run_drift():
     """A half-finished agent is exactly the one that may have rewritten its
     own configuration, so the drift runs — but the run is still what failed,
     and `timed_out` is still the scored finding."""
-    t = FakeTenon(gate=OK_VERDICT, compile=OK_APPLIED, dispatch=TIMED_OUT, drifted=OK_DRIFT)
-    it = t.iterate(Path("a"), Path("w"), [])
-    assert t.calls == ["gate", "compile", "dispatch", "drifted"]
+    t = FakeTenon(gate=OK_VERDICT, compile=OK_APPLIED, drifted=OK_DRIFT)
+    it = t.iterate(Path("a"), Path("w"), runner_returning(TIMED_OUT, t.calls))
+    assert t.calls == ["gate", "compile", "run", "drifted"]
     assert it.phase_failed == "run" and it.outcome == "timed_out"
     assert it.post_drift is OK_DRIFT
 
 
 def test_a_timed_out_run_that_also_drifted_reports_both():
     drifted = adapter.DriftReport(matched=False, findings=(adapter.Diagnostic("d", "error"),))
-    t = FakeTenon(gate=OK_VERDICT, compile=OK_APPLIED, dispatch=TIMED_OUT, drifted=drifted)
-    it = t.iterate(Path("a"), Path("w"), [])
+    t = FakeTenon(gate=OK_VERDICT, compile=OK_APPLIED, drifted=drifted)
+    it = t.iterate(Path("a"), Path("w"), runner_returning(TIMED_OUT, t.calls))
     # The run is what failed; the drift is evidence, not a second phase.
     assert it.phase_failed == "run" and it.outcome == "timed_out"
     assert it.post_drift is drifted and not it.post_drift.matched
-
-
-def test_a_gate_failed_dispatch_skips_the_post_run_drift():
-    """No run happened, so there is nothing for a drift to have observed —
-    and a process spent to learn that is a process wasted at search scale."""
-    t = FakeTenon(
-        gate=OK_VERDICT,
-        compile=OK_APPLIED,
-        dispatch=adapter.Dispatch(outcome="gate_failed", source_digest="sha256:dd"),
-    )
-    it = t.iterate(Path("a"), Path("w"), [])
-    assert t.calls == ["gate", "compile", "dispatch"]
-    assert it.phase_failed == "run" and it.outcome == "gate_failed"
-    assert it.post_drift is None and it.source_digest == "sha256:dd"
 
 
 def test_iterate_lets_an_environment_failure_raise_out():
@@ -920,7 +825,7 @@ def test_iterate_lets_an_environment_failure_raise_out():
     result and must never be written to lineage."""
     t = FakeTenon(gate=OK_VERDICT, compile=adapter.TenonEnvironment("disk full"))
     try:
-        t.iterate(Path("a"), Path("w"), [])
+        t.iterate(Path("a"), Path("w"), runner_returning(OK_RUN, t.calls))
     except adapter.TenonEnvironment:
         pass
     else:
@@ -931,12 +836,11 @@ def test_iterate_reports_post_run_drift():
     t = FakeTenon(
         gate=OK_VERDICT,
         compile=OK_APPLIED,
-        dispatch=OK_RUN,
         drifted=adapter.DriftReport(matched=False, findings=(adapter.Diagnostic("d", "error"),)),
     )
-    it = t.iterate(Path("a"), Path("w"), [])
+    it = t.iterate(Path("a"), Path("w"), runner_returning(OK_RUN, t.calls))
     assert it.phase_failed == "post_drift" and it.outcome == "drift"
-    assert it.dispatch is OK_RUN
+    assert it.run is OK_RUN
 
 
 if __name__ == "__main__":

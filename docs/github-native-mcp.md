@@ -365,9 +365,9 @@ remove or disable it.
 Connection discovery and package resolution during apply and stage are offline
 and verify current package state; other apply responsibilities retain their
 documented behavior. An agent without an installed `mcp/github.md` neither
-resolves nor stages this package. Tenon-owned scheduled, channel, and
-continuation process opens re-resolve current package state before opening a
-native child. Plain direct Claude or Codex launches do not; their generated
+resolves nor stages this package. `tenon drift` and `tenon mcp serve`
+re-resolve current package state before they run. Plain direct Claude or
+Codex launches do not; their generated
 configuration remains unchanged until reapply.
 
 ### Deferred-journey troubleshooting
@@ -382,7 +382,7 @@ configuration remains unchanged until reapply.
 | GitHub reports invalid, expired, or insufficient authorization | Replace or correct the fine-grained PAT and restart. This remains an official-server, GitHub, and harness failure; tenon does not intercept or reclassify it. |
 | Claude cannot start the server | Complete the native project MCP approval and inspect Claude's native MCP diagnostics. GitHub is optional, so unrelated managed tools remain available. |
 | Codex refuses the project or tool | Establish Codex project trust, then native server and tool approval. Missing project trust fails launch; missing optional server/tool approval leaves GitHub unavailable. |
-| Update or removal appears stale | Plain Claude or Codex does not call tenon before launch. For update, verify the new identity, reapply local consumers, rebuild agent images, then restart or redeploy. For removal, restore/enable the package if necessary and follow the connection-removal, local reapply/image rebuild, package-removal, restart order above. Tenon re-verifies only its own scheduled, channel, and continuation opens. |
+| Update or removal appears stale | Plain Claude or Codex does not call tenon before launch. For update, verify the new identity, reapply local consumers, rebuild agent images, then restart or redeploy. For removal, restore/enable the package if necessary and follow the connection-removal, local reapply/image rebuild, package-removal, restart order above. Tenon re-verifies package state in `drift` and `mcp serve`, never in a launch it is not part of. |
 | A rotated PAT appears stale | Restart a directly launched local harness from the updated shell. For headless, concurrent, or hibernated sessions, restart the owning tenon service/container so later child processes inherit the new injected environment. |
 
 Every claim on this page must be proven by credential-free tests before the

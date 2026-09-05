@@ -16,8 +16,8 @@ mints a new author-facing concept, adds a subsystem or dependency, moves a
 product boundary, or invests in an unvalidated future; other changes need no
 reconciliation commentary. Keep the native harness responsible for its model
 loop, context, native tools, approvals, and interactive interface. Tenon owns
-agent-project discovery and validation, generated harness files,
-dispatcher-managed sessions, and explicitly managed tools.
+agent-project discovery and validation, generated harness files, and
+explicitly managed tools; it does not drive the harness.
 
 Keep packages organized by concrete responsibility; do not introduce generic
 core, services, adapters, or utilities layers. Prefer the standard library.

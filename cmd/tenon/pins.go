@@ -95,8 +95,8 @@ func verifyManifestDiag(p *agentproject.Project, harnessName, storeBase string, 
 
 // checkManifest resolves the current closure and verifies the supplied pin set
 // against it, returning drift or an unresolvable closure as one error. It gates
-// every tenon-owned process open (serve, run, trigger, each schedule
-// occurrence): open nothing when it returns non-nil. A nil pin set is a no-op.
+// every tenon-owned process open (mcp serve): open nothing when it returns
+// non-nil. A nil pin set is a no-op.
 func checkManifest(p *agentproject.Project, harnessName, storeBase string, supplied *manifest.Manifest) error {
 	if supplied == nil {
 		return nil

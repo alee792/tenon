@@ -32,7 +32,7 @@ type PluginCache interface {
 // in every existing test that predates this feature) makes every
 // plugins/<name>.md reference fail closed, naming `tenon plugin fetch`,
 // while leaving every other authored form (instructions, skills, vendored
-// plugins/<name>/ directories, subagents, tools, mcp/, schedules) completely
+// plugins/<name>/ directories, subagents, tools, mcp/) completely
 // unaffected.
 var pluginCache PluginCache
 

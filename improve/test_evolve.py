@@ -32,7 +32,7 @@ def test_the_default_layout_mirrors_everything_the_loader_inventories():
     """The gap this closes was real: harnesses/ was inventoried by tenon and
     silently carried along by the search. The Go loader is the authority."""
     layout = evolve.GeneLayout.of({})
-    for name in ("skills", "tools", "subagents", "plugins", "mcp", "schedules", "harnesses"):  # not tenon argv: tools, mcp
+    for name in ("skills", "tools", "subagents", "plugins", "mcp", "harnesses"):  # not tenon argv: tools, mcp
         assert name in layout.dirs, f"{name} must be a default gene"
     assert layout.files == ("instructions.md",)
 

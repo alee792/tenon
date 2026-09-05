@@ -25,15 +25,11 @@ is not what runs.
 | `clean-blocked-containment.jsonl` | clean refusing a recorded path that leaves the workspace — a refusal `--force` does NOT override |
 | `clean-blocked-partial.jsonl` | a clean that removed four files and then found the fifth modified underneath it: the workspace is partially cleaned — see below |
 | `clean-error.jsonl` | clean against a workspace with no record for the harness |
-| `run-recovered-uncertain.jsonl` | a dispatch that leads with a startup-recovered `turn.uncertain` from a run killed mid-turn, then accepts and completes its own input |
-| `run-gate-failed.jsonl` | a dispatch rejected at the gate: a digest and an empty fingerprint |
-| `run-error-deadline.jsonl` | tenon's own `--timeout` expiring, which ends `outcome: "error"` like any other environment failure — the reason the adapter enforces the wall clock itself |
 
 **Every fixture is path-scrubbed.** The absolute paths a recording carried
-are rewritten to a neutral `/work/...` prefix and the recorded `session_id`s
-to one fixed placeholder, so a fixture names no machine and no session. Only
-those two substitutions are made; every other byte is what tenon wrote. Keep
-new recordings scrubbed the same way.
+are rewritten to a neutral `/work/...` prefix, so a fixture names no
+machine. Only that substitution is made; every other byte is what tenon
+wrote. Keep new recordings scrubbed the same way.
 
 `clean-blocked-partial.jsonl` is recorded, not written: the partial state is
 reachable only through the race tenon's own comment describes — a path that

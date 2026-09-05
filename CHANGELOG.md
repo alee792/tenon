@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Removed
+
+- `tenon run`, `tenon schedule trigger`, and `tenon schedule run`, with the
+  turn dispatcher, its durable queue and session state, the Claude and
+  Codex headless drivers, and the foreground schedule clock behind them
+  ([ADR 0029](docs/adr/0029-stop-driving-the-harness.md)). Tenon sets a
+  workspace up and proves it; running headless is the operator launching
+  the harness's own headless mode or an Agent Client Protocol client
+  (acpx, OpenClaw, an editor) in the applied workspace, and a task on a
+  clock is the same launch under the operator's scheduler.
+- The `schedules/` authored surface, with `internal/cron` and the
+  `robfig/cron` dependency. A `schedules/` directory now fails the gate
+  with `schedules.removed` rather than being silently ignored.
+- The improve module's `dispatch` role. fanout and evolve take a `runner`
+  — the caller's command, run once per task in the workspace with the
+  prompt in `FANOUT_TASK` — and score its exit code and output; nothing in
+  `improve/` names a harness client.
+
 ## [0.1.0] - 2026-09-04
 
 The first release, v0.1.0, ships the core described in

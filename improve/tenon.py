@@ -9,7 +9,7 @@ file and the fixtures under `improve/testdata/` say whether it still parses.
 The roles are named for what the caller wants, never for the subcommand that
 currently provides it. When `fingerprint show` folded into `check`, the
 caller's vocabulary should not have had to move; `gate`, `identity`,
-`compile`, `drifted` and `dispatch` are the vocabulary that does not.
+`compile`, `drifted` and `clean` are the vocabulary that does not.
 
   gate       prove a source for a harness, and mint its fingerprint
   identity   the same proof without a harness — a portable fingerprint
@@ -17,15 +17,20 @@ caller's vocabulary should not have had to move; `gate`, `identity`,
   catalog    the resolved capability inventory of a proven source
   compile    write the harness-native configuration into a workspace
   drifted    ask whether a workspace still matches what compile would write
-  dispatch   run bounded turns against a compiled workspace
   clean      remove what compile wrote, using the workspace's own record
-  iterate    the composite: gate, compile, [drift], dispatch, drift
+  iterate    the composite: gate, compile, [drift], run, drift
+
+Running the agent is not a tenon role. Tenon sets the workspace up and proves
+it; whatever drives the harness in that workspace — `claude -p`, `codex
+exec`, an ACP client such as acpx — is the caller's command, and
+`run_with_clock` is the one piece of plumbing this module lends it: a
+process run under a wall clock, in its own process group, terminated as a
+tree when the clock expires.
 
 Three rules hold across all of them.
 
 **`outcome` is the authority.** Every jsonl-mode command terminates with one
-object carrying `outcome`; `run`'s terminator is a `run.completed` event.
-Exit 1 covers both a rejected source and a broken environment, so the exit
+object carrying `outcome`. Exit 1 covers both a rejected source and a broken environment, so the exit
 code cannot substitute, and neither can a field's presence — `fingerprint`
 appears on more than one shape and a diagnostic `id` appears on warnings.
 `read_terminator` is the single place that vocabulary is decoded.
@@ -51,25 +56,11 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
 
-# How long a terminated `run` is given to exit on its own before it is
-# killed. tenon flushes its terminator and closes its harness child on
-# SIGTERM; the grace is for that, not for the model.
+# How long a terminated child is given to exit on its own before it is
+# killed. A harness closes its own children on SIGTERM; the grace is for
+# that, not for the model.
 TERMINATE_GRACE_S = 10.0
-
-# The timeout relationship, stated once.
-#
-# tenon bounds `run --timeout` at 30 minutes. This adapter owns the verdict
-# (see `dispatch`), so tenon's deadline must never fire first: it is handed
-# the caller's budget plus HEADROOM, and a budget larger than
-# MAX_DISPATCH_TIMEOUT_S cannot be given that headroom under tenon's cap.
-# Callers that bound a budget — fanout, and evolve through it — bound it at
-# MAX_DISPATCH_TIMEOUT_S, not at tenon's cap, or the two clocks coincide and
-# a timed-out variant is reported as an environment error instead.
-TENON_RUN_TIMEOUT_CAP_S = 30 * 60
-TIMEOUT_BACKSTOP_HEADROOM_S = 30
-MAX_DISPATCH_TIMEOUT_S = TENON_RUN_TIMEOUT_CAP_S - TIMEOUT_BACKSTOP_HEADROOM_S
 
 
 class TenonEnvironment(Exception):
@@ -190,28 +181,23 @@ class DriftReport:
 
 
 @dataclass(frozen=True)
-class Dispatch:
-    """One `dispatch`, reduced.
+class Run:
+    """One run of the caller's command against a compiled workspace, reduced.
 
-    `outcome` is `"ok"`, `"gate_failed"`, or `"timed_out"`. `"ok"` means the
-    dispatcher completed every turn it was given, whatever those turns did —
-    score from `turns`, never from `outcome`. `"timed_out"` is this adapter's
-    own: the wall clock expired and the process was terminated. It is a
-    finding about the variant (see `dispatch`), so it is scored as a failed
-    variant rather than raised."""
+    `outcome` is `"ok"` or `"timed_out"`. `"ok"` means the command ran to its
+    own exit, whatever that exit was — score from `turns` (or the exit code),
+    never from `outcome`. `"timed_out"` means the wall clock expired and the
+    process tree was terminated. It is a finding about the variant, so it is
+    scored as a failed variant rather than raised."""
 
     outcome: str
-    fingerprint: str = ""
-    turns: dict = field(default_factory=dict)
-    per_input: tuple = ()
-    source_digest: str = ""
-    events_path: str = ""
     exit_code: int | None = None
+    turns: tuple = ()
 
 
 @dataclass(frozen=True)
 class Iteration:
-    """One full pass over a candidate: gate, compile, dispatch, drift.
+    """One full pass over a candidate: gate, compile, run, drift.
 
     `phase_failed` names the phase whose FINDING ended the pass. An
     environment failure is not a phase result — it raises out of `iterate`
@@ -226,7 +212,7 @@ class Iteration:
     verdict: Verdict | None = None
     applied: Applied | None = None
     pre_drift: DriftReport | None = None
-    dispatch: Dispatch | None = None
+    run: Run | None = None
     post_drift: DriftReport | None = None
 
 
@@ -283,75 +269,6 @@ def read_records(text: str) -> tuple:
     """Every non-diagnostic, non-terminator object in a stream, in order:
     `--emit files`/`--emit catalog` entries, clean's per-path lines."""
     return tuple(o for o in _objects(text) if not o.get("outcome") and not o.get("id"))
-
-
-def read_run_completion(text: str, *, command: str = "") -> dict:
-    """The last `run.completed` event in a dispatch stream.
-
-    `run` has no `--format`: its stdout *is* the event stream, and its
-    terminator is an event like any other, carrying the dispatch's outcome,
-    the turn counts, and on failure the prose or the rejected source's
-    digest. Absent, the stream is truncated. `outcome: "error"` raises, for
-    the same reason it does in `read_terminator`."""
-    completion: dict = {}
-    for obj in _objects(text):
-        if obj.get("type") == "run.completed":
-            completion = obj
-    if not completion:
-        raise TenonEnvironment("emitted no run.completed event; the stream is truncated", command=command)
-    if completion.get("outcome") == "error":
-        raise TenonEnvironment(completion.get("error", "") or "unknown", command=command)
-    return completion
-
-
-def summarize_turns(text: str) -> tuple:
-    """Reduce a dispatch event stream to one terminal record per input id.
-
-    `run.completed`'s `turns` is counts only, so the per-input reduction is
-    still needed and is cross-checked against those counts.
-
-    A dispatcher terminalizes any input a previous one abandoned before it
-    accepts an input of its own, emitting `turn.uncertain` for each, and
-    deliberately leaves those out of `run.completed`'s counts: they belong to
-    the run that abandoned them. This reduction draws the same line — the
-    first `input.accepted` — or a complete stream reads as a truncated one."""
-    terminal = {
-        "turn.completed": "completed",
-        "turn.failed": "failed",
-        "turn.cancelled": "cancelled",
-        "turn.uncertain": "uncertain",
-        "driver.process_failed": "driver_failed",
-    }
-    order: list = []
-    seen: dict = {}
-    accepted = False
-    for event in _objects(text):
-        kind = event.get("type")
-        if kind == "input.accepted":
-            accepted = True
-            continue
-        if kind not in terminal or not accepted:
-            continue
-        input_id = event.get("input_id") or ""
-        if input_id not in seen:
-            order.append(input_id)
-        seen[input_id] = {
-            "input_id": input_id,
-            "status": terminal[kind],
-            "reason": event.get("reason", ""),
-            "session_id": event.get("session_id", ""),
-            "fingerprint": event.get("fingerprint", ""),
-        }
-    return tuple(seen[i] for i in order)
-
-
-def reduce_counts(per_input: Iterable[dict]) -> dict:
-    """The per-input reduction as `run.completed`-shaped counts."""
-    counts: dict = {}
-    for record in per_input:
-        key = "process_failed" if record["status"] == "driver_failed" else record["status"]
-        counts[key] = counts.get(key, 0) + 1
-    return counts
 
 
 # --------------------------------------------------------------------------
@@ -692,193 +609,13 @@ class Tenon:
             f"unknown outcome {terminator['outcome']!r}", command=f"clean {workspace}"
         )
 
-    # -- dispatch ----------------------------------------------------------
-
-    def dispatch(
-        self,
-        agent: Path,
-        workspace: Path,
-        inputs: Iterable[dict],
-        *,
-        pins: Path | None = None,
-        conversation: str = "",
-        timeout_s: int = 600,
-        turn_timeout_s: int = 0,
-        events_path: Path | None = None,
-        stderr_path: Path | None = None,
-        harness: str | None = None,
-        cwd: Path | None = None,
-    ) -> Dispatch:
-        """Run bounded turns against a compiled workspace.
-
-        **The wall clock is enforced here, not by tenon.** tenon's own
-        `--timeout` overrun ends the stream with `outcome: "error"` and the
-        prose "context deadline exceeded" — structurally identical to an
-        unreadable pin set or a harness that would not start. Treating that
-        as an environment failure drops a merely-slow agent off the
-        leaderboard instead of penalising it, and a search then drifts toward
-        whatever fits the budget; treating it as a finding by matching on the
-        prose would make the policy a string comparison against text tenon is
-        free to reword.
-
-        So this adapter owns the deadline: it waits `timeout_s`, then
-        terminates the process (SIGTERM, then SIGKILL after a grace) and
-        returns `Dispatch(outcome="timed_out", ...)` with whatever turns were
-        reduced before the clock ran out. tenon is still given a `--timeout`,
-        a little larger, as the backstop for the case where this process dies
-        first — but the verdict never depends on it.
-
-        `outcome: "ok"` means the dispatcher completed every turn it was
-        given, whatever those turns' statuses. Score from `turns`."""
-        argv = [self.binary, "run", str(agent), "--workspace", str(workspace),
-                *self._harness_args(harness), "--input", "jsonl"]
-        if conversation:
-            argv += ["--conversation", conversation]
-        # tenon's deadline is the backstop for a supervisor that died, not the
-        # verdict; give it headroom so the adapter's clock is the one that
-        # fires, and stay inside tenon's own cap. A budget above
-        # MAX_DISPATCH_TIMEOUT_S cannot be given that headroom — callers that
-        # bound a budget bound it there, so this clamp is the floor of last
-        # resort rather than the policy.
-        if int(timeout_s) > MAX_DISPATCH_TIMEOUT_S:
-            raise ValueError(
-                f"timeout_s={timeout_s} exceeds MAX_DISPATCH_TIMEOUT_S={MAX_DISPATCH_TIMEOUT_S}: "
-                "above it tenon's own deadline would fire first and a timeout would "
-                "surface as an environment error instead of timed_out"
-            )
-        backstop = min(int(timeout_s) + TIMEOUT_BACKSTOP_HEADROOM_S, TENON_RUN_TIMEOUT_CAP_S)
-        argv += ["--timeout", f"{backstop}s"]
-        if turn_timeout_s:
-            argv += ["--turn-timeout", f"{int(turn_timeout_s)}s"]
-        if pins:
-            argv += ["--pins", str(pins)]
-
-        payload = "".join(json.dumps(i) + "\n" for i in inputs).encode()
-        events = Path(events_path) if events_path else None
-        out_handle = events.open("wb") if events else subprocess.PIPE
-        err_handle = Path(stderr_path).open("wb") if stderr_path else subprocess.PIPE
-        try:
-            proc = self._popen(
-                argv,
-                cwd=cwd if cwd is not None else self.cwd,
-                stdout=out_handle,
-                stderr=err_handle,
-                stdin=subprocess.PIPE,
-                env=self.env,
-                # Its own process group, so the deadline can take down the
-                # harness the dispatcher started and whatever that started in
-                # turn. Signalling the dispatcher alone leaves the model
-                # process — and any tool server under it — orphaned and
-                # burning budget after the run this adapter reported is over.
-                new_session=True,
-            )
-            # The payload goes in through communicate(), never through a bare
-            # write before the clock is armed: a child that floods stderr
-            # while this process is blocked writing stdin deadlocks both
-            # sides, and the deadline never fires because it has not started.
-            # communicate() writes stdin and drains every pipe under one
-            # timeout, so no pipe is ever a PIPE nobody reads and the clock
-            # covers the whole child lifetime.
-            timed_out, captured_out, captured_err = self._wait_with_clock(
-                proc, timeout_s, payload
-            )
-        finally:
-            for handle in (out_handle, err_handle):
-                if hasattr(handle, "close"):
-                    handle.close()
-
-        text = events.read_text(errors="replace") if events else captured_out
-        stderr_text = (
-            Path(stderr_path).read_text(errors="replace") if stderr_path else captured_err
-        )
-        per_input = summarize_turns(text)
-        events_name = str(events) if events else ""
-        if timed_out:
-            # Whatever the stream got to say before the clock fired is kept:
-            # the turns that did complete are still evidence about the
-            # variant, and the caller scores this as a failed variant.
-            return Dispatch(
-                outcome="timed_out",
-                turns=reduce_counts(per_input),
-                per_input=per_input,
-                events_path=events_name,
-                exit_code=proc.returncode,
-            )
-        try:
-            completion = read_run_completion(text, command=f"dispatch {agent}")
-        except TenonEnvironment as err:
-            raise TenonEnvironment(_with_detail(err.args[0], stderr_text), command="") from None
-        counts = completion.get("turns") or {}
-        reduced = reduce_counts(per_input)
-        # run.completed's counts are the dispatcher's own tally. If the
-        # per-input reduction disagrees, the stream this reduction read was
-        # truncated, and every count derived from it is wrong.
-        if counts and {k: v for k, v in counts.items() if v} != reduced:
-            raise TenonEnvironment(
-                f"reported turns {counts} but the stream reduces to {reduced}; "
-                f"the event stream in {events_name or 'stdout'} is truncated",
-                command=f"dispatch {agent}",
-            )
-        return Dispatch(
-            outcome=completion.get("outcome", ""),
-            fingerprint=completion.get("fingerprint", ""),
-            turns=counts,
-            per_input=per_input,
-            source_digest=completion.get("source_digest", ""),
-            events_path=events_name,
-            exit_code=proc.returncode,
-        )
-
-    def _wait_with_clock(self, proc, timeout_s: int, payload: bytes = b"") -> tuple:
-        """Write the dispatch's input, drain its pipes, and wait — all under
-        one clock, terminating the process when that clock expires.
-
-        One `communicate` covers the whole child lifetime: the stdin write is
-        inside the deadline rather than before it, and any stream left as a
-        PIPE is drained rather than left to fill. On expiry the tree is
-        terminated (SIGTERM, then SIGKILL after a grace) and communicate is
-        called AGAIN, which is what actually reaps the child and drains
-        whatever it wrote before it died."""
-        if not timeout_s or timeout_s <= 0:
-            out, err = proc.communicate(input=payload)
-            return False, _text(out), _text(err)
-        try:
-            out, err = proc.communicate(input=payload, timeout=timeout_s)
-        except subprocess.TimeoutExpired:
-            self._terminate(proc)
-            out, err = self._drain(proc)
-            return True, _text(out), _text(err)
-        return False, _text(out), _text(err)
-
-    @staticmethod
-    def _drain(proc) -> tuple:
-        """Reap a terminated child and take whatever its pipes still hold.
-
-        `_terminate` already sent SIGKILL; a second communicate is what
-        collects the exit status and empties the pipes. If even that does not
-        return, the pipes are held by something the kill did not reach, and
-        the streams are given up rather than blocking the run forever."""
-        for _ in range(2):
-            try:
-                return proc.communicate(timeout=TERMINATE_GRACE_S)
-            except subprocess.TimeoutExpired:
-                try:
-                    proc.kill()
-                except OSError:
-                    break
-        return b"", b""
-
-    @staticmethod
-    def _terminate(proc) -> None:
-        terminate_tree(proc)
-
     # -- the composite -----------------------------------------------------
 
     def iterate(
         self,
         agent: Path,
         workspace: Path,
-        inputs: Iterable[dict],
+        run,
         *,
         pins: Path | None = None,
         write_pins: Path | None = None,
@@ -886,9 +623,12 @@ class Tenon:
         verify_pre_drift: bool = False,
         harness: str | None = None,
         cwd: Path | None = None,
-        **dispatch_kw,
     ) -> Iteration:
-        """gate -> compile -> [drift] -> dispatch -> drift, as one record.
+        """gate -> compile -> [drift] -> run -> drift, as one record.
+
+        `run` is the caller's: a callable taking the workspace and returning
+        a `Run`. Tenon does not drive the harness; the caller's command does,
+        under `run_with_clock` if it wants the wall clock enforced.
 
         `phase_failed` records FINDINGS only. An environment failure at any
         phase raises out of here entirely rather than setting `phase_failed`:
@@ -901,10 +641,10 @@ class Tenon:
         full projection regeneration spent to re-derive a list the previous
         line already returned. Turn it on for a paranoid mode where something
         else may touch the workspace between apply and run. The POST-run
-        drift runs after a dispatch that COMPLETED and after one that TIMED
+        drift runs after a run that COMPLETED and after one that TIMED
         OUT — it is the only check that the agent did not rewrite its own
         configuration mid-run, and a half-finished agent is exactly the one
-        that may have. It is skipped when the dispatch failed at the gate,
+        that may have. It is skipped when the run never happened,
         because no run happened. A timed-out pass still reports
         `phase_failed="run"` with `outcome="timed_out"`; its `post_drift` is
         populated either way.
@@ -915,7 +655,7 @@ class Tenon:
         TODO(I4-followup): the two drifts still load and project the agent
         project twice, once each, and at search scale that is the dominant
         non-model cost. Collapsing them needs a tenon-side facility for two
-        drift reports from one load (a before/after pair around a dispatch,
+        drift reports from one load (a before/after pair around a run,
         or a drift that accepts a previously loaded projection). That is a
         tenon change, not an improve change; nothing here can do better than
         skipping the pre-run one.
@@ -967,23 +707,17 @@ class Tenon:
                     pre_drift=pre,
                 )
 
-        ran = self.dispatch(
-            agent, workspace, inputs, pins=pins, harness=harness, cwd=cwd, **dispatch_kw
-        )
+        ran = run(workspace)
         if ran.outcome not in ("ok", "timed_out"):
-            # `gate_failed` means the dispatcher never ran a turn, so there is
-            # nothing for a post-run drift to have observed and no workspace
-            # state a run could have changed.
             return Iteration(
                 ok=False,
                 phase_failed="run",
                 outcome=ran.outcome,
                 fingerprint=verdict.fingerprint,
-                source_digest=ran.source_digest,
                 verdict=verdict,
                 applied=applied,
                 pre_drift=pre,
-                dispatch=ran,
+                run=ran,
             )
 
         post = self.drifted(agent, workspace, pins=pins, harness=harness, cwd=cwd)
@@ -997,11 +731,10 @@ class Tenon:
                 phase_failed="run",
                 outcome=ran.outcome,
                 fingerprint=verdict.fingerprint,
-                source_digest=ran.source_digest,
                 verdict=verdict,
                 applied=applied,
                 pre_drift=pre,
-                dispatch=ran,
+                run=ran,
                 post_drift=post,
             )
         if not post.matched:
@@ -1015,7 +748,7 @@ class Tenon:
                 verdict=verdict,
                 applied=applied,
                 pre_drift=pre,
-                dispatch=ran,
+                run=ran,
                 post_drift=post,
             )
         return Iteration(
@@ -1024,9 +757,86 @@ class Tenon:
             verdict=verdict,
             applied=applied,
             pre_drift=pre,
-            dispatch=ran,
+            run=ran,
             post_drift=post,
         )
+
+
+def run_with_clock(
+    argv: list,
+    *,
+    cwd: Path | None = None,
+    env: dict | None = None,
+    timeout_s: int = 0,
+    stdin: bytes = b"",
+    stdout_path: Path | None = None,
+    stderr_path: Path | None = None,
+    spawn=None,
+) -> tuple:
+    """Run one command under a wall clock and return `(timed_out, exit code)`.
+
+    The command runs in its own process group so the clock can take down the
+    harness it started and whatever that started in turn; signalling the
+    command alone would leave the model process — and any tool server under
+    it — orphaned and burning budget after the run is over. On expiry the
+    tree is terminated (SIGTERM, then SIGKILL after a grace) and reaped.
+
+    `stdin` is written and every pipe drained under the same clock, by one
+    `communicate`: a child that floods stderr while the parent is blocked
+    writing stdin deadlocks both sides, and a clock armed after the write
+    never fires. `stdout_path`/`stderr_path` tee to files instead of pipes;
+    a caller that wants the agent's text reads the file back. `spawn` lets
+    a supervisor that tracks its own children keep doing that."""
+    out_handle = Path(stdout_path).open("wb") if stdout_path else subprocess.PIPE
+    err_handle = Path(stderr_path).open("wb") if stderr_path else subprocess.PIPE
+    try:
+        if spawn is not None:
+            proc = spawn(
+                argv, cwd=cwd, stdout=out_handle, stderr=err_handle,
+                stdin=subprocess.PIPE, env=env, new_session=True,
+            )
+        else:
+            proc = subprocess.Popen(
+                argv,
+                cwd=str(cwd) if cwd is not None else None,
+                stdout=out_handle,
+                stderr=err_handle,
+                stdin=subprocess.PIPE,
+                env=env,
+                start_new_session=True,
+            )
+        if not timeout_s or timeout_s <= 0:
+            proc.communicate(input=stdin)
+            return False, proc.returncode
+        try:
+            proc.communicate(input=stdin, timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            terminate_tree(proc)
+            _drain(proc)
+            return True, proc.returncode
+        return False, proc.returncode
+    finally:
+        for handle in (out_handle, err_handle):
+            if hasattr(handle, "close"):
+                handle.close()
+
+
+def _drain(proc) -> None:
+    """Reap a terminated child and empty whatever its pipes still hold.
+
+    `terminate_tree` already sent SIGKILL; a second communicate is what
+    collects the exit status and drains the pipes. If even that does not
+    return, the pipes are held by something the kill did not reach, and they
+    are given up rather than blocking the run forever."""
+    for _ in range(2):
+        try:
+            proc.communicate(timeout=TERMINATE_GRACE_S)
+            return
+        except subprocess.TimeoutExpired:
+            try:
+                proc.kill()
+            except OSError:
+                return
 
 
 class GateContradiction(Exception):
@@ -1062,7 +872,7 @@ def terminate_tree(proc, grace_s: float = TERMINATE_GRACE_S) -> None:
     close its harness child and flush, then SIGKILL after a grace so a wedged
     tree cannot outlive the run that owns it.
 
-    The group is what matters. A dispatcher signalled on its own leaves the
+    The group is what matters. A supervisor signalled on its own leaves the
     model process it spawned — and any tool server under that — running,
     which is the difference between a timeout that ends and one that only
     stops being watched. But the group is only ever ITS group: a child that

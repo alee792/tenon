@@ -73,7 +73,7 @@ SCHEMA_VERSION = 1
 # included: a per-harness override is authored surface like any other
 # component, and a search that cannot vary it cannot find a harness-specific
 # fix. Drop it from `spec.genes.dirs` to hold harness config fixed.
-DEFAULT_GENE_DIRS = ("skills", "tools", "subagents", "plugins", "mcp", "schedules", "harnesses")  # not tenon argv: tools, mcp
+DEFAULT_GENE_DIRS = ("skills", "tools", "subagents", "plugins", "mcp", "harnesses")  # not tenon argv: tools, mcp
 DEFAULT_GENE_FILES = ("instructions.md",)
 
 
@@ -308,6 +308,7 @@ class Config:
     agent: str
     seed: Path
     harness: str
+    runner: str
     tenon: str
     fanout: str
     state_dir: Path
@@ -433,6 +434,7 @@ def load_config(path: Path) -> Config:
         agent=agent,
         seed=seed,
         harness=raw.get("harness", "claude"),
+        runner=need("runner"),
         tenon=tenon,
         fanout=fanout,
         genes=GeneLayout.of(raw.get("genes")),
@@ -774,6 +776,7 @@ class Search:
             "repo": str(self.cfg.repo),
             "agent": self.cfg.agent,
             "harness": self.cfg.harness,
+            "runner": self.cfg.runner,
             "tenon": self.cfg.tenon,
             "concurrency": self.cfg.concurrency,
             "timeout": self.cfg.timeout,

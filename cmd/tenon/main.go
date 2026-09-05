@@ -10,29 +10,21 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 	"unicode/utf8"
 
 	"github.com/alee792/tenon/internal/agentproject"
 	"github.com/alee792/tenon/internal/apply"
 	"github.com/alee792/tenon/internal/diagnostics"
-	"github.com/alee792/tenon/internal/dispatch"
-	"github.com/alee792/tenon/internal/dispatchstate"
 	"github.com/alee792/tenon/internal/friction"
 	"github.com/alee792/tenon/internal/generated"
-	"github.com/alee792/tenon/internal/harness"
-	claudeharness "github.com/alee792/tenon/internal/harness/claude"
-	codexharness "github.com/alee792/tenon/internal/harness/codex"
 	"github.com/alee792/tenon/internal/integration"
 	"github.com/alee792/tenon/internal/mcp"
-	"github.com/alee792/tenon/internal/schedule"
 	"github.com/alee792/tenon/internal/toolruntime"
 	"github.com/alee792/tenon/internal/version"
 )
@@ -47,9 +39,6 @@ const usage = `usage:
   tenon drift AGENT --workspace DIR --harness <claude|codex> [--pins FILE] [--format <prose|jsonl>]
   tenon clean --workspace DIR [--harness <claude|codex>] [--force] [--format <prose|jsonl>]
   tenon mcp serve AGENT --harness <claude|codex> [--workspace DIR] [--pins FILE]
-  tenon run AGENT --workspace DIR --harness <claude|codex> [--conversation ID] [--input jsonl] [--pins FILE] [--timeout DUR] [--turn-timeout DUR]
-  tenon schedule trigger AGENT NAME --workspace DIR --harness <claude|codex> --input-id ID [--pins FILE] [--turn-timeout DUR] [--timeout DUR]
-  tenon schedule run AGENT --workspace DIR --harness <claude|codex> [--pins FILE] [--turn-timeout DUR] [--max-active-turns N]
   tenon stage AGENT --harness <claude|codex> --output DIR [--format <prose|jsonl>]
   tenon stage verify --artifact PATH [--prefix DIR] [--format <prose|jsonl>]
   tenon mcp add AGENT NAME --url HTTPS_URL [--header 'K: V'] [--context TEXT] [--pins FILE]
@@ -92,10 +81,6 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runClean(args[1:], stdout, stderr)
 	case "mcp":
 		return runMCP(args[1:], stdin, stdout, stderr)
-	case "run":
-		return runRun(args[1:], stdin, stdout, stderr)
-	case "schedule":
-		return runSchedule(args[1:], stdout, stderr)
 	case "stage":
 		return runStage(args[1:], stdout, stderr)
 	case "integration":
@@ -248,16 +233,6 @@ type errorOutcome struct {
 	Outcome string `json:"outcome"`
 	Error   string `json:"error"`
 }
-
-// noJSONL names the commands that have no machine-readable stream at all —
-// schedule trigger and schedule run, whose output is prose lifecycle lines,
-// and which therefore have no stream for an outcome object to terminate.
-// They still route their failures through failEnv so the classification of
-// every exit lives in one place. mcp serve is the other exemption, for the
-// opposite reason: its stdout carries the MCP protocol, so it refuses
-// --format jsonl outright rather than write an outcome into a protocol
-// stream.
-const noJSONL = false
 
 // writeErrorOutcome terminates the jsonl stream with that object. A no-op in
 // prose mode, where the prose on stderr is the whole report.
@@ -619,404 +594,6 @@ func runMCPServe(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if err := mcp.Serve(context.Background(), stdin, stdout, stderr, cfg); err != nil {
 		fmt.Fprintln(stderr, "tenon mcp serve:", err)
 		return 1
-	}
-	return 0
-}
-
-// maxRunTimeout bounds the whole-process deadline a caller may request.
-const maxRunTimeout = 30 * time.Minute
-
-// newHarnessDriver resolves the headless driver for a harness: the real Claude
-// Code and Codex protocol drivers, each launching its native executable behind
-// the harness.Driver seam. Codex reports tenon's version to its app-server on
-// initialize.
-func newHarnessDriver(name string) (harness.Driver, error) {
-	switch name {
-	case "claude":
-		return claudeharness.NewDriver("claude"), nil
-	case "codex":
-		return codexharness.NewDriver("codex", version.Version), nil
-	default:
-		return nil, fmt.Errorf("--harness must be exactly claude or codex")
-	}
-}
-
-// runRun dispatches headless turns for one conversation: it reads bounded JSONL
-// input on stdin and writes the ordered wire event stream to stdout. It bounds
-// the whole process with --timeout and each task turn with --turn-timeout.
-func runRun(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("run", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	harness := fs.String("harness", "", "target harness: claude or codex")
-	workspace := fs.String("workspace", "", "workspace directory (required)")
-	conversation := fs.String("conversation", "", "conversation id (defaults to local)")
-	input := fs.String("input", "jsonl", "input format: jsonl")
-	timeout := fs.Duration("timeout", 2*time.Minute, "whole-process deadline")
-	turnTimeout := fs.Duration("turn-timeout", 0, "per-turn deadline (task mode; 0 disables)")
-	manifestPath := fs.String("pins", "", "supplied pin set to verify against the current runtime closure; fails closed naming the first drifted pin")
-
-	positional, ok := parsePositional(fs, args)
-	if !ok || len(positional) != 1 {
-		fmt.Fprintf(stderr, "tenon run: exactly one AGENT directory is required\n%s", usage)
-		return 2
-	}
-	agent := positional[0]
-
-	harnessName, harnessFromEnv := resolveHarness(*harness)
-	switch harnessName {
-	case "claude", "codex":
-	default:
-		fmt.Fprint(stderr, harnessFlagError("run", harnessName, harnessFromEnv))
-		return 2
-	}
-	if *workspace == "" {
-		fmt.Fprintln(stderr, "tenon run: --workspace is required")
-		return 2
-	}
-	if *input != "jsonl" {
-		fmt.Fprintln(stderr, "tenon run: --input must be jsonl")
-		return 2
-	}
-	if *timeout <= 0 || *timeout > maxRunTimeout {
-		fmt.Fprintf(stderr, "tenon run: --timeout must be greater than 0 and at most %s\n", maxRunTimeout)
-		return 2
-	}
-	if *turnTimeout < 0 {
-		fmt.Fprintln(stderr, "tenon run: --turn-timeout must not be negative")
-		return 2
-	}
-
-	// run has no --format flag: its stdout IS the jsonl wire event stream,
-	// so every terminator below is written unconditionally. Unlike every
-	// other command's bare final object, run's terminator is itself an
-	// event — type run.completed, the next sequence number, the same
-	// envelope every line before it carries — because a stream whose last
-	// line broke its own event shape is a stream a consumer must special-case
-	// to decode at all. What distinguishes it is the outcome field, which no
-	// other event carries.
-	envelope := dispatch.Completion{
-		Sequence:     1,
-		Harness:      harnessName,
-		Conversation: *conversation,
-	}
-	if envelope.Conversation == "" {
-		envelope.Conversation = "local"
-	}
-
-	driver, err := newHarnessDriver(harnessName)
-	if err != nil {
-		return failRun(stdout, stderr, envelope, err)
-	}
-
-	supplied, err := readSuppliedManifest(*manifestPath)
-	if err != nil {
-		return failRun(stdout, stderr, envelope, err)
-	}
-	envelope.Manifest = manifestIdentity(supplied)
-	// Load the project and dispatch under the whole-process deadline.
-	p, diags, err := agentproject.LoadWithManifest(agent, expectedFingerprint(supplied))
-	if err != nil {
-		return failRun(stdout, stderr, envelope, err)
-	}
-	if p == nil || diags.HasErrors() {
-		// The source itself is invalid — the same gate check and apply run —
-		// so the stream ends gate_failed, not error: this is a finding about
-		// the source, and the digest names the bytes it was found in. The
-		// event carries no fingerprint: the gate minted none, and an empty
-		// field is the honest report of that.
-		_ = diags.WriteProse(stderr)
-		fmt.Fprintln(stderr, "tenon run: the agent project is invalid; run tenon apply")
-		envelope.Outcome = "gate_failed"
-		envelope.SourceDigest = sourceDigest(agent, p)
-		return writeRunCompleted(stdout, stderr, envelope)
-	}
-	envelope.Fingerprint = p.Fingerprint
-	// A supplied manifest gates the process open: on drift, open nothing.
-	if err := checkManifest(p, harnessName, resolveIntegrationStoreBase(), supplied); err != nil {
-		return failRun(stdout, stderr, envelope, err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
-	defer cancel()
-	// A clean dispatch writes its own terminator through the dispatcher's
-	// emitter, which owns the sequence; only the failure paths terminate the
-	// stream here, continuing the numbering the summary reports.
-	summary, err := dispatch.Run(ctx, dispatch.Options{
-		Project:      p,
-		Driver:       driver,
-		Workspace:    *workspace,
-		Harness:      harnessName,
-		Conversation: *conversation,
-		Mode:         dispatch.Interactive,
-		In:           stdin,
-		Out:          stdout,
-		TurnTimeout:  *turnTimeout,
-		Manifest:     manifestIdentity(supplied),
-	})
-	envelope.Sequence = summary.Sequence + 1
-	envelope.Turns = summary.Turns
-	if err != nil {
-		return failRun(stdout, stderr, envelope, err)
-	}
-	return 0
-}
-
-// failRun is run's environment-failure exit: the prose goes to stderr exactly
-// as failEnv writes it for every other command, and the stream ends with the
-// run.completed event carrying the error outcome and the same bounded text.
-func failRun(stdout, stderr io.Writer, envelope dispatch.Completion, cause error) int {
-	fmt.Fprintf(stderr, "tenon run: %v\n", cause)
-	envelope.Outcome = "error"
-	envelope.Error = diagnostics.Bound(fmt.Sprintf("%v", cause), 512)
-	return writeRunCompleted(stdout, stderr, envelope)
-}
-
-// writeRunCompleted writes run's terminator and exits 1: every caller is a
-// failure path, a clean dispatch having written its own.
-func writeRunCompleted(stdout, stderr io.Writer, envelope dispatch.Completion) int {
-	if err := dispatch.WriteCompleted(stdout, envelope); err != nil {
-		fmt.Fprintln(stderr, "tenon run:", err)
-	}
-	return 1
-}
-
-// runSchedule dispatches the "tenon schedule" subcommands (ADR 0008, ADR 0011).
-func runSchedule(args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 {
-		fmt.Fprintf(stderr, "tenon schedule: a subcommand is required (trigger, run)\n%s", usage)
-		return 2
-	}
-	switch args[0] {
-	case "trigger":
-		return runScheduleTrigger(args[1:], stdout, stderr)
-	case "run":
-		return runScheduleRun(args[1:], stdout, stderr)
-	default:
-		fmt.Fprintf(stderr, "tenon schedule: unknown subcommand %q\n%s", args[0], usage)
-		return 2
-	}
-}
-
-// loadScheduleProject loads and validates the agent project and finds the named
-// schedule, or reports why it could not. Both schedule subcommands require a
-// valid project; trigger additionally requires the schedule to exist.
-func loadScheduleProject(agent, cmdName, expectedFingerprint string, stderr io.Writer) (*agentproject.Project, bool) {
-	p, diags, err := agentproject.LoadWithManifest(agent, expectedFingerprint)
-	if err != nil {
-		fmt.Fprintf(stderr, "tenon %s: %v\n", cmdName, err)
-		return nil, false
-	}
-	if p == nil || diags.HasErrors() {
-		_ = diags.WriteProse(stderr)
-		fmt.Fprintf(stderr, "tenon %s: the agent project is invalid; run tenon apply\n", cmdName)
-		return nil, false
-	}
-	return p, true
-}
-
-// runScheduleTrigger dispatches one occurrence of a named schedule under a
-// caller-owned stable occurrence id. It requires current generated setup, opens
-// a fresh native session for a fresh occurrence, deduplicates a repeated id
-// without opening a harness, and writes exactly one bounded lifecycle line that
-// never contains model text. Any non-completed terminal status exits nonzero.
-func runScheduleTrigger(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("schedule trigger", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	harness := fs.String("harness", "", "target harness: claude or codex")
-	workspace := fs.String("workspace", "", "workspace directory (required)")
-	inputID := fs.String("input-id", "", "caller-owned stable occurrence id (required)")
-	turnTimeout := fs.Duration("turn-timeout", 90*time.Second, "per-turn deadline (0 disables)")
-	timeout := fs.Duration("timeout", 2*time.Minute, "whole-process deadline")
-	manifestPath := fs.String("pins", "", "supplied pin set to verify against the current runtime closure; fails closed naming the first drifted pin")
-
-	positional, ok := parsePositional(fs, args)
-	if !ok || len(positional) != 2 {
-		fmt.Fprintf(stderr, "tenon schedule trigger: usage: tenon schedule trigger AGENT NAME --workspace DIR --harness <claude|codex> --input-id ID\n")
-		return 2
-	}
-	agent, name := positional[0], positional[1]
-
-	harnessName, harnessFromEnv := resolveHarness(*harness)
-	switch harnessName {
-	case "claude", "codex":
-	default:
-		fmt.Fprint(stderr, harnessFlagError("schedule trigger", harnessName, harnessFromEnv))
-		return 2
-	}
-	if *workspace == "" {
-		fmt.Fprintln(stderr, "tenon schedule trigger: --workspace is required")
-		return 2
-	}
-	if *inputID == "" {
-		fmt.Fprintln(stderr, "tenon schedule trigger: --input-id is required")
-		return 2
-	}
-	if *turnTimeout < 0 {
-		fmt.Fprintln(stderr, "tenon schedule trigger: --turn-timeout must not be negative")
-		return 2
-	}
-	if *timeout <= 0 || *timeout > maxRunTimeout {
-		fmt.Fprintf(stderr, "tenon schedule trigger: --timeout must be greater than 0 and at most %s\n", maxRunTimeout)
-		return 2
-	}
-
-	supplied, err := readSuppliedManifest(*manifestPath)
-	if err != nil {
-		return failEnv(noJSONL, stdout, stderr, "schedule trigger", err)
-	}
-	p, ok := loadScheduleProject(agent, "schedule trigger", expectedFingerprint(supplied), stderr)
-	if !ok {
-		return 1
-	}
-	var target *agentproject.Schedule
-	for i := range p.Schedules {
-		if p.Schedules[i].Name == name {
-			target = &p.Schedules[i]
-			break
-		}
-	}
-	if target == nil {
-		return failEnvf(noJSONL, stdout, stderr, "schedule trigger", "no schedule named %q in this agent", name)
-	}
-
-	driver, err := newHarnessDriver(harnessName)
-	if err != nil {
-		return failEnv(noJSONL, stdout, stderr, "schedule trigger", err)
-	}
-	// Triggering requires the workspace to carry the applied setup: fail closed
-	// on stale or missing generated setup rather than dispatch against drift.
-	if err := apply.Verify(p, *workspace, harnessName); err != nil {
-		return failEnv(noJSONL, stdout, stderr, "schedule trigger", err)
-	}
-	// Take the same exclusive lock the clock uses so a trigger never races a
-	// running clock or a concurrent trigger for the same setup — both would
-	// rewrite the single dispatch file under last-writer-wins. Fail closed if
-	// held; the caller can retry.
-	release, err := schedule.Lock(*workspace, p.Name, harnessName)
-	if err != nil {
-		return failEnv(noJSONL, stdout, stderr, "schedule trigger", err)
-	}
-	defer release()
-
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
-	defer cancel()
-	// A supplied manifest gates this process open before any harness
-	// invocation, matching run and mcp serve: on drift, open nothing.
-	if err := checkManifest(p, harnessName, resolveIntegrationStoreBase(), supplied); err != nil {
-		return failEnv(noJSONL, stdout, stderr, "schedule trigger", err)
-	}
-	if err := driver.Verify(ctx); err != nil {
-		return failEnvf(noJSONL, stdout, stderr, "schedule trigger", "the %s harness could not be verified: %v", harnessName, err)
-	}
-
-	outcome, err := dispatch.RunTask(ctx, dispatch.Options{
-		Project:      p,
-		Driver:       driver,
-		Workspace:    *workspace,
-		Harness:      harnessName,
-		Conversation: schedule.ConversationID(name),
-		Mode:         dispatch.Task,
-		TurnTimeout:  *turnTimeout,
-		Manifest:     manifestIdentity(supplied),
-	}, *inputID, target.Prompt)
-	if err != nil {
-		return failEnv(noJSONL, stdout, stderr, "schedule trigger", err)
-	}
-
-	line := fmt.Sprintf("schedule=%q input_id=%q status=%s duplicate=%t",
-		name, *inputID, string(outcome.Status), outcome.Duplicate)
-	if outcome.SessionID != "" {
-		line += fmt.Sprintf(" session_id=%q", outcome.SessionID)
-	}
-	if outcome.Reason != "" {
-		line += fmt.Sprintf(" reason=%q", outcome.Reason)
-	}
-	fmt.Fprintln(stdout, line)
-
-	if outcome.Status != dispatchstate.Completed {
-		return 1
-	}
-	return 0
-}
-
-// runScheduleRun runs the foreground UTC clock for an agent's schedules. It
-// holds exclusive local ownership, requires current generated setup, and drains
-// in-flight occurrences on a stop signal. Lifecycle output goes to stdout and
-// never contains model text.
-func runScheduleRun(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("schedule run", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	harness := fs.String("harness", "", "target harness: claude or codex")
-	workspace := fs.String("workspace", "", "workspace directory (required)")
-	turnTimeout := fs.Duration("turn-timeout", 90*time.Second, "per-turn deadline (0 disables)")
-	maxActive := fs.Int("max-active-turns", schedule.DefaultMaxActive, "concurrent occurrences across distinct schedules")
-	manifestPath := fs.String("pins", "", "supplied pin set to verify against the current runtime closure; fails closed naming the first drifted pin")
-
-	positional, ok := parsePositional(fs, args)
-	if !ok || len(positional) != 1 {
-		fmt.Fprintf(stderr, "tenon schedule run: exactly one AGENT directory is required\n%s", usage)
-		return 2
-	}
-	agent := positional[0]
-
-	harnessName, harnessFromEnv := resolveHarness(*harness)
-	switch harnessName {
-	case "claude", "codex":
-	default:
-		fmt.Fprint(stderr, harnessFlagError("schedule run", harnessName, harnessFromEnv))
-		return 2
-	}
-	if *workspace == "" {
-		fmt.Fprintln(stderr, "tenon schedule run: --workspace is required")
-		return 2
-	}
-	if *turnTimeout <= 0 {
-		// The clock drains in-flight occurrences on shutdown, and the turn
-		// deadline is their only bound; require a positive one so a hung turn
-		// cannot block shutdown forever.
-		fmt.Fprintln(stderr, "tenon schedule run: --turn-timeout must be positive")
-		return 2
-	}
-	if *maxActive < schedule.MinMaxActive || *maxActive > schedule.MaxMaxActive {
-		fmt.Fprintf(stderr, "tenon schedule run: --max-active-turns must be between %d and %d\n", schedule.MinMaxActive, schedule.MaxMaxActive)
-		return 2
-	}
-
-	supplied, err := readSuppliedManifest(*manifestPath)
-	if err != nil {
-		return failEnv(noJSONL, stdout, stderr, "schedule run", err)
-	}
-	p, ok := loadScheduleProject(agent, "schedule run", expectedFingerprint(supplied), stderr)
-	if !ok {
-		return 1
-	}
-	driver, err := newHarnessDriver(harnessName)
-	if err != nil {
-		return failEnv(noJSONL, stdout, stderr, "schedule run", err)
-	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	storeBase := resolveIntegrationStoreBase()
-	opts := schedule.Options{
-		Project:     p,
-		Driver:      driver,
-		Workspace:   *workspace,
-		Harness:     harnessName,
-		TurnTimeout: *turnTimeout,
-		MaxActive:   *maxActive,
-		Out:         stdout,
-		Manifest:    manifestIdentity(supplied),
-	}
-	// A supplied manifest is re-verified before each occurrence opens a harness
-	// process; drift fails the occurrence closed and ends admission.
-	if supplied != nil {
-		opts.VerifyOccurrence = func() error {
-			return checkManifest(p, harnessName, storeBase, supplied)
-		}
-	}
-	if err := schedule.Run(ctx, opts); err != nil {
-		return failEnv(noJSONL, stdout, stderr, "schedule run", err)
 	}
 	return 0
 }

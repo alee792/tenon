@@ -2,8 +2,11 @@
 
 - Status: the product contract. The `hctl` prototype (alee792/hctl) is the
   frozen, read-only reference implementation.
-- Scope: the core product. The conversational channel runtime is a second
-  product, specified in the prototype repository.
+- Scope: the core product: authoring, validation, compilation into native
+  harness files, drift, pins, the managed tool runtime, and staging. Tenon
+  does not drive the harness; running an applied workspace headless is the
+  operator's client's job
+  ([ADR 0029](adr/0029-stop-driving-the-harness.md)).
 - Product: Tenon; the binary is `tenon`.
 - Initial harnesses: Claude Code and Codex CLI.
 
@@ -26,7 +29,7 @@ behavior; adopting one remains the author's deliberate, reviewable act,
 like any other code.
 
 Operating is a distinct role on the same artifact: credentials, integration
-packages, schedules, and staged filesystems carry their own explicit
+packages and staged filesystems carry their own explicit
 guardrails. The author defines one filesystem-authored agent project, applies
 it to a chosen workspace, and proves it interactively in Claude Code or
 Codex; the operator runs the same setup headlessly, which is where
@@ -37,8 +40,7 @@ portability is proven.
 1. The agent project is legible, versionable, portable source and is not
    coupled to the repository that stores it.
 2. Common behavior is portable; harness-specific differences are explicit.
-3. Compilation and validation happen before harness files are written or a
-   turn dispatcher starts.
+3. Compilation and validation happen before harness files are written.
 4. Generated native files are disposable and visibly tool-owned.
 5. Native harness tools remain available and explicitly unmanaged.
 6. Policy applies only at managed-tool and durable-state boundaries.
@@ -80,9 +82,7 @@ my-agent/
   tools/                   # one typed function per TS/Python file or Go dir
   subagents/               # one instructions.md per immediate subagent
   mcp/                     # one <name>.md per authored MCP server, or a mask
-  schedules/               # nested Markdown cron tasks
   harnesses/               # literal harness-specific native files
-  channels/                # second product; specified separately
 ```
 
 **Instructions.** An agent root is proven one of two ways: by a present
@@ -302,12 +302,6 @@ it as the *reference* journey without withdrawing it. Both journeys, their
 lifecycles, and their troubleshooting live in
 [the native GitHub MCP journey](github-native-mcp.md).
 
-**Schedules.** Nested Markdown files under `schedules/`; the relative path
-without `.md` is the schedule name. Strict frontmatter carries exactly one
-`cron` string (standard five-field, bounded printable ASCII); the non-empty
-body is the task prompt. Apply validates and fingerprints schedules but
-starts no clock. See headless operation below for execution.
-
 **Harness-specific files.** `harnesses/claude/.claude/` and
 `harnesses/codex/.codex/` carry intentionally nonportable native project
 files, copied byte-for-byte to only the selected harness at the same
@@ -327,7 +321,6 @@ workspace mutation:
 | Root and imported skills | 256 aggregate | 1,024 files per skill; 8,192 files and 64 MiB across the set; `SKILL.md` 128 KiB; other resources 16 MiB each |
 | Authored tools | 128 | 1,024 source and dependency files; 1 MiB each and 64 MiB aggregate |
 | Immediate subagents | 128 | 128 KiB each and 16 MiB aggregate |
-| Schedules | 256 | 128 KiB per source, including a 32 KiB prompt; 16 MiB aggregate |
 | Plugins (`plugins/`: vendored directories and reference files) | 128 entries, combined | `plugin.json` and `mcp.json` 128 KiB each; 1,024 entries per plugin `skills/` location; a reference file 8 KiB, body at most 1,024 characters |
 | Fetched plugin reference tree (`tenon plugin fetch`'s cache) | Not aggregate-bounded across references | 64 MiB and 8,192 files per fetched tree |
 | Accepted plugin MCP servers | 128 aggregate | Generated native MCP configuration at most 8 MiB |
@@ -397,8 +390,8 @@ source that may not run at all.
   order.
 - `--emit catalog` reports the resolved capability inventory: skills
   (including plugin-merged ones, with their descriptions), tools with their
-  language, MCP servers, subagents, and schedules, exactly as the load
-  resolved them. An MCP entry's `transport` speaks one vocabulary whichever
+  language, MCP servers, and subagents, exactly as the load resolved
+  them. An MCP entry's `transport` speaks one vocabulary whichever
   side declared the server — `stdio` for a locally spawned process,
   `streamable-http` for a remote HTTPS endpoint, `installed` for a server
   relayed through an installed integration package — so an authored
@@ -462,17 +455,9 @@ the loop retries or escalates and never scores. An `error` object carries
 an `error` field with the same prose stderr carries, bounded, so a consumer
 reading only the stream still learns what went wrong. The one deliberate
 silence is a usage error: exit 2, no outcome object, because a malformed
-invocation never ran. `run` is included in the contract, with the one
-difference its stdout demands: its stream is the wire event stream, so its
-terminator is itself an event — `run.completed`, carrying the next sequence
-number and the same envelope every line before it carries — distinguished
-from the lines before it by the `outcome` field no other event carries. Its
-`ok` means the dispatcher completed every turn it was given, whatever those
-turns' own statuses; the accompanying `turns` counts are what a loop scores.
-Two commands are exempt. `schedule` has no `--format` at all — its output is
-a prose lifecycle stream — so there is no machine-readable stream for an
-outcome object to terminate. `mcp serve` rejects `--format jsonl` as a usage
-error, because its stdout carries the MCP protocol and an outcome object
+invocation never ran. One command is exempt: `mcp serve` rejects `--format
+jsonl` as a usage error, because its stdout carries the MCP protocol and an
+outcome object
 written there would corrupt the very stream its consumer is parsing. The
 `outcome` field is
 the authoritative machine signal; the process exit code is its coarse
@@ -704,55 +689,41 @@ state, staging, or evidence.
 
 ## Headless operation
 
-```sh
-printf '%s\n' '{"input_id":"x-1","text":"..."}' \
-  | tenon run AGENT --workspace WS --harness <claude|codex> --input jsonl
-```
-
-The turn dispatcher accepts bounded JSONL input, each line carrying a
-caller-owned `input_id` and `text`. Input is durably accepted and queued
-while a turn is active, processed one FIFO turn per conversation, and mapped
-to a resumable native session; ordered JSONL events are emitted. A repeated
-input ID deduplicates within its conversation. After restart, active work
-without a proven terminal result is uncertain and never silently retried.
-Dispatch state is one owner-only file per workspace.
-
-The stream always ends with one terminal `run.completed` event. It is an
-event like every other line — `schema_version`, the next `sequence`, `type`,
-`harness`, `conversation`, `fingerprint`, and `manifest` when one was
-supplied — and it alone carries `outcome`, plus `turns`, the counts of the
-turns this dispatch ran by their terminal status
-(`completed`, `failed`, `uncertain`, `process_failed`, `cancelled`). The
-outcome answers one question and only that one: `ok` means the dispatcher
-completed every turn it was given, whatever those turns' own statuses, so a
-run in which every turn failed still ends `ok` and is told apart from a clean
-one by `turns` — which is what a loop scores. The failure outcomes are
-`gate_failed`, when the source itself does not load, carrying the
-`source_digest` that names the bytes that failed and no fingerprint, since
-the gate minted none; and `error`, when the run could not start or could not
-finish for a reason that is not the source's fault, carrying the same
-bounded prose stderr carries. Both are `run.completed` events with the full
-envelope, so a consumer decodes every line the same way and reads the last
-one's outcome rather than inferring an ending from silence.
-
-Schedules execute two ways, both requiring current generated setup:
+Tenon sets a workspace up and proves it; it does not drive the harness
+([ADR 0029](adr/0029-stop-driving-the-harness.md)). Running headless is
+the operator launching the harness — or any client of it — in an applied
+workspace, the same way an interactive session starts there:
 
 ```sh
-tenon schedule trigger AGENT NAME --workspace WS --harness codex \
-  --input-id OCCURRENCE_ID --turn-timeout 90s --timeout 2m
-tenon schedule run AGENT --workspace WS --harness codex
+tenon apply AGENT --workspace WS --harness claude
+tenon drift AGENT --workspace WS --harness claude --pins pins.json   # fail closed first
+claude -p "review the open pull request"          # the harness's own headless mode
+codex exec "review the open pull request"         # likewise
+acpx claude --cwd WS "review the open pull request"   # any Agent Client Protocol client
 ```
 
-`trigger` dispatches one occurrence under a caller-owned stable ID: each
-accepted occurrence opens a fresh native task session, duplicates return the
-retained outcome without opening a harness, and the bounded turn deadline
-aborts a stalled process while durably recording the occurrence as uncertain
-with its reason. `run` is an explicit foreground UTC clock: standard cron
-evaluated in UTC, first occurrence strictly after startup, no downtime or
-clock-jump backfill, no overlap for one schedule, a local lock excluding a
-second clock for the same workspace/agent/harness, and graceful drain on
-signals. Lifecycle output is bounded and never contains model text. No
-daemon, missed-run replay, or hosted delivery runtime.
+The contract is what the applied workspace guarantees, not a runtime:
+
+- **Nothing runs unproven.** `tenon drift` (with `--pins` when a pin set
+  gates the run) is the check before launch; its outcome is the operator's
+  gate, exactly as `check` is the author's.
+- **Attribution is a recorded fingerprint.** `drift` and `check` report the
+  source fingerprint; an operator or loop records it beside the run's
+  output, and joins there. Tenon stamps nothing on the run because tenon is
+  not in it.
+- **Approval is the client's policy.** A headless client answers the
+  harness's permission requests — acpx's `--approve-all`, `--deny-all`, or
+  `--policy` rules; a harness's own permission mode authored under
+  `harnesses/<harness>/`. Tenon enforces nothing there and never did.
+- **Never copy the harness's raw error text into a record.** A failed turn
+  has been seen to echo a live API key; a loop that keeps output keeps only
+  what it has classified.
+
+A task on a clock is the same recipe under cron, a systemd timer, or an
+ACP client's own scheduler, with the prompt kept wherever that scheduler
+reads it. Tenon has no authored schedule surface: a `schedules/` directory
+fails the gate with `schedules.removed`
+([ADR 0029](adr/0029-stop-driving-the-harness.md)).
 
 ## Staged agent filesystems
 
@@ -832,7 +803,7 @@ Recorded once here; none is scaffolded until its trigger arrives:
 
 - Missing, stale, ambiguous, or edited generated harness integrations fail
   closed.
-- Input, output, queue, process lifetime, state size, and protocol lines are
+- Input, output, process lifetime, state size, and protocol lines are
   bounded.
 - Durable state is owner-readable only and written atomically.
 - Process failure is distinct from a completed or failed model turn.
@@ -876,12 +847,12 @@ credential-free tests (fake harness processes; no live model calls) prove:
    names and a dangling one fails before mutation; and a conspicuous fake
    ambient value never appears in generated files, state, staging, or
    evidence.
-7. Headless dispatch durably queues FIFO input, deduplicates input IDs,
-   resumes sessions, and marks unproven restart work uncertain.
-8. Schedules validate and fingerprint identically for both harnesses;
-   triggers deduplicate stable occurrence IDs, open fresh sessions, honor
-   turn deadlines with retained uncertainty, and the UTC clock admits only
-   current non-overlapping occurrences and drains on shutdown.
+7. An applied workspace is complete for a headless client: nothing a
+   harness's headless mode or an ACP client needs is left to a tenon
+   process, and `drift` is the fail-closed check before launch.
+8. A `schedules/` directory fails the gate with a stable identifier, on
+   check and apply identically, so a removed surface is never silently
+   ignored.
 9. Staging produces a deterministic, credential-free, minimal runnable tree
    whose entrypoint verifies identity and fingerprint before a turn;
    preparation never mutates authored source, and publication is one rename
@@ -989,16 +960,12 @@ above:
   own locked Python dependencies (unshared across agents, since independent
   projects rarely lock identical dependency sets — a stated future
   extension of issue #38) and `deno check` against a project's own tools.
-- **Real harness drivers.** The Claude and Codex drivers are validated by
-  pure-function unit tests plus manual `//go:build harness` integration
-  tests against live binaries; CI does not run the latter, so CI green means
-  "dispatcher and drivers correct as specified," not "verified against
-  today's Claude/Codex." The Codex driver's successful-turn path has not
-  been validated live — only its credential-safe 401 classification has.
-- **Pin verification scope.** A supplied pin set is verified at
-  `tenon run`'s session start, not re-verified per turn within that
-  session; the recurring `schedule run` path does re-verify each
-  occurrence.
+- **Headless runs are attributed by the operator, not by tenon.** With no
+  tenon process in the run, the fingerprint join is whatever record the
+  operator or loop keeps beside the run's output; `improve/` records it at
+  the gate. Nothing verifies that the harness a client launched is the one
+  the pin set names beyond the executable identity `drift --pins` checks
+  before launch.
 - **Not in scope (no ADR).** Evaluations, scoring, transcript retention,
   selection among revisions, lineage tracking, a marketplace, and any
   acquisition beyond `tenon plugin fetch`'s explicit pointer-and-pin
@@ -1010,7 +977,13 @@ above:
 - A marketplace, automatic updater, dependency resolver, or lock file; the
   one acquisition path is an explicit `tenon plugin fetch` of a pointer the
   author wrote and pinned, and no project load ever acquires anything
-- Claude Agent SDK or hosted OpenAI agent runtimes
+- Embedding the Claude Agent SDK or a hosted OpenAI agent runtime; driving
+  a vendor's ACP adapter that is built on one is the relationship tenon has
+  with the `claude` binary, not an embedding
+- A turn dispatcher, session queue, conversation state, schedule clock, or
+  authored schedule surface
+  ([ADR 0029](adr/0029-stop-driving-the-harness.md)); a headless or
+  scheduled run is the operator's client launched in an applied workspace
 - Background or distributed schedule clocks, workflows, independently
   configured nested subagents, or deployment orchestration
 - Building OCI manifests or layers, publishing or signing images, or hosted

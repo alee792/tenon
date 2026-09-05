@@ -44,12 +44,12 @@ managed tools that help review; it does not sandbox authored behavior or claim
 to make it safe.
 
 Operating an agent is a distinct role on the same artifact: credentials,
-integration packages, schedules, channels, and staged filesystems for
-deployment, each behind its own explicit guardrails. The operator journey is
-where portability is proven — the same folder that runs interactively applies
-unchanged to a headless dispatcher, a schedule clock, or a pinned harness
-image, with existing OCI build systems owning image construction, publication,
-and deployment.
+integration packages and staged filesystems for deployment,
+each behind its own explicit guardrails. The operator journey is where
+portability is proven — the same folder that runs interactively applies
+unchanged for a headless harness client, a scheduler, or a pinned harness
+image, with existing OCI build systems owning image construction,
+publication, and deployment.
 
 We bet that agent definitions converge on open, file-based formats such as
 Agent Skills and Agent Plugins, and tenon is the toolchain for that world:
@@ -70,9 +70,10 @@ lab-internal configuration instead of open files.
 
 The measure of the vision is the first five minutes, the last mile, and the
 next revision: a new author goes from an empty directory to a working agent
-inside their harness in five minutes; the same folder later runs headless,
-scheduled, or staged without edits; and a revision applies, runs, and
-attributes to its exact configuration without human hands.
+inside their harness in five minutes; the same folder later runs headless
+or staged, under any client, without edits; and a revision applies, runs
+under the operator's client, and attributes to its exact configuration
+without human hands.
 
 ## Boundary
 
@@ -83,13 +84,12 @@ dependency validation, generated harness integration, and tools routed through
 its managed boundary.
 
 Interactive authors work directly in Claude Code or Codex after tenon prepares
-the generated harness integration. Headless operators may place the turn
-dispatcher between an input source and a local harness process. The turn
-dispatcher does not become another chat UI or model loop. The conversational
-channel runtime — long-lived surfaces such as Discord managing several
-independent conversation lifecycles over that dispatcher — is a coherent
-second product built on this core, not part of it; it remains deterministic
-runtime coordination rather than an agent orchestrator.
+the generated harness integration. Headless operators launch the harness's
+own headless mode, or a client of it over the Agent Client Protocol, in the
+same applied workspace: tenon is not in the run. Coordinating sessions and
+conversations — a chat gateway such as OpenClaw, an editor, a scheduler, an
+improvement loop — is those clients' job, over an open protocol, and tenon's
+job is that the workspace they launch into is complete and proven.
 
 Acquiring or configuring a third-party component does not make it managed.
 Harness-native tools and MCP servers remain valid but unmanaged unless they

@@ -36,7 +36,6 @@ Add capability by adding files — there is nothing to register:
 | a typed function file under `tools/` | a tool |
 | a Markdown file under `mcp/` | an MCP server the harness connects to |
 | a directory or `<name>.md` reference under `plugins/` | a vendored or pinned Agent Plugin |
-| a Markdown file under `schedules/` | a scheduled task |
 
 An `mcp/<name>.md` is four lines of the standard Agent Plugins `mcp.json`
 server entry plus prose — a hosted `type: streamable-http` URL, a tree-local
@@ -54,10 +53,11 @@ convention; the [glossary](docs/glossary.md) defines the vocabulary.
 
 The same directory keeps working as your needs grow — without edits:
 
-- **Run headless.** `tenon run` dispatches bounded JSONL turns through the
-  native harness.
-- **Run on a schedule.** `tenon schedule run` executes the Markdown cron
-  files under `schedules/`.
+- **Run headless.** Launch the harness's headless mode, or any Agent
+  Client Protocol client such as acpx or OpenClaw, in the applied workspace;
+  tenon proves the workspace and stays out of the run.
+- **Run on a schedule.** The same launch under cron or any scheduler,
+  one fresh session per occurrence.
 - **Undo it.** `tenon clean --workspace DIR` is apply's inverse: it removes
   the files tenon recorded as its own, and nothing else.
 - **Stage for containers.** `tenon stage` prepares a complete runnable

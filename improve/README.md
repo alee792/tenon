@@ -1,6 +1,6 @@
 # fanout
 
-Dispatch and supervise `k` isolated tenon agents — one git worktree, one
+Run and supervise `k` isolated tenon agents — one git worktree, one
 source fingerprint, one branch each.
 
 fanout is a **separate tool that consumes tenon's CLI**, not a tenon
@@ -22,10 +22,14 @@ shell command you supply, and selection reads `fanout collect`'s JSON.
 | 2. Mutate *(optional)* | your shell command, run in the variant's agent directory |
 | 3. Gate and identify | the adapter's `gate` — prove the variant for the harness, mint its fingerprint |
 | 4. Compile | the adapter's `compile` — write the harness-native configuration into the worktree |
-| 5. Dispatch | the adapter's `dispatch` — run the task as bounded JSONL turns |
+| 5. Run | your `runner` command, once per task, in the workspace |
 
-Steps 3-5 go through [`tenon.py`](tenon.py), the adapter, which is the only
-module here that names a tenon subcommand or flag. The roles are named for
+Steps 3-4 go through [`tenon.py`](tenon.py), the adapter, which is the only
+module here that names a tenon subcommand or flag. Step 5 is yours: tenon
+sets the workspace up and proves it, and `runner` is whatever drives the
+harness there — a headless harness client such as `claude -p`, `codex
+exec`, or `acpx` — with the prompt in `FANOUT_TASK` and its exit code as the
+task's verdict. The roles are named for
 what the caller wants rather than for the subcommand that currently provides
 it, so a change to tenon's surface costs one file and the recorded streams
 under `testdata/` say whether it still parses.
@@ -42,7 +46,7 @@ flowchart TD
         A1["git worktree add -b fanout/run/v1"] --> B1["mutate (yours, optional)"]
         B1 --> C1["gate<br/><i>verdict + fingerprint</i>"]
         C1 --> D1["compile<br/><i>into the worktree</i>"]
-        D1 --> E1["dispatch<br/><i>bounded jsonl turns</i>"]
+        D1 --> E1["run<br/><i>your runner, once per task</i>"]
     end
 
     V2["variant v2<br/><i>same five steps</i>"]
@@ -56,7 +60,7 @@ flowchart TD
 
 Every variant carries its own fingerprint, so a downstream evaluator joins
 its score to the exact configuration that produced it — the join key tenon
-already stamps on every apply record and dispatch event.
+already stamps on every apply record.
 
 ## Install
 
@@ -105,10 +109,10 @@ fanout status try
 fanout collect try --json
 ```
 
-`collect` prints one record per variant — status, tenon's `outcome`,
-fingerprint, `source_digest`, the error-severity `diagnostics` of whichever
-gate rejected it, terminal turn statuses, branch, head SHA, patch path, and
-(with `--text`) the agent's reassembled output. That JSON is the handoff to
+`collect` prints one record per variant — status, fingerprint,
+`source_digest`, the error-severity `diagnostics` of whichever gate rejected
+it, each task's status and exit code, branch, head SHA, patch path, and
+(with `--text`) everything the runner printed. That JSON is the handoff to
 whatever ranks top-k. fanout computes no score and picks no winner.
 
 A variant that tenon rejected has no fingerprint — tenon mints one only for a
@@ -129,6 +133,7 @@ directory with `FANOUT_VARIANT`, `FANOUT_INDEX`, `FANOUT_AGENT_DIR`,
   "run": "prompt-sweep",
   "agent": "agent",
   "harness": "claude",
+  "runner": "acpx claude --cwd \"$FANOUT_WORKSPACE\" --format quiet --approve-all \"$FANOUT_TASK\"",
   "task": "Fix the failing test in internal/apply.",
   "concurrency": 4,
   "timeout": "900s",
@@ -208,8 +213,8 @@ Under `$FANOUT_HOME` (default `~/.fanout`), or `--state-dir`:
     mutate.log
     check.jsonl, check.err     the gate's stream, terminator included
     apply.jsonl, apply.err     compile's stream, terminator included
-    events.jsonl               dispatch's event stream
-    run.err
+    task-<n>.prompt            the task's prompt, as FANOUT_TASK_FILE
+    task-<n>.out, task-<n>.err the runner's stdout and stderr for that task
     diff.patch                 written by collect
 ```
 
@@ -218,29 +223,24 @@ and branches, which `clean` removes.
 
 ## Bounds
 
-- `--timeout` is the whole-process deadline per variant, capped at **29m30s**
-  — tenon's own cap is 30 minutes, and the adapter's clock needs the last 30
-  seconds of it. The adapter owns the verdict, so it hands tenon a backstop of
-  the budget plus that headroom; a budget at tenon's cap would make both
-  clocks fire at once and a slow variant would be reported as an environment
-  error instead of the finding it is. The relationship is stated once, in the
-  adapter (`MAX_DISPATCH_TIMEOUT_S`), and fanout imports it.
-  `--turn-timeout` is optional and per turn.
+- `--timeout` is the whole budget per variant, across all of its tasks;
+  `--turn-timeout` optionally bounds each task on its own.
 
   **A variant that outruns its budget is a finding about the variant, not an
-  infrastructure failure.** The adapter enforces the wall clock itself rather
-  than relying on tenon's `--timeout`, whose overrun ends the stream as an
-  ordinary environment error, indistinguishable from an unreadable pin set;
-  on expiry it terminates the dispatch's whole process group — SIGTERM, then
-  SIGKILL after a grace, so the harness and any tool server under it go too —
-  and reports `outcome: timed_out` with whatever turns finished first. fanout
-  marks the variant `failed` and records that outcome, so a downstream scorer
-  penalises a slow agent instead of dropping it. Dropping it is what lets a
-  search drift toward whatever fits the budget without ever paying for being
-  slow.
-- `--task` is one turn; a list of strings in a spec is several turns in one
-  conversation, dispatched FIFO with deduplicating input IDs
-  (`<run>-<variant>-<n>`).
+  infrastructure failure.** fanout enforces the wall clock itself: on expiry
+  it terminates the runner's whole process group — SIGTERM, then SIGKILL
+  after a grace, so the harness and any tool server under it go too — and
+  marks the variant `failed` with `outcome: timed_out` and whatever tasks
+  finished first, so a downstream scorer penalises a slow agent instead of
+  dropping it. Dropping it is what lets a search drift toward whatever fits
+  the budget without ever paying for being slow.
+- `--task` is one task; a list of strings in a spec is several tasks run in
+  order, each a fresh invocation of the runner (`FANOUT_INPUT_ID` is
+  `<run>-<variant>-<n>`). A runner that wants one conversation across them
+  keeps its own session; fanout does not.
+- The runner must never copy the harness's raw error text into what it
+  prints: a failed turn has been seen to echo a live API key, and the
+  runner's stdout is what `collect --text` returns.
 - Concurrency defaults to `min(k, 4)`. Each variant is a full harness
   process against a full checkout — size it for the machine, not for `k`.
 - fanout assumes `--base` exists in the repository and that `k` worktrees of

@@ -21,13 +21,13 @@ kept distinct: a **locus** is a component path (`skills/alpha`,
 the map from loci to genes — on disk, the agent directory. An agent
 project is already a folder of files, so `instructions.md`, each
 `skills/<name>/`, each `tools/<file>`, each `subagents/<name>.md` — and the
-same for `plugins/`, `mcp/`, `schedules/` — is a gene. Crossover is file-level
+same for `plugins/` and `mcp/` — is a gene. Crossover is file-level
 recombination, not text surgery: for every locus either parent holds, the
 offspring inherits one parent's copy of the gene there.
 
 **Which paths are genes is configuration, not a constant.** `spec.genes.dirs`
 and `spec.genes.files` default to `["skills", "tools", "subagents",
-"plugins", "mcp", "schedules", "harnesses"]` and `["instructions.md"]` —
+"plugins", "mcp", "harnesses"]` and `["instructions.md"]` —
 everything tenon's loader inventories today. They are a **mirror of what tenon's loader
 inventories**, and a mirror drifts: the day tenon recognises a new component
 directory, a search that does not know about it silently stops recombining
@@ -49,7 +49,7 @@ things for free:
 - **Deduplication.** A fingerprint already scored is never paid for twice —
   and since the digest is content-addressed and commit-free, a mutation that
   cycles back to a previous genome is caught even across rounds.
-- **Attribution.** The same fingerprint travels on every dispatch event, so
+- **Attribution.** The same fingerprint travels on every fanout record, so
   the score and the configuration cannot drift apart.
 
 Tenon mints those units; this loop composes the chain. Lineage lives in
@@ -72,6 +72,7 @@ never writes to the source agent. `evolve best` prints a diff to review.
   "agent": "agent",
   "seed": "/path/to/agent",
   "harness": "claude",
+  "runner": "acpx claude --cwd \"$FANOUT_WORKSPACE\" --format quiet --approve-all \"$FANOUT_TASK\"",
   "tasks": ["Fix the failing test in internal/apply.", "Add a table test for parseDuration."],
   "repeats": 2,
   "score": "sh examples/score-tests.sh",
@@ -83,7 +84,7 @@ never writes to the source agent. `evolve best` prints a diff to review.
   "concurrency": 4,
   "timeout": "900s",
   "rng_seed": 1,
-  "genes": { "dirs": ["skills", "tools", "subagents", "plugins", "mcp", "schedules"], "files": ["instructions.md"] }
+  "genes": { "dirs": ["skills", "tools", "subagents", "plugins", "mcp"], "files": ["instructions.md"] }
 }
 ```
 
@@ -178,22 +179,19 @@ warning and dropped, and a genome left with no other sample stays unscored
 zero. Recording a zero would let an infrastructure outage read as "every
 candidate is terrible" and quietly steer the search.
 
-A variant that ran out of **time** is not in that set. A dispatch whose
+A variant that ran out of **time** is not in that set. A runner whose
 wall-clock budget expires is terminated and reported as `timed_out`, which
 fanout marks `failed`: it is a finding about the variant — the agent really
 was slower than the budget — and it is scored like any other failed variant.
 Dropping it instead would let a search drift toward whatever fits the budget
 without ever paying for being slow. Set `timeout` to the budget you actually
-mean; it is capped at 29m30s rather than at tenon's own 30 minutes, because
-the adapter's clock must fire before tenon's backstop or the timeout arrives
-as an environment error and is dropped after all.
+mean.
 
-The adapter's `iterate` — gate, compile, [drift], dispatch, drift — treats
-the post-run drift the same way. It runs after a dispatch that completed AND
-after one that timed out, because a half-finished agent is exactly the one
-that may have rewritten its own configuration mid-run, and it is skipped only
-when the dispatch failed at the gate, where no run happened. A timed-out pass
-still reports `phase_failed="run"` with `outcome="timed_out"`: the drift is
+The adapter's `iterate` — gate, compile, [drift], run, drift — treats the
+post-run drift the same way. It runs after a run that completed AND after
+one that timed out, because a half-finished agent is exactly the one that
+may have rewritten its own configuration mid-run. A timed-out pass still
+reports `phase_failed="run"` with `outcome="timed_out"`: the drift is
 evidence carried alongside the finding, never a replacement for it.
 
 The three search policies work the same way — a named built-in, or a command
@@ -317,7 +315,7 @@ so that the API is what gets exercised.
 
 ## Is the gene grain right?
 
-For `skills/`, `tools/`, `subagents/`, `plugins/`, `mcp/`, and `schedules/`,
+For `skills/`, `tools/`, `subagents/`, `plugins/`, and `mcp/`,
 yes: those directories are already the unit their author reasons about, each
 one is independently valid, and splitting a skill from the scripts it calls
 would manufacture broken offspring for no gain.

@@ -27,8 +27,8 @@ const sourceDigestDomain = "tenon-source-digest\n"
 // authored inputs the loader itself reads, and nothing else. It mirrors
 // internal/agentproject — instructions.md and the component directories
 // loaded by loadSkills, loadPlugins, loadSubagents, loadTools,
-// loadHarnessFiles, loadConnections (mcpAuthoredDir), and loadSchedules —
-// so the two stay in sync; a name added there belongs here too.
+// loadHarnessFiles, and loadConnections (mcpAuthoredDir) — so the two stay
+// in sync; a name added there belongs here too.
 //
 // It is an allowlist rather than a list of exclusions on purpose. A digest
 // that hashed everything it was not told to skip would fold in .git/,
@@ -42,11 +42,12 @@ var digestSourceNames = map[string]bool{
 	"subagents":       true,
 	"plugins":         true,
 	"mcp":             true,
-	"schedules":       true,
-	// The pre-#49 name for mcp/. The loader reads it only to fail closed with
-	// mcp.migration.connections-dir, so its bytes are exactly the bytes that
+	// The removed schedules/ surface (ADR 0029) and the pre-#49 name for
+	// mcp/. The loader reads each only to fail closed (schedules.removed,
+	// mcp.migration.connections-dir), so its bytes are exactly the bytes that
 	// caused that failure; a digest that skipped them would name two sources
 	// that differ only there as one.
+	"schedules":   true,
 	"connections": true,
 	"harnesses":   true,
 }

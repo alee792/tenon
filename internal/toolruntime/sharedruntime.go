@@ -58,9 +58,7 @@ func SharedRuntimeRoots() ([]string, error) {
 }
 
 // sharedRuntimeRoot is the machine-wide directory one runtime kind's shared
-// cache lives under, matching the machine-wide cache convention
-// internal/schedule already established for its own lock files
-// (os.UserCacheDir()/tenon/locks/...).
+// cache lives under (os.UserCacheDir()/tenon/runtimes/...).
 func sharedRuntimeRoot(kind string) (string, error) {
 	cache, err := os.UserCacheDir()
 	if err != nil {

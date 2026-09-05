@@ -259,11 +259,9 @@ func TestDriftJSONLIdentifiersAreStableAndParseable(t *testing.T) {
 // exactly as before.
 func TestDriftValidateApplyParityUntouched(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
+	// A removed schedules/ directory is a stable, cheap failing project
+	// (schedules.removed, ADR 0029).
 	if err := os.Mkdir(filepath.Join(agent, "schedules"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(agent, "schedules", "bad.md"),
-		[]byte("---\ncron: not a cron\n---\n\nDo the thing.\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -557,7 +555,7 @@ func TestDriftJSONLModifiedFindingCarriesDiff(t *testing.T) {
 }
 
 // TestDriftFlagValidation proves usage errors exit 2, matching
-// TestRunFlagValidation's pattern for the run command.
+// the flag-validation pattern the other commands use.
 func TestDriftFlagValidation(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
 	ws := t.TempDir()
