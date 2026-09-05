@@ -16,19 +16,23 @@ If any of these stops being true, the product is no longer tenon:
    one portable source of truth into native integration — including
    configuration it injects into the harness's own files — proves it valid
    before it touches a workspace, and detects drift afterward. It never
-   absorbs model loops, context, approval enforcement, interactive UX, or
-   runtime supervision.
+   absorbs model loops, context, approval enforcement, interactive UX,
+   runtime supervision, or the session itself: the crossing ends at the
+   applied workspace, and whatever launches the harness there is the
+   operator's client ([ADR 0030](adr/0030-amend-the-measure-for-the-operators-client.md)).
 3. **Nothing mutates a workspace unvalidated, and trust stays with the
    author.** Tenon proves contracts, never behavior, and never claims
    enforcement or safety it cannot deliver.
 
 **The measure.** Empty directory to a working agent inside the author's
-harness in five minutes; the same folder later runs headless, scheduled,
-or staged without edits; and a revision applies, runs, and attributes to
-its exact configuration without human hands, with its change to the
-agent's capability surface legible before it runs
+harness in five minutes; the same folder later runs headless or staged,
+under any client, without edits; and a revision applies, runs under the
+operator's client, and attributes to its exact configuration without
+human hands, with its change to the agent's capability surface legible
+before it runs
 ([ADR 0018](adr/0018-add-the-revision-leg-to-the-measure.md),
-[ADR 0024](adr/0024-add-observation-to-the-revision-leg.md)). Legible
+[ADR 0024](adr/0024-add-observation-to-the-revision-leg.md),
+[ADR 0030](adr/0030-amend-the-measure-for-the-operators-client.md)). Legible
 means legible to both authors: a person reads a revision's diff and
 understands it because they know what a skill, a tool schema, and a
 budget are, and the leg is met only when the change is legible to the

@@ -1,7 +1,7 @@
 # ADR 0030: Amend the measure for the operator's client
 
-- Status: proposed in the change that removed the schedules surface;
-  accepted in the dedicated change that applies the wording, per the north
+- Status: accepted. Proposed in the change that removed the schedules
+  surface; the wording is applied in this dedicated change, per the north
   star's own change rule (it changes only through a dedicated ADR naming
   the evidence, never in the same change that benefits)
 - Amends: [north star](../north-star.md) — the measure's second and third
