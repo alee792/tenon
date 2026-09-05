@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""fanout — dispatch and supervise k isolated tenon agents.
+"""fanout — run and supervise k isolated tenon agents.
 
 fanout is a separate tool that *consumes* tenon's CLI; it is not a tenon
 subcommand and adds nothing to tenon's contract. Tenon's north star keeps
@@ -14,10 +14,13 @@ Per variant it does exactly this, and nothing more:
   2. mutate (optional)       a caller-supplied command over the agent files
   3. gate                    prove the variant and record its fingerprint
   4. compile                 write the agent's configuration into that workspace
-  5. dispatch                run the task as bounded JSONL turns
+  5. run                     a caller-supplied command, once per task, in that workspace
 
-Steps 3-5 are the tenon adapter's roles (`improve/tenon.py`), which is the
-only module here that names a tenon subcommand or flag.
+Steps 3-4 are the tenon adapter's roles (`improve/tenon.py`), which is the
+only module here that names a tenon subcommand or flag. Step 5 is yours:
+tenon sets the workspace up and proves it, and `runner` is whatever drives
+the harness there — `claude -p`, `codex exec`, an ACP client such as acpx —
+with the task prompt in FANOUT_TASK and its exit code as the verdict.
 
 It then reports. It does not mutate, score, or select — `fanout collect`
 emits one JSON record per variant (fingerprint, terminal turn status,
@@ -27,7 +30,7 @@ Usage:
   fanout start   [--spec FILE] [flags]     prepare, apply, and run k variants
   fanout list                              runs known to the state dir
   fanout status  RUN [--json]              per-variant lifecycle state
-  fanout logs    RUN VARIANT [-f] [--text] event stream or agent text
+  fanout logs    RUN VARIANT [-f] [--stderr] the runner's output
   fanout stop    RUN                       terminate a detached run
   fanout collect RUN [--json]              per-variant result records
   fanout clean   RUN [--force]             remove worktrees, branches, state
@@ -60,14 +63,6 @@ import tenon as tenon_api  # noqa: E402
 from tenon import GateContradiction, TenonEnvironment  # noqa: E402
 
 SCHEMA_VERSION = 1
-
-# The largest per-variant budget the adapter can enforce. NOT tenon's own
-# 30-minute cap: the adapter owns the verdict and hands tenon a backstop of
-# the budget plus headroom, so a budget at tenon's cap makes both clocks fire
-# at once and a timed-out variant is reported as an environment error rather
-# than the finding it is. The relationship lives in the adapter; this is the
-# same number, imported rather than restated.
-MAX_RUN_TIMEOUT = tenon_api.MAX_DISPATCH_TIMEOUT_S
 
 # Lifecycle states a variant passes through. Only the terminal ones are
 # reported by collect.
@@ -165,6 +160,7 @@ class Variant:
     name: str
     index: int
     task: list
+    runner: str = ""
     mutate: str = ""
     pins: str = ""
     env: dict = field(default_factory=dict)
@@ -174,6 +170,7 @@ class Variant:
             "name": self.name,
             "index": self.index,
             "task": self.task,
+            "runner": self.runner,
             "mutate": self.mutate,
             "pins": self.pins,
             "env": self.env,
@@ -265,6 +262,7 @@ def build_spec(args, spec_file: dict) -> Spec:
         )
 
     shared_task = as_task_list(pick(args.task, "task"), "task")
+    shared_runner = pick(args.runner, "runner", "") or ""
     shared_mutate = pick(args.mutate, "mutate", "") or ""
     shared_pins = pick(args.pins, "pins", "") or ""  # not tenon argv — a spec key
 
@@ -286,6 +284,7 @@ def build_spec(args, spec_file: dict) -> Spec:
                     name=name,
                     index=i,
                     task=task,
+                    runner=raw.get("runner", shared_runner) or "",
                     mutate=raw.get("mutate", shared_mutate) or "",
                     pins=raw.get("pins", shared_pins) or "",  # not tenon argv — a spec key
                     env={str(k): str(v) for k, v in (raw.get("env") or {}).items()},
@@ -296,7 +295,10 @@ def build_spec(args, spec_file: dict) -> Spec:
         if k < 1:
             raise FanoutError("k must be at least 1")
         variants = [
-            Variant(name=f"v{i}", index=i, task=shared_task, mutate=shared_mutate, pins=shared_pins)
+            Variant(
+                name=f"v{i}", index=i, task=shared_task, runner=shared_runner,
+                mutate=shared_mutate, pins=shared_pins,
+            )
             for i in range(1, k + 1)
         ]
 
@@ -306,14 +308,14 @@ def build_spec(args, spec_file: dict) -> Spec:
     for v in variants:
         if not v.task:
             raise FanoutError(f"variant {v.name} has no task; pass --task or set it in the spec")
+        if not v.runner.strip():
+            raise FanoutError(
+                f"variant {v.name} has no runner; pass --runner or set it in the spec "
+                "(the command that drives the harness in the workspace, e.g. "
+                "'acpx claude --format quiet --approve-all \"$FANOUT_TASK\"')"
+            )
 
     timeout = parse_duration(pick(args.timeout, "timeout", "600s"), "timeout")
-    if timeout > MAX_RUN_TIMEOUT:
-        raise FanoutError(
-            f"timeout must be at most {MAX_RUN_TIMEOUT}s: tenon run's cap is "
-            f"{tenon_api.TENON_RUN_TIMEOUT_CAP_S}s and the adapter's clock needs "
-            f"{tenon_api.TIMEOUT_BACKSTOP_HEADROOM_S}s of headroom under it"
-        )
     turn_timeout_raw = pick(args.turn_timeout, "turn_timeout", 0)
     turn_timeout = 0 if not turn_timeout_raw else parse_duration(turn_timeout_raw, "turn-timeout")
 
@@ -453,8 +455,8 @@ class Supervisor:
             stdin=stdin,
             env=env,
             text=False,
-            # A dispatch runs in its own process group so cancelling it takes
-            # down the harness it started, not just the dispatcher.
+            # A runner runs in its own process group so cancelling it takes
+            # down the harness it started, not just the shell.
             start_new_session=new_session,
         )
         with self.lock:
@@ -489,7 +491,7 @@ class Supervisor:
             fingerprint = self._check(name, variant, vdir, agent, workspace)
             self.set(name, fingerprint=fingerprint)
             self._apply(name, variant, vdir, agent, workspace)
-            self._dispatch(name, variant, vdir, agent, workspace)
+            self._run(name, variant, vdir, agent, workspace)
             self.set(name, status=DONE, detail="", finished_at=time.time())
         except TenonEnvironment as err:
             # Not the variant's fault, so not FAILED: an environment failure
@@ -686,54 +688,72 @@ class Supervisor:
             managed_tools=list(applied.managed_tools),
         )
 
-    def _dispatch(self, name: str, variant: dict, vdir: Path, agent: Path, workspace: Path) -> None:
+    def _run(self, name: str, variant: dict, vdir: Path, agent: Path, workspace: Path) -> None:
+        """Run the variant's `runner` once per task, in the workspace, under
+        the variant's budget.
+
+        The runner is the caller's command: tenon has set the workspace up
+        and proved it, and what drives the harness there is not tenon's
+        concern. Each task's prompt reaches the command as FANOUT_TASK (and
+        FANOUT_TASK_FILE, for a shell that would mangle it); its stdout is
+        the agent text `collect --text` returns and its exit code is the
+        task's verdict. A runner must never copy the harness's raw error
+        text into anything it prints for a record: a failed turn has been
+        seen to echo a live API key.
+
+        The budget is the whole variant's. A task that outruns what is left
+        of it is terminated as a process tree and the variant is a finding —
+        `timed_out` — not an environment failure: the agent really was
+        slower than the budget, and dropping it would let a search drift
+        toward whatever fits the budget without ever paying for being slow.
+        `turn_timeout`, when set, bounds each task on its own as well."""
         self.set(name, status=RUNNING)
-        events, errlog = vdir / "events.jsonl", vdir / "run.err"
-        inputs = [
-            {"input_id": f"{self.spec['run']}-{name}-{i}", "text": text}
-            for i, text in enumerate(variant["task"], start=1)
-        ]
-        try:
-            result = self._tenon(name, variant, vdir, agent, workspace).dispatch(
-                agent,
-                workspace,
-                inputs,
-                pins=variant.get("pins") or None,
-                timeout_s=self.spec["timeout"],
-                turn_timeout_s=self.spec["turn_timeout"],
-                events_path=events,
-                stderr_path=errlog,
-                cwd=workspace,
-            )
-        finally:
-            self._reap(name)
-        self.set(
-            name,
-            turns=list(result.per_input),
-            run_exit_code=result.exit_code,
-            outcome=result.outcome,
-        )
-        if result.outcome == "ok":
-            # A completed dispatch, whatever its turns did. turns.failed is a
-            # score input, not a fanout failure.
-            return
-        if result.outcome == "timed_out":
-            # A variant slower than its budget is a finding ABOUT the variant,
-            # so it is FAILED and scored, not ERRORED and dropped. Dropping it
-            # would let a search drift toward whatever fits the budget without
-            # ever paying for being slow.
-            raise FanoutError(
-                f"the variant's {self.spec['timeout']}s budget expired and the dispatch "
-                f"was terminated; {sum(result.turns.values())} of {len(inputs)} turns "
-                f"finished; see {events}"
-            )
-        if result.outcome == "gate_failed":
-            self.set(name, source_digest=result.source_digest)
-            raise FanoutError(
-                f"dispatch rejected the agent at the gate; "
-                f"source_digest={result.source_digest or 'unknown'}; see {events}"
-            )
-        raise TenonEnvironment(f"dispatch ended {result.outcome!r}; see {errlog}")
+        deadline = time.monotonic() + self.spec["timeout"]
+        turns: list = []
+        for i, text in enumerate(variant["task"], start=1):
+            input_id = f"{self.spec['run']}-{name}-{i}"
+            prompt = vdir / f"task-{i}.prompt"
+            prompt.write_text(text)
+            out, err = vdir / f"task-{i}.out", vdir / f"task-{i}.err"
+            env = self.child_env(variant, vdir, agent, workspace)
+            env.update({
+                "FANOUT_TASK": text,
+                "FANOUT_TASK_INDEX": str(i),
+                "FANOUT_TASK_FILE": str(prompt),
+                "FANOUT_INPUT_ID": input_id,
+            })
+            remaining = int(deadline - time.monotonic())
+            if remaining <= 0:
+                timed_out, code = True, None
+            else:
+                budget = remaining
+                if self.spec.get("turn_timeout"):
+                    budget = min(budget, int(self.spec["turn_timeout"]))
+                try:
+                    timed_out, code = tenon_api.run_with_clock(
+                        ["/bin/sh", "-c", variant["runner"]],
+                        cwd=workspace,
+                        env=env,
+                        timeout_s=budget,
+                        stdout_path=out,
+                        stderr_path=err,
+                        spawn=lambda argv, **kw: self._spawn(name, argv, **kw),
+                    )
+                finally:
+                    self._reap(name)
+            if timed_out:
+                turns.append({"input_id": input_id, "task_index": i, "status": "timed_out", "exit_code": code})
+                self.set(name, turns=turns, outcome="timed_out")
+                raise FanoutError(
+                    f"the variant's {self.spec['timeout']}s budget expired and task {i} "
+                    f"was terminated; {i - 1} of {len(variant['task'])} tasks finished; see {out}"
+                )
+            status = "completed" if code == 0 else "failed"
+            turns.append({"input_id": input_id, "task_index": i, "status": status, "exit_code": code})
+            self.set(name, turns=turns)
+        # Every task ran to its own exit, whatever that exit was: a failed
+        # task is a score input, not a fanout failure.
+        self.set(name, outcome="ok")
 
     # -- driving the pool --------------------------------------------------
 
@@ -755,32 +775,16 @@ class Supervisor:
         return 1 if failed else 0
 
 
-def summarize_turns(events: Path) -> list:
-    """Reduce a dispatch event stream to one terminal record per input id.
-
-    The reduction itself lives in the adapter, beside the terminator reader it
-    is cross-checked against; this reads the file `collect` and `logs` name."""
-    if not events.exists():
-        return []
-    return list(tenon_api.summarize_turns(events.read_text(errors="replace")))
+def task_outputs(vdir: Path, suffix: str = ".out") -> list:
+    """The runner's per-task output files, in task order."""
+    files = [p for p in vdir.glob(f"task-*{suffix}") if p.stem.split("-")[-1].isdigit()]
+    return sorted(files, key=lambda p: int(p.stem.split("-")[-1]))
 
 
-def agent_text(events: Path) -> str:
-    """Reassemble the model text tenon streamed as agent.output.delta."""
-    if not events.exists():
-        return ""
-    parts = []
-    for line in events.read_text(errors="replace").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if event.get("type") == "agent.output.delta":
-            parts.append(event.get("delta", ""))
-    return "".join(parts)
+def agent_text(vdir: Path) -> str:
+    """What the runner printed, every task in order: the agent's text when
+    the runner is a headless harness client."""
+    return "".join(p.read_text(errors="replace") for p in task_outputs(vdir))
 
 
 # --------------------------------------------------------------------------
@@ -888,30 +892,31 @@ def cmd_logs(args) -> int:
     vdir = rundir.variant_dir(args.variant)
     if not vdir.is_dir():
         raise FanoutError(f"no variant {args.variant!r} in run {args.run!r}")
-    path = vdir / ("run.err" if args.stderr else "events.jsonl")
-    if args.text:
-        sys.stdout.write(agent_text(vdir / "events.jsonl"))
-        if not sys.stdout.isatty():
-            return 0
-        sys.stdout.write("\n")
-        return 0
-    if not path.exists():
-        return 0
+    suffix = ".err" if args.stderr else ".out"
     if not args.follow:
-        sys.stdout.write(path.read_text(errors="replace"))
+        for path in task_outputs(vdir, suffix):
+            sys.stdout.write(path.read_text(errors="replace"))
         return 0
-    with path.open("r", errors="replace") as handle:
-        while True:
-            chunk = handle.read()
+    seen: dict = {}
+    while True:
+        wrote = False
+        for path in task_outputs(vdir, suffix):
+            offset = seen.get(path, 0)
+            with path.open("r", errors="replace") as handle:
+                handle.seek(offset)
+                chunk = handle.read()
+                seen[path] = handle.tell()
             if chunk:
                 sys.stdout.write(chunk)
                 sys.stdout.flush()
-                continue
-            state = rundir.state()
-            record = state["variants"].get(args.variant, {})
-            if record.get("status") in TERMINAL:
-                return 0
-            time.sleep(0.4)
+                wrote = True
+        if wrote:
+            continue
+        state = rundir.state()
+        record = state["variants"].get(args.variant, {})
+        if record.get("status") in TERMINAL:
+            return 0
+        time.sleep(0.4)
 
 
 def cmd_stop(args) -> int:
@@ -963,13 +968,13 @@ def cmd_collect(args) -> int:
             "workspace": record.get("workspace", ""),
             "agent": record.get("agent", ""),
             "turns": record.get("turns", []),
-            "events": str(vdir / "events.jsonl"),
+            "outputs": [str(p) for p in task_outputs(vdir)],
             "duration_seconds": round((record.get("finished_at") or 0) - (record.get("started_at") or 0), 2)
             if record.get("started_at") and record.get("finished_at")
             else None,
         }
         if args.text:
-            result["text"] = agent_text(vdir / "events.jsonl")
+            result["text"] = agent_text(vdir)
         if workspace and workspace.is_dir():
             result.update(collect_worktree(workspace, vdir, record, commit=not args.no_commit))
         records.append(result)
@@ -1052,7 +1057,7 @@ def cmd_clean(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="fanout",
-        description="Dispatch and supervise k isolated tenon agents, one git worktree each.",
+        description="Run and supervise k isolated tenon agents, one git worktree each.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -1070,13 +1075,18 @@ def build_parser() -> argparse.ArgumentParser:
         "variant's branch), absolute is copied per variant",
     )
     start.add_argument("--harness", choices=["claude", "codex"], help="target harness")
-    start.add_argument("--task", help="prompt dispatched as one turn")
+    start.add_argument("--task", help="prompt the runner is given as one task")
+    start.add_argument(
+        "--runner",
+        help="shell command run in each variant's workspace once per task, with the prompt in "
+        "FANOUT_TASK; its exit code is the task's verdict (e.g. a headless harness client)",
+    )
     start.add_argument("--k", type=int, help="number of variants (mutually exclusive with a spec variants list)")
     start.add_argument("--mutate", help="shell command run in each variant's agent dir before the gate")
-    start.add_argument("--pins", help="pin set the gate, compile, and dispatch all resolve against")
+    start.add_argument("--pins", help="pin set the gate and compile resolve against")
     start.add_argument("--concurrency", type=int, help="variants in flight at once (default: min(k, 4))")
-    start.add_argument("--timeout", help=f"whole-process deadline per variant (default: 600s, max {MAX_RUN_TIMEOUT}s)")
-    start.add_argument("--turn-timeout", help="per-turn deadline (default: none)")
+    start.add_argument("--timeout", help="whole budget per variant, across its tasks (default: 600s)")
+    start.add_argument("--turn-timeout", help="deadline per task (default: none)")
     start.add_argument("--branch-prefix", help="branch namespace (default: fanout)")
     start.add_argument("--tenon", help="tenon binary (default: $FANOUT_TENON or PATH)")
     start.add_argument(
@@ -1099,12 +1109,11 @@ def build_parser() -> argparse.ArgumentParser:
     add_state_dir(status)
     status.set_defaults(func=cmd_status)
 
-    logs = sub.add_parser("logs", help="one variant's event stream")
+    logs = sub.add_parser("logs", help="one variant's runner output")
     logs.add_argument("run")
     logs.add_argument("variant")
     logs.add_argument("-f", "--follow", action="store_true")
-    logs.add_argument("--stderr", action="store_true", help="show the dispatch's stderr instead")
-    logs.add_argument("--text", action="store_true", help="print reassembled agent output text")
+    logs.add_argument("--stderr", action="store_true", help="show the runner's stderr instead")
     add_state_dir(logs)
     logs.set_defaults(func=cmd_logs)
 

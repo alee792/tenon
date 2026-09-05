@@ -54,10 +54,11 @@ convention; the [glossary](docs/glossary.md) defines the vocabulary.
 
 The same directory keeps working as your needs grow — without edits:
 
-- **Run headless.** `tenon run` dispatches bounded JSONL turns through the
-  native harness.
-- **Run on a schedule.** `tenon schedule run` executes the Markdown cron
-  files under `schedules/`.
+- **Run headless.** Launch the harness's headless mode, or any Agent
+  Client Protocol client such as acpx or OpenClaw, in the applied workspace;
+  tenon proves the workspace and stays out of the run.
+- **Run on a schedule.** The Markdown cron files under `schedules/` are
+  validated and listed; your clock runs them.
 - **Undo it.** `tenon clean --workspace DIR` is apply's inverse: it removes
   the files tenon recorded as its own, and nothing else.
 - **Stage for containers.** `tenon stage` prepares a complete runnable

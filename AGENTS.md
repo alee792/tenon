@@ -22,8 +22,8 @@ maintainer's `north-star-review` skill.
 
 Keep the native harness responsible for its model loop, context, native
 tools, approvals, and interactive interface. Tenon owns agent-project
-discovery and validation, generated harness files, dispatcher-managed
-sessions, and explicitly managed tools. Never overwrite hand-authored harness
+discovery and validation, generated harness files, and explicitly managed
+tools; it does not drive the harness. Never overwrite hand-authored harness
 files or claim governance over native harness effects.
 
 Keep packages organized by concrete responsibility; no generic core, common,
@@ -48,4 +48,4 @@ implementation. When a specified behavior is in doubt, consult its tests and
 acceptance records; port intent, never code. Out of scope unless re-decided
 by ADR: evaluations, scoring, transcript retention, selection among
 revisions, lineage tracking, a marketplace, and network acquisition of
-components. The conversational channel product stays in the prototype.
+components; a turn dispatcher, session state, or schedule clock (ADR 0029).

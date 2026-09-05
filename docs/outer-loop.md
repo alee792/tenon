@@ -97,13 +97,12 @@ The loop runs the same cycle a person runs, without hands:
    against identifiers, not prose.
 3. **Apply.** `tenon apply` compiles the folder to native harness files and
    records the fingerprint. Identical source reapplies deterministically.
-4. **Run and attribute.** Interactive, headless (`tenon run`), or
-   scheduled — every dispatch event carries the fingerprint and, when a
-   pin set is supplied, the pinned harness version, model, and package
-   identities. A headless run's stream ends with a terminal `run.completed`
-   event carrying the same envelope, the run's `outcome`, and `turns`: the
-   outcome says whether the dispatcher finished the work it was given, the
-   counts say how those turns went, and the loop scores the counts.
+4. **Run and attribute.** The loop launches the harness — its headless
+   mode, or an Agent Client Protocol client — in the applied workspace and
+   records the fingerprint `check` minted beside the run's output. The
+   fingerprint and, when a pin set is supplied, the pinned harness version,
+   model, and package identities are the join key; tenon is not in the run
+   and stamps nothing on it.
 5. **Verify and select — outside tenon.** The loop's evaluator scores the
    run and keeps or discards the revision, building its lineage from the
    units above. See

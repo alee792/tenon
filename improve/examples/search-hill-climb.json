@@ -4,6 +4,7 @@
   "repo": ".",
   "agent": "agent",
   "harness": "claude",
+  "runner": "acpx claude --cwd \"$FANOUT_WORKSPACE\" --format quiet --approve-all --no-fs --no-terminal \"$FANOUT_TASK\"",
   "tasks": [
     "Fix the failing test in internal/apply.",
     "Add a table-driven test for the duration parser."

@@ -2,11 +2,13 @@
 
 - Status: research record answering one question — should tenon be
   reoriented to be native to the Agent Client Protocol (ACP)? — and
-  proposing where to align. Stage 1 below is implemented as
-  `internal/harness/acp` behind `--driver acp`, with the granular
-  permission policy in place of the two-state one first proposed here;
-  [ADR 0028](../adr/0028-drive-headless-turns-over-the-agent-client-protocol.md)
-  records the decision and its falsifier.
+  proposing where to align. Overtaken: Stage 1 was built as an ACP driver
+  behind `--driver acp` (ADR 0028), and then the maintainer asked the
+  question Stage 3 deferred — does `tenon run` need to exist at all? — and
+  answered no. [ADR 0029](../adr/0029-stop-driving-the-harness.md) removes
+  the dispatcher, every harness driver, and schedule execution; the
+  headless leg is now the operator's client launched in an applied
+  workspace, exactly "What interop already costs nothing" below.
 - Last verified: 2026-09-04. External claims are cited to their source;
   the protocol and both adapters release often, so re-verify before acting.
 

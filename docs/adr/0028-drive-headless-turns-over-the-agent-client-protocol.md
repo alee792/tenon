@@ -1,8 +1,12 @@
 # ADR 0028: Drive headless turns over the Agent Client Protocol
 
-- Status: proposed — the driver ships behind an explicit `--driver acp`
-  flag; the native drivers remain the default until the falsifier below
-  has been checked against live adapters
+- Status: superseded by
+  [ADR 0029](0029-stop-driving-the-harness.md) before it shipped. The
+  driver was built and proven against a fake agent, then deleted with the
+  dispatcher it served: the question it answered — which protocol tenon
+  drives a harness over — dissolved once tenon stopped driving one. Kept
+  as the record of what an ACP client of tenon's needs to do, which is now
+  the operator's client's job
 - Amends: [ADR 0001](0001-use-native-harnesses.md) (its optional turn
   dispatcher gains a second, protocol-generic driver); the product
   specification's "Claude Agent SDK" non-goal is reworded, not removed

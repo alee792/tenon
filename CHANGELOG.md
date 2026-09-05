@@ -4,20 +4,21 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
-### Added
+### Removed
 
-- `tenon run`, `tenon schedule trigger`, and `tenon schedule run` take
-  `--driver acp` to drive the turn through an Agent Client Protocol agent
-  process — the harness's adapter (`claude-agent-acp`, `codex-acp`) or any
-  agent named with `--acp-command` — behind the same driver seam and onto
-  the same wire stream. `--permissions <allow|deny|FILE>` answers the
-  agent's permission requests from an operator policy: two literals or a
-  file of ordered first-match allow/deny rules over tool kind, title,
-  path, and tool name; the default is deny. Tenon advertises no client
-  capabilities and passes no MCP servers, so the agent reads the applied
-  workspace exactly as an interactive session does
-  ([ADR 0028](docs/adr/0028-drive-headless-turns-over-the-agent-client-protocol.md),
-  proposed; the native drivers stay the default).
+- `tenon run`, `tenon schedule trigger`, and `tenon schedule run`, with the
+  turn dispatcher, its durable queue and session state, the Claude and
+  Codex headless drivers, and the foreground schedule clock behind them
+  ([ADR 0029](docs/adr/0029-stop-driving-the-harness.md)). Tenon sets a
+  workspace up and proves it; running headless is the operator launching
+  the harness's own headless mode or an Agent Client Protocol client
+  (acpx, OpenClaw, an editor) in the applied workspace, and a schedule is
+  run by the operator's clock. `schedules/` stays an authored, validated,
+  fingerprinted surface listed by `tenon check --emit catalog`.
+- The improve module's `dispatch` role. fanout and evolve take a `runner`
+  — the caller's command, run once per task in the workspace with the
+  prompt in `FANOUT_TASK` — and score its exit code and output; nothing in
+  `improve/` names a harness client.
 
 ## [0.1.0] - 2026-09-04
 

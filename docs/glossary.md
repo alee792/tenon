@@ -39,9 +39,7 @@ growth requires stated payment.
   value alone.
 - **Outcome** — the field every machine-readable stream's final object
   carries, from the vocabulary `ok / gate_failed / drift / blocked / error`.
-  `ok`: the command did what it was asked (for `run`, that the dispatcher
-  completed every turn it was given — the accompanying `turns` counts, not
-  the outcome, say how those turns went). `gate_failed`: the source itself
+  `ok`: the command did what it was asked. `gate_failed`: the source itself
   is invalid, and the object names the bytes that failed with a source
   digest. `drift`: the source is fine but the workspace no longer matches a
   fresh apply. `blocked`: clean refused to remove what it found. `error`:
@@ -57,8 +55,8 @@ growth requires stated payment.
   author coequal with the person. Tenon is its substrate — the gate
   (`tenon check`), reproducible application, and attribution — never the
   loop: evaluation and selection stay outside.
-- **Workspace** — the directory where generated harness files, apply records,
-  and dispatch state live and where the harness and authored tools operate.
+- **Workspace** — the directory where generated harness files and apply
+  records live and where the harness and authored tools operate.
   Defaults to the agent source directory; always independently selectable.
 - **Harness** — the native coding agent that owns intelligence: model loop,
   context, native tools, approvals, and interactive interface. Initially

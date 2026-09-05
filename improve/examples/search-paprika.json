@@ -4,6 +4,7 @@
   "repo": ".",
   "agent": "agent",
   "harness": "claude",
+  "runner": "acpx claude --cwd \"$FANOUT_WORKSPACE\" --format quiet --approve-all --no-fs --no-terminal \"$FANOUT_TASK\"",
   "model": "claude-haiku-4-5-20251001",
   "tasks": [
     "Explain what this repository does to a new contributor, in under 120 words."

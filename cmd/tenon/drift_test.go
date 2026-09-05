@@ -557,7 +557,7 @@ func TestDriftJSONLModifiedFindingCarriesDiff(t *testing.T) {
 }
 
 // TestDriftFlagValidation proves usage errors exit 2, matching
-// TestRunFlagValidation's pattern for the run command.
+// the flag-validation pattern the other commands use.
 func TestDriftFlagValidation(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
 	ws := t.TempDir()
