@@ -29,7 +29,7 @@ behavior; adopting one remains the author's deliberate, reviewable act,
 like any other code.
 
 Operating is a distinct role on the same artifact: credentials, integration
-packages, schedules, and staged filesystems carry their own explicit
+packages and staged filesystems carry their own explicit
 guardrails. The author defines one filesystem-authored agent project, applies
 it to a chosen workspace, and proves it interactively in Claude Code or
 Codex; the operator runs the same setup headlessly, which is where
@@ -82,7 +82,6 @@ my-agent/
   tools/                   # one typed function per TS/Python file or Go dir
   subagents/               # one instructions.md per immediate subagent
   mcp/                     # one <name>.md per authored MCP server, or a mask
-  schedules/               # nested Markdown cron tasks
   harnesses/               # literal harness-specific native files
 ```
 
@@ -303,13 +302,6 @@ it as the *reference* journey without withdrawing it. Both journeys, their
 lifecycles, and their troubleshooting live in
 [the native GitHub MCP journey](github-native-mcp.md).
 
-**Schedules.** Nested Markdown files under `schedules/`; the relative path
-without `.md` is the schedule name. Strict frontmatter carries exactly one
-`cron` string (standard five-field, bounded printable ASCII); the non-empty
-body is the task prompt. Apply validates and fingerprints schedules but
-starts no clock; execution is the operator's (see headless operation
-below).
-
 **Harness-specific files.** `harnesses/claude/.claude/` and
 `harnesses/codex/.codex/` carry intentionally nonportable native project
 files, copied byte-for-byte to only the selected harness at the same
@@ -329,7 +321,6 @@ workspace mutation:
 | Root and imported skills | 256 aggregate | 1,024 files per skill; 8,192 files and 64 MiB across the set; `SKILL.md` 128 KiB; other resources 16 MiB each |
 | Authored tools | 128 | 1,024 source and dependency files; 1 MiB each and 64 MiB aggregate |
 | Immediate subagents | 128 | 128 KiB each and 16 MiB aggregate |
-| Schedules | 256 | 128 KiB per source, including a 32 KiB prompt; 16 MiB aggregate |
 | Plugins (`plugins/`: vendored directories and reference files) | 128 entries, combined | `plugin.json` and `mcp.json` 128 KiB each; 1,024 entries per plugin `skills/` location; a reference file 8 KiB, body at most 1,024 characters |
 | Fetched plugin reference tree (`tenon plugin fetch`'s cache) | Not aggregate-bounded across references | 64 MiB and 8,192 files per fetched tree |
 | Accepted plugin MCP servers | 128 aggregate | Generated native MCP configuration at most 8 MiB |
@@ -399,8 +390,8 @@ source that may not run at all.
   order.
 - `--emit catalog` reports the resolved capability inventory: skills
   (including plugin-merged ones, with their descriptions), tools with their
-  language, MCP servers, subagents, and schedules, exactly as the load
-  resolved them. An MCP entry's `transport` speaks one vocabulary whichever
+  language, MCP servers, and subagents, exactly as the load resolved
+  them. An MCP entry's `transport` speaks one vocabulary whichever
   side declared the server — `stdio` for a locally spawned process,
   `streamable-http` for a remote HTTPS endpoint, `installed` for a server
   relayed through an installed integration package — so an authored
@@ -728,12 +719,11 @@ The contract is what the applied workspace guarantees, not a runtime:
   has been seen to echo a live API key; a loop that keeps output keeps only
   what it has classified.
 
-**Schedules** are authored and proven the same way: `schedules/<name>.md`
-is validated, fingerprinted, and listed by `tenon check --emit catalog`
-with its cron expression and source path. Executing one is the operator's
-clock — cron, a systemd timer, an ACP client's own scheduler — launching
-the recipe above with the file's body as the prompt, one fresh session per
-occurrence. Tenon ships no clock, queue, or occurrence ledger.
+A task on a clock is the same recipe under cron, a systemd timer, or an
+ACP client's own scheduler, with the prompt kept wherever that scheduler
+reads it. Tenon has no authored schedule surface: a `schedules/` directory
+fails the gate with `schedules.removed`
+([ADR 0029](adr/0029-stop-driving-the-harness.md)).
 
 ## Staged agent filesystems
 
@@ -860,8 +850,9 @@ credential-free tests (fake harness processes; no live model calls) prove:
 7. An applied workspace is complete for a headless client: nothing a
    harness's headless mode or an ACP client needs is left to a tenon
    process, and `drift` is the fail-closed check before launch.
-8. Schedules validate and fingerprint identically for both harnesses and
-   appear in the catalog with their cron expression and source path.
+8. A `schedules/` directory fails the gate with a stable identifier, on
+   check and apply identically, so a removed surface is never silently
+   ignored.
 9. Staging produces a deterministic, credential-free, minimal runnable tree
    whose entrypoint verifies identity and fingerprint before a turn;
    preparation never mutates authored source, and publication is one rename
@@ -989,9 +980,10 @@ above:
 - Embedding the Claude Agent SDK or a hosted OpenAI agent runtime; driving
   a vendor's ACP adapter that is built on one is the relationship tenon has
   with the `claude` binary, not an embedding
-- A turn dispatcher, session queue, conversation state, or schedule clock
-  ([ADR 0029](adr/0029-stop-driving-the-harness.md)); a headless run is the
-  operator's client launched in an applied workspace
+- A turn dispatcher, session queue, conversation state, schedule clock, or
+  authored schedule surface
+  ([ADR 0029](adr/0029-stop-driving-the-harness.md)); a headless or
+  scheduled run is the operator's client launched in an applied workspace
 - Background or distributed schedule clocks, workflows, independently
   configured nested subagents, or deployment orchestration
 - Building OCI manifests or layers, publishing or signing images, or hosted

@@ -6,8 +6,7 @@ growth requires stated payment.
 
 - **Agent project** — a directory whose layout is the API: optional
   `instructions.md` plus conventional component directories (`skills/`,
-  `plugins/`, `tools/`, `subagents/`, `mcp/`, `schedules/`,
-  `harnesses/`). The directory name supplies the agent name. A directory is
+  `plugins/`, `tools/`, `subagents/`, `mcp/`, `harnesses/`). The directory name supplies the agent name. A directory is
   proven an agent project by a present `instructions.md` or by a supplied
   pin set whose expected source fingerprint matches it.
 - **Agent source** — the authored files of an agent project: portable,
@@ -22,8 +21,8 @@ growth requires stated payment.
   the resolved closure. It identifies and pins; it never lists components.
 - **Catalog** — the resolved capability inventory `tenon check --emit
   catalog` reports: skills (including plugin-merged ones, with their
-  descriptions), tools with their language, MCP servers, subagents, and
-  schedules, exactly as the load resolved them. It is derived from the
+  descriptions), tools with their language, MCP servers, and subagents,
+  exactly as the load resolved them. It is derived from the
   source, never authored: tenon emits a catalog only for a source that
   passes the gate and never accepts one as input, because an authored
   catalog would be precisely the second inventory the directory-is-the-API
@@ -83,7 +82,3 @@ growth requires stated payment.
   `enabled: false`, suppressing a plugin-declared server of that name without
   replacing it. An authored server of the same name instead wins outright,
   with a warning naming both sources.
-- **Schedule** — one Markdown file under `schedules/` whose path is its name,
-  whose frontmatter holds one five-field cron string, and whose body is the
-  task prompt. Apply validates and fingerprints it; only an explicit
-  foreground clock or trigger executes it.

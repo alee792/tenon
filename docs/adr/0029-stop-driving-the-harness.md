@@ -3,9 +3,10 @@
 - Status: accepted
 - Amends: [ADR 0001](0001-use-native-harnesses.md) (its optional turn
   dispatcher is withdrawn); [ADR 0008](0008-run-schedules-as-fresh-dispatch-tasks.md)
-  and [ADR 0011](0011-run-schedules-from-a-foreground-utc-clock.md) (their
-  authored schedule format stands; their execution — one-occurrence
-  dispatch and the foreground clock — is withdrawn);
+  and [ADR 0011](0011-run-schedules-from-a-foreground-utc-clock.md) are
+  superseded in full: the authored `schedules/` format went with its
+  executor once the maintainer decided a format nothing in tenon runs does
+  not earn its keep;
   [ADR 0006](0006-use-a-local-secretless-operation-broker.md) is unaffected
 - Supersedes: [ADR 0028](0028-drive-headless-turns-over-the-agent-client-protocol.md)
 - Research record: [docs/workbench/acp-alignment.md](../workbench/acp-alignment.md)
@@ -24,13 +25,14 @@ OpenClaw, an editor) in an applied workspace, after `tenon drift` — with
 `--pins` when a pin set gates the run — has proven it. Attribution is the
 fingerprint `check` or `drift` reports, recorded by the operator or loop
 beside the run's output. Approval is the client's policy or the harness's
-own authored mode. A schedule is run by the operator's clock with the
-authored file's body as the prompt.
+own authored mode. A task on a clock is the same launch under the
+operator's scheduler, with the prompt kept wherever that scheduler reads it.
 
-`schedules/` remains an authored surface: validated, fingerprinted, and
-listed by `tenon check --emit catalog` with cron and source path. Whether an
-authored format with no tenon executor earns its keep is reviewed on its
-own, not decided here.
+`schedules/` is removed with the executor. An authored format that nothing
+in tenon runs is a second inventory the author must maintain for no
+consumer; a `schedules/` directory now fails the gate with
+`schedules.removed`, so the removal is never silent. `internal/cron` and
+the `robfig/cron` dependency go with it.
 
 The improve module's `dispatch` role goes with the dispatcher. fanout and
 evolve take a `runner`: the caller's command, run once per task in the
@@ -70,12 +72,13 @@ record reads "the crossing" as ending at the applied workspace.
 ## Consequences
 
 - `internal/dispatch`, `internal/dispatchstate`, `internal/harness` (all
-  drivers), and `internal/schedule` are deleted; `internal/cron` stays for
-  schedule validation. The CLI loses `run` and `schedule` and their flags.
-- The measure's revision leg — "a revision applies, runs, and attributes
-  to its exact configuration without human hands" — is met by
-  `check`, `apply`, the operator's client, and a recorded fingerprint; the
-  north star's wording stands and "runs" no longer names a tenon command.
+  drivers), `internal/schedule`, `internal/cron`, and the schedules loader
+  are deleted, and `go.mod` loses `robfig/cron`. The CLI loses `run` and
+  `schedule` and their flags; the catalog loses its schedule entries.
+- The north star's measure named "scheduled" as a leg and "runs" as a
+  tenon act; [ADR 0030](0030-amend-the-measure-for-the-operators-client.md)
+  amends it on this record's evidence, as that file's change rule
+  requires.
 - `docs/product-spec.md` "Headless operation" becomes the recipe and its
   four rules; acceptance items 7 and 8 are restated; the known limitation
   is that headless runs are attributed by the operator.

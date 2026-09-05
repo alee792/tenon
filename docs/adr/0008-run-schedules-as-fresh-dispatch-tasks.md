@@ -1,6 +1,7 @@
 # ADR 0008: Dispatch schedules as fresh tasks
 
-- Status: accepted
+- Status: superseded by [ADR 0029](0029-stop-driving-the-harness.md),
+  which removed the schedules/ surface and its execution
 - Re-records: prototype ADR 0013 (alee792/hctl)
 - Count ceilings governed by:
   [ADR 0013](0013-bound-authored-projects-with-aggregate-budgets.md)

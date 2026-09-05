@@ -30,7 +30,6 @@ in frontmatter and a Markdown body. Everything else is a file you add:
 | `tools/*.ts`, `tools/*.py`, or `tools/NAME/tool.go` | one typed function |
 | a directory under `subagents/` | a subagent |
 | a Markdown file under `mcp/` | an MCP server the harness connects to |
-| a Markdown file under `schedules/` | a cron task |
 
 ```sh
 tenon apply . --harness claude   # or: --harness codex
@@ -182,7 +181,7 @@ distinct line and never has to infer failure from a missing summary. Apply
 records that fingerprint, and every dispatch lifecycle event carries it
 too. `check --emit catalog` additionally reports the resolved capability
 inventory the gate has already computed — skills, tools, MCP servers,
-subagents, schedules — but only for a source that passes, and tenon never
+subagents — but only for a source that passes, and tenon never
 accepts such an inventory as input. An instructions-free project is a
 legitimate candidate for a loop to try: a supplied pin set whose expected
 fingerprint matches the directory also proves the agent root, and the
@@ -202,7 +201,7 @@ requires only that each variant is a directory that applies
 deterministically. Automatic or unreviewed promotion of an agent-authored
 improvement is an explicit non-goal.
 
-## Run the same folder headless and on a schedule
+## Run the same folder headless
 
 **For** an operator running an agent without a person at a terminal — from
 a hook, a clock, a chat gateway, or an improvement loop.
@@ -229,17 +228,15 @@ a tool call: that is the client's policy (acpx's `--approve-all`,
 `--deny-all`, or `--policy` rules) or the harness's own permission mode,
 authored under `harnesses/<harness>/`.
 
-Schedules are Markdown files under `schedules/` whose frontmatter holds one
-five-field cron string and whose body is the task prompt. Apply validates
-and fingerprints them and `tenon check --emit catalog` lists them with
-their cron and source path; your clock — cron, a systemd timer, a gateway's
-scheduler — runs the recipe above with the body as the prompt, one fresh
-session per occurrence. See
+A task on a clock is the same recipe under cron, a systemd timer, or a
+gateway's scheduler, one fresh session per occurrence, with the prompt
+kept wherever that scheduler reads it. See
 [headless operation](product-spec.md#headless-operation).
 
 **The boundary.** Tenon proves the workspace and records the fingerprint;
-it does not drive the harness, queue input, keep conversation state, or
-run a clock ([ADR 0029](adr/0029-stop-driving-the-harness.md)). A loop that
+it does not drive the harness, queue input, keep conversation state, run
+a clock, or hold a schedule
+([ADR 0029](adr/0029-stop-driving-the-harness.md)). A loop that
 scores runs records the fingerprint `drift` or `check` reports beside each
 run's output, and never copies a harness's raw error text into a record.
 

@@ -130,8 +130,6 @@ Then, per issue #22:
 - Run [the five-minute journey](../README.md#the-first-five-minutes) verbatim.
 - Apply the same source to a second, unrelated workspace and confirm both
   apply cleanly.
-- `tenon check --emit catalog` against an agent with a schedule file,
-  confirming the schedule is listed with its cron and source path.
 - `tenon stage` an agent, per staging's ADR-0021-truthful state at cut
   time (Go, Python, and TypeScript tool agents all stage and serve).
 

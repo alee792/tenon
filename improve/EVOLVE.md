@@ -21,13 +21,13 @@ kept distinct: a **locus** is a component path (`skills/alpha`,
 the map from loci to genes — on disk, the agent directory. An agent
 project is already a folder of files, so `instructions.md`, each
 `skills/<name>/`, each `tools/<file>`, each `subagents/<name>.md` — and the
-same for `plugins/`, `mcp/`, `schedules/` — is a gene. Crossover is file-level
+same for `plugins/` and `mcp/` — is a gene. Crossover is file-level
 recombination, not text surgery: for every locus either parent holds, the
 offspring inherits one parent's copy of the gene there.
 
 **Which paths are genes is configuration, not a constant.** `spec.genes.dirs`
 and `spec.genes.files` default to `["skills", "tools", "subagents",
-"plugins", "mcp", "schedules", "harnesses"]` and `["instructions.md"]` —
+"plugins", "mcp", "harnesses"]` and `["instructions.md"]` —
 everything tenon's loader inventories today. They are a **mirror of what tenon's loader
 inventories**, and a mirror drifts: the day tenon recognises a new component
 directory, a search that does not know about it silently stops recombining
@@ -84,7 +84,7 @@ never writes to the source agent. `evolve best` prints a diff to review.
   "concurrency": 4,
   "timeout": "900s",
   "rng_seed": 1,
-  "genes": { "dirs": ["skills", "tools", "subagents", "plugins", "mcp", "schedules"], "files": ["instructions.md"] }
+  "genes": { "dirs": ["skills", "tools", "subagents", "plugins", "mcp"], "files": ["instructions.md"] }
 }
 ```
 
@@ -315,7 +315,7 @@ so that the API is what gets exercised.
 
 ## Is the gene grain right?
 
-For `skills/`, `tools/`, `subagents/`, `plugins/`, `mcp/`, and `schedules/`,
+For `skills/`, `tools/`, `subagents/`, `plugins/`, and `mcp/`,
 yes: those directories are already the unit their author reasons about, each
 one is independently valid, and splitting a skill from the scripts it calls
 would manufacture broken offspring for no gain.

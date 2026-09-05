@@ -44,11 +44,11 @@ managed tools that help review; it does not sandbox authored behavior or claim
 to make it safe.
 
 Operating an agent is a distinct role on the same artifact: credentials,
-integration packages, schedules, and staged filesystems for deployment,
+integration packages and staged filesystems for deployment,
 each behind its own explicit guardrails. The operator journey is where
 portability is proven — the same folder that runs interactively applies
-unchanged for a headless harness client, an operator's clock, or a pinned
-harness image, with existing OCI build systems owning image construction,
+unchanged for a headless harness client, a scheduler, or a pinned harness
+image, with existing OCI build systems owning image construction,
 publication, and deployment.
 
 We bet that agent definitions converge on open, file-based formats such as
@@ -70,9 +70,10 @@ lab-internal configuration instead of open files.
 
 The measure of the vision is the first five minutes, the last mile, and the
 next revision: a new author goes from an empty directory to a working agent
-inside their harness in five minutes; the same folder later runs headless,
-scheduled, or staged without edits; and a revision applies, runs, and
-attributes to its exact configuration without human hands.
+inside their harness in five minutes; the same folder later runs headless
+or staged, under any client, without edits; and a revision applies, runs
+under the operator's client, and attributes to its exact configuration
+without human hands.
 
 ## Boundary
 

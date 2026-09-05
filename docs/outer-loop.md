@@ -45,7 +45,7 @@ Code or Codex — owns the model loop, planning, approvals, and runtime
 context assembly, Weng's *inner* context layer. What tenon exposes to the
 outer loop is the **authored capability surface**: the durable,
 file-represented policy the harness reads before it starts thinking —
-instructions, skills, tools, subagents, connections, schedules. The loop
+instructions, skills, tools, subagents, connections. The loop
 edits that policy as files; the harness applies it at runtime.
 
 ## The units of lineage

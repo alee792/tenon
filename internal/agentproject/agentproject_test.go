@@ -238,24 +238,27 @@ func TestLoadRejectsOversizedInstructions(t *testing.T) {
 	requireErrorID(t, diags, "instructions.too-large")
 }
 
-// TestLoadAllowsEmptySchedules proves schedules/ is now an implemented,
-// optional component (ADR 0008): an empty schedules/ directory produces no
-// diagnostics and starts no clock. Every recognized component is implemented,
-// so there is no longer an unimplemented component to refuse.
-func TestLoadAllowsEmptySchedules(t *testing.T) {
-	root := writeAgent(t, "agent", validInstructions)
+// TestLoadRefusesSchedulesDir proves a schedules/ directory fails closed
+// with a stable identifier (ADR 0029): the surface is gone with its
+// executor, and ignoring the directory would leave an author believing a
+// cron task still exists.
+func TestLoadRefusesSchedulesDir(t *testing.T) {
+	root := writeAgent(t, "my-agent", validInstructions)
 	if err := os.Mkdir(filepath.Join(root, "schedules"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	p, diags, err := Load(root)
+	_, diags, err := Load(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p == nil || diags.HasErrors() {
-		t.Fatalf("an empty schedules/ must be valid: p=%v diags=%v", p, diags.All())
+	found := false
+	for _, d := range diags.All() {
+		if d.ID == "schedules.removed" && d.Path == "schedules" {
+			found = true
+		}
 	}
-	if len(p.Schedules) != 0 {
-		t.Fatalf("expected no schedules, got %d", len(p.Schedules))
+	if !found {
+		t.Fatalf("want schedules.removed naming schedules, got %v", diags.All())
 	}
 }
 

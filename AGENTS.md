@@ -48,4 +48,5 @@ implementation. When a specified behavior is in doubt, consult its tests and
 acceptance records; port intent, never code. Out of scope unless re-decided
 by ADR: evaluations, scoring, transcript retention, selection among
 revisions, lineage tracking, a marketplace, and network acquisition of
-components; a turn dispatcher, session state, or schedule clock (ADR 0029).
+components; a turn dispatcher, session state, a schedule clock, or an
+authored schedule surface (ADR 0029).

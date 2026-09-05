@@ -12,9 +12,11 @@ All notable changes to this project are documented in this file.
   ([ADR 0029](docs/adr/0029-stop-driving-the-harness.md)). Tenon sets a
   workspace up and proves it; running headless is the operator launching
   the harness's own headless mode or an Agent Client Protocol client
-  (acpx, OpenClaw, an editor) in the applied workspace, and a schedule is
-  run by the operator's clock. `schedules/` stays an authored, validated,
-  fingerprinted surface listed by `tenon check --emit catalog`.
+  (acpx, OpenClaw, an editor) in the applied workspace, and a task on a
+  clock is the same launch under the operator's scheduler.
+- The `schedules/` authored surface, with `internal/cron` and the
+  `robfig/cron` dependency. A `schedules/` directory now fails the gate
+  with `schedules.removed` rather than being silently ignored.
 - The improve module's `dispatch` role. fanout and evolve take a `runner`
   — the caller's command, run once per task in the workspace with the
   prompt in `FANOUT_TASK` — and score its exit code and output; nothing in

@@ -74,12 +74,6 @@ type (
 		Description string `json:"description"`
 		Effort      string `json:"effort,omitempty"`
 	}
-	catalogSchedule struct {
-		Kind   string `json:"kind"`
-		Name   string `json:"name"`
-		Cron   string `json:"cron"`
-		Source string `json:"source"`
-	}
 )
 
 // runCheck is the single gate over an agent project. Without --harness it is
@@ -261,7 +255,7 @@ func emitFingerprintFiles(p *agentproject.Project, jsonl bool, stdout io.Writer)
 
 // emitCapabilityCatalog renders the resolved capability inventory in one
 // fixed order — skills, tools, MCP servers (authored connections first, then
-// the plugin servers they may shadow), subagents, schedules — so a consumer
+// the plugin servers they may shadow), subagents — so a consumer
 // diffing two catalogs sees authored changes, not ordering noise. Every entry
 // is what Load already resolved: plugin-merged skills are indistinguishable
 // from root skills except by their source path, exactly as generation sees
@@ -315,14 +309,6 @@ func emitCapabilityCatalog(p *agentproject.Project, jsonl bool, stdout io.Writer
 		if err := emit(
 			catalogSubagent{Kind: "subagent", Name: s.Name, Description: s.Description, Effort: s.Effort},
 			line,
-		); err != nil {
-			return err
-		}
-	}
-	for _, s := range p.Schedules {
-		if err := emit(
-			catalogSchedule{Kind: "schedule", Name: s.Name, Cron: s.Cron, Source: s.SourcePath},
-			fmt.Sprintf("schedule %s (cron %q, %s)", s.Name, s.Cron, s.SourcePath),
 		); err != nil {
 			return err
 		}

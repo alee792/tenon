@@ -88,12 +88,9 @@ func TestFiveMinuteJourney(t *testing.T) {
 // either command on a failing project.
 func TestCheckReportsApplyFailuresWithoutMutating(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
-	// A schedule with a malformed cron fails check and apply identically.
+	// A removed schedules/ directory fails check and apply identically
+	// (schedules.removed, ADR 0029).
 	if err := os.Mkdir(filepath.Join(agent, "schedules"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(agent, "schedules", "bad.md"),
-		[]byte("---\ncron: not a cron\n---\n\nDo the thing.\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -304,7 +301,6 @@ type catalogEntryForTest struct {
 	Language    string `json:"language"`
 	Transport   string `json:"transport"`
 	Effort      string `json:"effort"`
-	Cron        string `json:"cron"`
 }
 
 // TestEmitCatalogReportsResolvedCapabilities proves --emit catalog reports the
@@ -319,7 +315,6 @@ func TestEmitCatalogReportsResolvedCapabilities(t *testing.T) {
 	agent := writeAgent(t, "my-agent", validInstructions)
 	writeFile(t, agent, "skills/vendor/SKILL.md", []byte(vendorSkillMD), 0o644)
 	writeFile(t, agent, "subagents/reviewer/instructions.md", []byte(subagentInstructionsWithEffort), 0o644)
-	writeFile(t, agent, "schedules/digest.md", []byte("---\ncron: 0 9 * * 1\n---\n\nSummarize the week.\n"), 0o644)
 	writeFile(t, agent, "mcp/catalog.md",
 		[]byte("---\ntype: streamable-http\nurl: https://example.com/mcp\n---\n"), 0o644)
 
@@ -364,10 +359,6 @@ func TestEmitCatalogReportsResolvedCapabilities(t *testing.T) {
 	server, ok := byName["mcp/catalog"]
 	if !ok || server.Transport != "streamable-http" || server.Source != "mcp/catalog.md" {
 		t.Fatalf("mcp entry = %+v, want the normalized transport and source path", server)
-	}
-	sched, ok := byName["schedule/digest"]
-	if !ok || sched.Cron != "0 9 * * 1" || sched.Source != "schedules/digest.md" {
-		t.Fatalf("schedule entry = %+v, want the cron and source path", sched)
 	}
 }
 

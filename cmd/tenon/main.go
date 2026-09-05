@@ -234,16 +234,6 @@ type errorOutcome struct {
 	Error   string `json:"error"`
 }
 
-// noJSONL names the commands that have no machine-readable stream at all —
-// schedule trigger and schedule run, whose output is prose lifecycle lines,
-// and which therefore have no stream for an outcome object to terminate.
-// They still route their failures through failEnv so the classification of
-// every exit lives in one place. mcp serve is the other exemption, for the
-// opposite reason: its stdout carries the MCP protocol, so it refuses
-// --format jsonl outright rather than write an outcome into a protocol
-// stream.
-const noJSONL = false
-
 // writeErrorOutcome terminates the jsonl stream with that object. A no-op in
 // prose mode, where the prose on stderr is the whole report.
 func writeErrorOutcome(jsonl bool, stdout, stderr io.Writer, msg string) {

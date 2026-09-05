@@ -1,6 +1,7 @@
 # ADR 0011: Run schedules from a foreground UTC clock
 
-- Status: accepted
+- Status: superseded by [ADR 0029](0029-stop-driving-the-harness.md),
+  which removed the schedules/ surface and its execution
 - Re-records: prototype ADR 0026 (alee792/hctl)
 
 ## Plain-English summary

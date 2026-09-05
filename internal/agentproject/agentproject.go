@@ -56,9 +56,6 @@ type Project struct {
 	// Connections are the validated standalone native MCP connections
 	// (ADR 0016), sorted by name.
 	Connections []Connection
-	// Schedules are the validated root schedules/ entries (ADR 0008), sorted
-	// by name. Apply validates and fingerprints them but starts no clock.
-	Schedules []Schedule
 	// HarnessFiles are the validated harness-specific files, keyed by
 	// harness name ("claude", "codex") and sorted by RelPath within each.
 	HarnessFiles map[string][]HarnessFile
@@ -199,8 +196,7 @@ func loadWithProof(dir, expectedFingerprint string, allowUnproven bool) (*Projec
 	p.Connections = connections
 	p.PluginServers = composedPluginServers
 
-	schedules, scheduleInputs := loadSchedules(root, diags)
-	p.Schedules = schedules
+	checkRemovedSchedulesDir(root, diags)
 
 	checkNameCollisions(tools, subagents, diags)
 
@@ -214,7 +210,6 @@ func loadWithProof(dir, expectedFingerprint string, allowUnproven bool) (*Projec
 	inputs = append(inputs, toolInputs...)
 	inputs = append(inputs, harnessInputs...)
 	inputs = append(inputs, connectionInputs...)
-	inputs = append(inputs, scheduleInputs...)
 	p.FingerprintEntries, p.Fingerprint = computeFingerprint(inputs)
 
 	// An instructions-free root is proven only by a supplied manifest whose
@@ -423,4 +418,16 @@ func computeFingerprint(inputs []sourceInput) ([]FingerprintEntry, string) {
 		})
 	}
 	return entries, fmt.Sprintf("sha256:%x", h.Sum(nil))
+}
+
+// checkRemovedSchedulesDir fails closed when a schedules/ directory is
+// present: the authored schedule surface was removed with the executor that
+// ran it (ADR 0029), so silently ignoring the directory would leave an author
+// believing a cron task still exists. Running a prompt on a clock is the
+// operator's own job now, with the prompt kept wherever the operator likes.
+func checkRemovedSchedulesDir(root string, diags *diagnostics.List) {
+	if info, err := os.Lstat(filepath.Join(root, "schedules")); err == nil && (info.IsDir() || info.Mode()&os.ModeSymlink != 0) {
+		diags.Errorf("schedules.removed", "schedules",
+			"the schedules/ directory is no longer an authored surface (ADR 0029): tenon runs no clock, so move each prompt to wherever your own scheduler reads it and remove the directory")
+	}
 }
